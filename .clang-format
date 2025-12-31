@@ -1,0 +1,9 @@
+BreakConstructorInitializers: BeforeComma
+AlwaysBreakAfterDefinitionReturnType: All
+IndentWidth: 2
+UseTab: Never
+TabWidth: 2
+ContinuationIndentWidth: 2
+ColumnLimit: 77
+PointerAlignment: Left
+DerivePointerAlignment: false
