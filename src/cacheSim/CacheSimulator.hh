@@ -2,20 +2,30 @@
 #include "../types.hh"
 #include "CacheLine.hh"
 #include "Prefetcher.hh"
+#include "base.hh"
 #include <cassert>
 #include <climits>
 #include <cstddef>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 namespace cacheSim {
 
-class CacheSimulator {
+class CacheSimulator : SimObject {
 public:
   struct Stats {
     size_t accesses = 0;
     size_t hits = 0;
     size_t misses = 0;
+    double
+    hitRate() const {
+      return accesses ? static_cast<double>(hits) / accesses : 0.0;
+    }
+    double
+    missRate() const {
+      return 1.0 - hitRate();
+    }
   };
 
   CacheSimulator(size_t size_bytes, size_t line_bytes, size_t assoc = 1);
@@ -24,10 +34,19 @@ public:
 
   tint_t read_req(addr_t addr, word_t* ret);
   tint_t write_req(addr_t addr, word_t data, uint8_t mask);
-  // TODO:
-  // tick_t
-  // Query stats
+  void flush_all();
+
   Stats stats() const;
+  auto stats_map() const -> std::unordered_map<std::string, double> override;
+  auto
+  config_map() const -> std::unordered_map<std::string, size_t> override;
+
+  auto reset_stats() -> void override;
+
+  size_t size() const;
+  size_t assoc() const;
+  size_t blksize() const;
+  tint_t latency() const;
 
 protected:
   // Access with externally provided stamp, return true on hit

@@ -32,7 +32,8 @@ floorLog2(size_t x) {
   return static_cast<size_t>(std::bit_width(x) - 1);
 }
 
-#define CACHE false // true
+// #define CACHE true
+#define CACHE false
 #define SIMPRINTFN(Cat, Fmt, ...) \
   do { \
     if (Cat) \

@@ -4,6 +4,9 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <iterator>
+#include <string>
+#include <unordered_map>
 
 using namespace cacheSim;
 
@@ -40,6 +43,23 @@ CacheSimulator::blockAddrOf(addr_t addr) const {
   return addr & ~(lineBytes_ - 1);
 }
 
+size_t
+CacheSimulator::size() const {
+  return sets_ * assoc_ * lineBytes_;
+}
+size_t
+CacheSimulator::assoc() const {
+  return assoc_;
+}
+size_t
+CacheSimulator::blksize() const {
+  return lineBytes_;
+}
+tint_t
+CacheSimulator::latency() const {
+  return hitTime_;
+}
+
 tint_t
 CacheSimulator::read_req(addr_t addr, word_t* ret) {
   auto blk = access(addr);
@@ -54,6 +74,16 @@ CacheSimulator::read_req(addr_t addr, word_t* ret) {
     tint_t latency = hitTime_ + handle_fill(blk, addr);
     *ret = blk->atAligned(off);
     return latency;
+  }
+}
+
+void
+CacheSimulator::flush_all() {
+  SIMPRINTFN(CACHE, "Flush All");
+  for (auto& s : setsArr_) {
+    for (auto& l : s) {
+      l.invalidate();
+    }
   }
 }
 
@@ -145,4 +175,33 @@ CacheSimulator::handle_prefetch(addr_t addr, tick_t stamp) {
 CacheSimulator::Stats
 CacheSimulator::stats() const {
   return stats_;
+}
+
+auto
+CacheSimulator::stats_map() const
+  -> std::unordered_map<std::string, double> {
+  std::unordered_map<std::string, double> m{};
+  m["accesses"] = stats_.accesses;
+  m["hits"] = stats_.hits;
+  m["misses"] = stats_.misses;
+  m["hit_rate"] =
+    stats_.accesses > 0 ? (double)stats_.hits / stats_.accesses : 0.0;
+  m["miss_rate"] = 1.0 - m["hit_rate"];
+  return m;
+}
+
+auto
+CacheSimulator::config_map() const
+  -> std::unordered_map<std::string, size_t> {
+  std::unordered_map<std::string, size_t> m{};
+  m["size"] = size();
+  m["assoc"] = assoc();
+  m["blkSize"] = blksize();
+  m["latency"] = static_cast<size_t>(latency());
+  return m;
+}
+
+auto
+CacheSimulator::reset_stats() -> void {
+  stats_ = Stats{0, 0, 0};
 }
