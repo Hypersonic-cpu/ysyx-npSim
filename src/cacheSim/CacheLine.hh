@@ -2,6 +2,7 @@
 #include "../types.hh"
 #include <cassert>
 #include <vector>
+#include <iostream>
 
 namespace cacheSim {
 
@@ -16,12 +17,14 @@ public:
   CacheLine() = delete;
   CacheLine(size_t line_size)
       : lineSize_(line_size)
+      , tag(0)
+      , valid(false)
       , data(line_size >> WordShift, 0) {
-    invalidate();
   }
 
   void
   invalidate() {
+    // SIMPRINTFN(CACHE, "Invalidating tag %x", tag);
     this->tag = 0;
     this->stamp = 0;
     this->valid = false;
