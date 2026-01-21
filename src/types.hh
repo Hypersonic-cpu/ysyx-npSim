@@ -11,7 +11,7 @@ using tint_t = uint32_t; // time interval
 
 constexpr addr_t WordShift{2};
 
-extern tick_t curr_tick();
+extern tick_t curr_tick() noexcept;
 
 extern tint_t pmem_read(addr_t addr, addr_t* ret, bool bfirst);
 extern tint_t pmem_write(addr_t addr, word_t data, unsigned char mask, bool bfirst);
