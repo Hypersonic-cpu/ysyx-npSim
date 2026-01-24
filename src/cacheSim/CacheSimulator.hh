@@ -3,6 +3,8 @@
 #include "CacheLine.hh"
 #include "Prefetcher.hh"
 #include "base.hh"
+#include "stats.hh"
+#include "debug.hh"
 #include <cassert>
 #include <climits>
 #include <cstddef>
@@ -14,19 +16,43 @@ namespace cacheSim {
 
 class CacheSimulator : SimObject {
 public:
-  struct Stats {
+  // Refactored Stats inner class
+  struct CacheStats : public StatsBase {
+    CacheStats() : StatsBase("iCache") {}
     size_t accesses = 0;
     size_t hits = 0;
     size_t misses = 0;
-    double
-    hitRate() const {
+    
+    double hitRate() const {
       return accesses ? static_cast<double>(hits) / accesses : 0.0;
     }
-    double
-    missRate() const {
+    double missRate() const {
       return 1.0 - hitRate();
     }
-  };
+
+    json gen_json() const override {
+        json j;
+        j["accesses"] = accesses;
+        j["hits"] = hits;
+        j["misses"] = misses;
+        j["miss_rate"] = missRate();
+        return j;
+    }
+
+    void dump_stats(std::ostream& os = std::cout) const override {
+        os << "iCache Stats:\n";
+        os << "  Accesses: " << accesses << "\n";
+        os << "  Hits: " << hits << "\n";
+        os << "  Misses: " << misses << "\n";
+        os << "  Miss Rate: " << missRate() << "\n";
+    }
+
+    void reset_stats() override {
+        accesses = 0;
+        hits = 0;
+        misses = 0;
+    }
+  } stats;
 
   CacheSimulator(size_t size_bytes, size_t line_bytes, size_t assoc = 1);
   // Trigger prefetch logic; returns whether a prefetch was issued
@@ -36,12 +62,14 @@ public:
   tint_t write_req(addr_t addr, word_t data, uint8_t mask);
   void flush_all();
 
-  Stats stats() const;
+  // Legacy stats accessors removed/redirected
   auto stats_map() const -> std::unordered_map<std::string, double> override;
   auto
   config_map() const -> std::unordered_map<std::string, size_t> override;
 
   auto reset_stats() -> void override;
+
+protected:
 
   size_t size() const;
   size_t assoc() const;
@@ -62,7 +90,6 @@ protected:
   tint_t const hitTime_;
 
   std::vector<std::vector<CacheLine>> setsArr_;
-  Stats stats_;
   std::unique_ptr<Prefetcher> prefetcher_;
   addr_t tagOf(addr_t addr) const;
   size_t setIndexOf(addr_t addr) const;

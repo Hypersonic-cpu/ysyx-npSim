@@ -67,10 +67,12 @@ CacheSimulator::read_req(addr_t addr, word_t* ret) {
   assert(blk);
   if (blk->isValid()) {
     // hit
+    DPRINTF(Cache, "Hit: Addr=0x%x Tag=0x%x Set=%lu", addr, tagOf(addr), setIndexOf(addr));
     *ret = blk->atAligned(off);
     return hitTime_;
   } else {
     // TODO: if dirty, write back;
+    DPRINTF(Cache, "Miss: Addr=0x%x Tag=0x%x Set=%lu", addr, tagOf(addr), setIndexOf(addr));
     tint_t latency = hitTime_ + handle_fill(blk, addr);
     *ret = blk->atAligned(off);
     return latency;
@@ -79,7 +81,7 @@ CacheSimulator::read_req(addr_t addr, word_t* ret) {
 
 void
 CacheSimulator::flush_all() {
-  SIMPRINTFN(CACHE, "Flush All");
+  DPRINTF(Cache, "Flush All");
   for (auto& s : setsArr_) {
     for (auto& l : s) {
       l.invalidate();
@@ -117,7 +119,7 @@ CacheSimulator::handle_fill(CacheLine* blk, addr_t addr) {
 
 CacheLine*
 CacheSimulator::access(addr_t addr) {
-  ++stats_.accesses;
+  ++stats.accesses;
   addr_t tag = tagOf(addr);
   size_t si = setIndexOf(addr);
   auto& set = setsArr_.at(si);
@@ -127,20 +129,20 @@ CacheSimulator::access(addr_t addr) {
     auto& l = set.at(i);
     if (l.isValid() && l.getTag() == tag) {
       l.stamp = curr_tick();
-      ++stats_.hits;
-      SIMPRINTFN(CACHE, "Cache hit : tag %x set %lu", tag, si);
+      ++stats.hits;
+      // DPRINTF(Cache, "Cache hit : tag %x set %lu", tag, si);
       return &l;
     }
   }
 
   // miss: replace LRU
-  ++stats_.misses;
+  ++stats.misses;
   auto it = std::min_element(set.begin(), set.end(),
                              [](const CacheLine& a, const CacheLine& b) {
                                return a.stamp < b.stamp;
                              });
-  SIMPRINTFN(CACHE, "Cache miss: tag %x set %lu repl tag %x", tag, si,
-             it->getTag());
+  // DPRINTF(Cache, "Cache miss: tag %x set %lu repl tag %x", tag, si,
+  //            it->getTag());
   it->invalidate();
   return &(*it);
 }
@@ -172,20 +174,17 @@ CacheSimulator::handle_prefetch(addr_t addr, tick_t stamp) {
   return true;
 }
 
-CacheSimulator::Stats
-CacheSimulator::stats() const {
-  return stats_;
-}
+// CacheSimulator::Stats removed
 
 auto
 CacheSimulator::stats_map() const
   -> std::unordered_map<std::string, double> {
   std::unordered_map<std::string, double> m{};
-  m["accesses"] = stats_.accesses;
-  m["hits"] = stats_.hits;
-  m["misses"] = stats_.misses;
+  m["accesses"] = stats.accesses;
+  m["hits"] = stats.hits;
+  m["misses"] = stats.misses;
   m["hit_rate"] =
-    stats_.accesses > 0 ? (double)stats_.hits / stats_.accesses : 0.0;
+    stats.accesses > 0 ? (double)stats.hits / stats.accesses : 0.0;
   m["miss_rate"] = 1.0 - m["hit_rate"];
   return m;
 }
@@ -203,5 +202,5 @@ CacheSimulator::config_map() const
 
 auto
 CacheSimulator::reset_stats() -> void {
-  stats_ = Stats{0, 0, 0};
+  stats.reset_stats();
 }
