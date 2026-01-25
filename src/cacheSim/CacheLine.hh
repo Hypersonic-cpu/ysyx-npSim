@@ -19,7 +19,8 @@ public:
       : lineSize_(line_size)
       , tag(0)
       , valid(false)
-      , data(line_size >> WordShift, 0) {
+      , data(line_size >> WordShift, 0)
+      , stamp(0) {
   }
 
   void
