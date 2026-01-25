@@ -1,5 +1,5 @@
 #pragma once
-#include "../trace.hh"
+#include "trace.hh"
 #include "pipeSim/IOQueue.hh"
 #include "stats.hh"
 

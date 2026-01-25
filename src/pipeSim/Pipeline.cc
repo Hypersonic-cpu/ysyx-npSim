@@ -1,5 +1,6 @@
 #include "Pipeline.hh"
 #include "debug.hh"
+#include "trace.hh"
 #include "types.hh"
 #include <algorithm>
 
@@ -60,20 +61,20 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
   DPRINTF(Pipeline, "  Exec: %lu -> %lu", exec_start0, exec_end);
 
   // 4. MEM Stage
-  bool is_load = (inst.src_mem != 0);
-  bool is_store = (inst.dst_mem != 0);
+  bool is_load = inst.mem_op == trace::MemOp::Load;
+  bool is_store = inst.mem_op == trace::MemOp::Store;
   tint_t mem_duration = 1;
   tick_t mem_avail = exec_end;
   memst_queue_.auto_dequeue(exec_end);
   if (is_load) {
-    if (memst_queue_.contains(inst.src_mem)) {
+    if (memst_queue_.contains(inst.mem_addr)) {
       // Hit buffer, 1 cycle lat
       // TODO: Only word read/write can hit buffer.
-      DPRINTF(LDQueue, "  load @ %x buffer hit", inst.src_mem);
+      DPRINTF(LDQueue, "  load @ %x buffer hit", inst.mem_addr);
     } else {
       mem_duration = load_lat;
       DPRINTF(LDQueue, "  load @ %x buffer miss, finish @T %lu",
-              inst.src_mem, mem_avail + mem_duration);
+              inst.mem_addr, mem_avail + mem_duration);
     }
   } else if (is_store) {
     // TODO: coalesce multiple store to the same addr
@@ -83,7 +84,7 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
       memst_queue_.auto_dequeue(mem_avail);
       DPRINTF(STQueue, "  store buffer full, next avail @T %lu", mem_avail);
     }
-    memst_queue_.enqueue(exec_end, inst.dst_mem);
+    memst_queue_.enqueue(exec_end, inst.mem_addr);
   }
   tick_t mem_end = mem_avail + mem_duration;
   DPRINTF(Mem, "  %lu -> %lu", mem_avail, mem_end);
