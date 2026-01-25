@@ -31,11 +31,11 @@ curr_tick() noexcept {
 }
 
 // Configuration parameters
-static tint_t mem_latency = 40;
-static tint_t mem_bstlat = 8;
+static tint_t mem_latency = 30;
+static tint_t mem_bstlat = 6;
 static std::string trace_file;
-static size_t l1i_size = 32 * 1024;
-static size_t l1i_blksize = 64;
+static size_t l1i_size = 1 * 1024;
+static size_t l1i_blksize = 16;
 static size_t l1i_assoc = 8;
 static size_t max_insts = 0;
 static std::string out_file;
@@ -219,10 +219,9 @@ main(int argc, char** argv) {
 
     // BPU Predict
     bool pred_taken = false;
-    // TODO: 每个周期都预测嘛？
-    // if (inst.is_branch) {
-    //   pred_taken = bpu.predict(inst.pc);
-    // }
+    if (inst.is_branch) {
+      pred_taken = bpu.predict(inst.pc);
+    }
 
     bool real_taken = (inst.br_taken != 0);
     bool mispred = false;

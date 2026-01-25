@@ -85,15 +85,14 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
     }
   } else if (is_store) {
     // TODO: coalesce multiple store to the same addr
-    mem_duration = store_lat;
     if (memst_queue_.is_full()) {
       mem_avail = std::max(mem_avail, memst_queue_.next_avaiable());
       memst_queue_.auto_dequeue(mem_avail);
       DPRINTF(STQueue, "  store buffer full, next avail @T %lu", mem_avail);
     }
-    memst_queue_.enqueue(exec_end, inst.mem_addr);
+    memst_queue_.enqueue(exec_end + store_lat, inst.mem_addr);
   }
-  tick_t mem_end = mem_avail + mem_duration;
+  tick_t mem_end = mem_avail + 1 + mem_duration;
   DPRINTF(Mem, "  %lu -> %lu", mem_avail, mem_end);
 
   // 5. WB Stage
