@@ -44,5 +44,5 @@ build/%.o: ./src/%.cc
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-# clean:
-# 	rm -f npsim $(OBJS)
+clean:
+	rm -rf build/*

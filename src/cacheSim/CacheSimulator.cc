@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
-#include <iterator>
 #include <string>
 #include <unordered_map>
 
@@ -113,7 +112,6 @@ CacheSimulator::handle_fill(CacheLine* blk, addr_t addr) {
   blk->setTag(tagOf(addr));
   blk->setValid();
   blk->stamp = curr_tick();
-  // SIMPRINTFN(CACHE, "Cache fill: tag %x", tagOf(addr));
   return latency;
 }
 
@@ -130,7 +128,6 @@ CacheSimulator::access(addr_t addr) {
     if (l.isValid() && l.getTag() == tag) {
       l.stamp = curr_tick();
       ++stats.hits;
-      // DPRINTF(Cache, "Cache hit : tag %x set %lu", tag, si);
       return &l;
     }
   }
@@ -141,8 +138,6 @@ CacheSimulator::access(addr_t addr) {
                              [](const CacheLine& a, const CacheLine& b) {
                                return a.stamp < b.stamp;
                              });
-  // DPRINTF(Cache, "Cache miss: tag %x set %lu repl tag %x", tag, si,
-  //            it->getTag());
   it->invalidate();
   return &(*it);
 }
@@ -173,8 +168,6 @@ CacheSimulator::handle_prefetch(addr_t addr, tick_t stamp) {
   // it->stamp = stamp;
   return true;
 }
-
-// CacheSimulator::Stats removed
 
 auto
 CacheSimulator::stats_map() const
