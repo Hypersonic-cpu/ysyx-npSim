@@ -2,6 +2,10 @@
 
 #include <string>
 #include <unordered_map>
+#include <iostream>
+#include "nlohmann/json.hpp"
+
+using json = nlohmann::ordered_json;
 
 class SimObject {
 private:
@@ -13,10 +17,8 @@ public:
       : name_{name_in} {}
   virtual ~SimObject() = default;
 
-  virtual auto
-  stats_map() const -> std::unordered_map<std::string, double> = 0;
-  virtual auto
-  config_map() const -> std::unordered_map<std::string, size_t> = 0;
+  virtual json stats_json() const = 0;
+  virtual json config_json() const = 0;
 
   auto
   name() const {
@@ -24,4 +26,5 @@ public:
   }
 
   virtual auto reset_stats() -> void = 0;
+  virtual void dump_stats(std::ostream& os = std::cout) const = 0;
 };

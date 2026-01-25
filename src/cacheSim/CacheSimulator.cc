@@ -11,7 +11,8 @@ using namespace cacheSim;
 
 CacheSimulator::CacheSimulator(size_t size_bytes, size_t line_bytes,
                                size_t assoc)
-    : lineBytes_(line_bytes)
+    : SimObject("iCache")
+    , lineBytes_(line_bytes)
     , offsetBits_(floorLog2(line_bytes))
     , sets_(size_bytes / (line_bytes * assoc))
     , assoc_(assoc)
@@ -169,28 +170,19 @@ CacheSimulator::handle_prefetch(addr_t addr, tick_t stamp) {
   return true;
 }
 
-auto
-CacheSimulator::stats_map() const
-  -> std::unordered_map<std::string, double> {
-  std::unordered_map<std::string, double> m{};
-  m["accesses"] = stats.accesses;
-  m["hits"] = stats.hits;
-  m["misses"] = stats.misses;
-  m["hit_rate"] =
-    stats.accesses > 0 ? (double)stats.hits / stats.accesses : 0.0;
-  m["miss_rate"] = 1.0 - m["hit_rate"];
-  return m;
+json
+CacheSimulator::stats_json() const {
+  return stats.gen_json();
 }
 
-auto
-CacheSimulator::config_map() const
-  -> std::unordered_map<std::string, size_t> {
-  std::unordered_map<std::string, size_t> m{};
-  m["size"] = size();
-  m["assoc"] = assoc();
-  m["blkSize"] = blksize();
-  m["latency"] = static_cast<size_t>(latency());
-  return m;
+json
+CacheSimulator::config_json() const {
+  json j;
+  j["size"] = size();
+  j["assoc"] = assoc();
+  j["blkSize"] = blksize();
+  j["latency"] = static_cast<size_t>(latency());
+  return j;
 }
 
 auto

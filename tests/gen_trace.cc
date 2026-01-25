@@ -16,7 +16,8 @@ int main() {
     // Helper lambda to clear and push
     auto add_inst = [&](word_t pc, uint8_t is_br, uint8_t taken,
                         std::vector<uint8_t> dst_regs, std::vector<uint8_t> src_regs,
-                        std::vector<word_t> dst_mem, std::vector<word_t> src_mem) {
+                        std::vector<word_t> dst_mem, std::vector<word_t> src_mem,
+                        uint8_t sys_op = 0) {
         TraceInst t;
         std::memset(&t, 0, sizeof(t));
         t.pc = pc;
@@ -24,11 +25,14 @@ int main() {
         t.br_taken = taken;
         if (!dst_regs.empty()) t.dst_reg = dst_regs[0];
         for(size_t i=0; i<src_regs.size() && i<2; ++i) t.src_reg[i] = src_regs[i];
-        if (!dst_mem.empty()) t.dst_mem = dst_mem[0];
-        if (!src_mem.empty()) t.src_mem = src_mem[0];
+        if (!dst_mem.empty()) t.mem_addr = dst_mem[0];
+        else if (!src_mem.empty()) t.mem_addr = src_mem[0];
+        
+        t.mem_op = !dst_mem.empty() ? 2 : (!src_mem.empty() ? 1 : 0);
+        t.sys_op = sys_op;
 
         std::cout << "Inst: PC=" << std::hex << t.pc << " DstReg=" << (int)t.dst_reg
-                  << " DstMem=" << t.dst_mem << std::dec << " OffsetOfDstReg=" << offsetof(TraceInst, dst_reg) << "\n";
+                  << " MemAddr=" << t.mem_addr << " SysOp=" << (int)t.sys_op << "\n";
 
         trace.push_back(t);
     };
@@ -51,6 +55,9 @@ int main() {
 
     // 5. ALU: Target (at 0x1014)
     add_inst(0x1014, 0, 0, {6}, {}, {}, {});
+
+    // 6. SysDumpStats
+    add_inst(0x1018, 0, 0, {}, {}, {}, {}, 2 /* SysDumpStats */);
 
     std::cout << "DEBUG: sizeof(TraceInst)=" << sizeof(TraceInst) << "\n";
     std::cout << "Offset dst_reg: " << offsetof(TraceInst, dst_reg) << "\n";

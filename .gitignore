@@ -6,3 +6,4 @@
 *.xz
 simout/
 .zed/
+build/
