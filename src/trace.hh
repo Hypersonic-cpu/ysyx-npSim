@@ -1,29 +1,38 @@
 #pragma once
-#include "types.hh"
+
+#ifdef __cplusplus
 #include <cstdint>
 #include <fstream>
-#include <vector>
 
 namespace trace {
+#else
+#include <stdint.h>
+#endif
+
+/** NEMU visible */
+enum MemOp { None = 0, Load = 1, Store = 2 };
 
 #pragma pack(push, 1)
 struct TraceInst {
-    word_t pc;
-    uint8_t is_branch;      // 0: No, 1: Yes
-    uint8_t br_taken;       // 0: Not Taken, 1: Taken
-    uint8_t dst_reg;        // 0 if unused
-    uint8_t src_reg[2];     // 0 if unused
-    word_t dst_mem;         // 0 if unused
-    word_t src_mem;         // 0 if unused
+  /*  3: 0 */ uint32_t pc;
+  /*  7: 4 */ uint32_t mem_addr;
+  /*     8 */ uint8_t mem_op;     // 0: No Mem Op, 1: Load, 2: Store
+  /*     9 */ uint8_t is_branch;  // 0: No, 1: Yes
+  /*    10 */ uint8_t br_taken;   // 0: Not Taken, 1: Taken
+  /*    11 */ uint8_t dst_reg;    // 0 if unused
+  /* 13:12 */ uint8_t src_reg[2]; // 0 if unused
 };
 #pragma pack(pop)
+/** NEMU visible end */
 
+#ifdef __cplusplus
 class TraceReader {
 public:
-    TraceReader(const char* filename);
-    bool next(TraceInst& inst);
-private:
-    std::ifstream file_;
-};
+  TraceReader(const char* filename);
+  bool next(TraceInst& inst);
 
+private:
+  std::ifstream file_;
+};
 }
+#endif
