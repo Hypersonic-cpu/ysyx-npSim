@@ -1,8 +1,8 @@
 #pragma once
 
+#include <string>
 #ifdef __cplusplus
 #include <cstdint>
-#include <fstream>
 
 namespace trace {
 #else
@@ -31,11 +31,14 @@ struct TraceInst {
 #ifdef __cplusplus
 class TraceReader {
 public:
-  TraceReader(const char* filename);
+  TraceReader(const std::string& filename);
+  ~TraceReader();
   bool next(TraceInst& inst);
 
 private:
-  std::ifstream file_;
+  static bool isxz(const std::string& filename);
+  // Order matters (Ctor)
+  FILE* file_;
 };
 }
 #endif

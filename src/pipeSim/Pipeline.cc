@@ -19,20 +19,27 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
           inst.pc, fetch_lat, load_lat, store_lat, is_mispred);
 
   // 1. IF Stage
+  // iCache hit time is covered by fetch_lat
+  // [0] ## BLOCKED ## [ ] [ ] [ ]
+  // [1]    INSERT   ^ [*]
   fetch_queue_.auto_dequeue(start_tick_);
   auto fetch_avail = start_tick_;
   if (fetch_queue_.is_full()) {
+    // Blocked. Delay start time until available
     fetch_avail = std::max(fetch_avail, fetch_queue_.next_avaiable());
-    fetch_queue_.auto_dequeue(fetch_avail);
+    fetch_queue_.auto_dequeue(fetch_avail); // prevent capacity overflow
     DPRINTF(IFQueue, "  IFQ Full, next avail @T %lu", fetch_avail);
   }
-  auto fetch_end = fetch_avail + fetch_lat;
-  auto fetch_stalls = fetch_avail - start_tick_;
+
+  auto fetch_start = std::max(fetch_avail, fetch_queue_.last_poptime());
+  auto fetch_end = fetch_start + fetch_lat;
+  auto fetch_stalls = fetch_start - start_tick_;
+  DPRINTF(Pipeline, "  Fetch: %lu -> %lu", start_tick_, fetch_end);
+
   start_tick_ = fetch_avail + 1;
   fetch_queue_.enqueue(fetch_end, inst.pc);
 
   stats.stalls += fetch_stalls;
-  DPRINTF(Pipeline, "  Fetch: %lu -> %lu", start_tick_, fetch_end);
 
   // 2. ID Stage
   tick_t decode_end = fetch_end + 1;
@@ -61,8 +68,8 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
   DPRINTF(Pipeline, "  Exec: %lu -> %lu", exec_start0, exec_end);
 
   // 4. MEM Stage
-  bool is_load = inst.mem_op == trace::MemOp::Load;
-  bool is_store = inst.mem_op == trace::MemOp::Store;
+  bool is_load = inst.mem_op == trace::MemOp::MemLoad;
+  bool is_store = inst.mem_op == trace::MemOp::MemStore;
   tint_t mem_duration = 1;
   tick_t mem_avail = exec_end;
   memst_queue_.auto_dequeue(exec_end);
