@@ -1,11 +1,12 @@
 #pragma once
+#include "base.hh"
 #include "trace.hh"
 #include "pipeSim/IOQueue.hh"
 #include "stats.hh"
 
 namespace pipeSim {
 
-class Pipeline {
+class Pipeline : public SimObject {
 public:
   struct PipelineStats : public StatsBase {
     PipelineStats()
@@ -51,7 +52,8 @@ public:
   Pipeline() = delete;
 
   Pipeline(size_t ifq_size, size_t ldq_size, size_t stq_size)
-      : start_tick_(1)
+      : SimObject("Pipeline")
+      , start_tick_(1)
       , fetch_queue_(ifq_size)
       , memld_queue_(ldq_size)
       , memst_queue_(stq_size) {}
@@ -76,6 +78,31 @@ public:
   size_t
   get_total_stalls() const {
     return stats.stalls;
+  }
+
+  // SimObject Interface
+  json
+  stats_json() const override {
+    return stats.gen_json();
+  }
+
+  json
+  config_json() const override {
+    json j;
+    j["ifq_size"] = fetch_queue_.capacity();
+    j["ldq_size"] = memld_queue_.capacity();
+    j["stq_size"] = memst_queue_.capacity();
+    return j;
+  }
+
+  void
+  reset_stats() override {
+    stats.reset_stats();
+  }
+
+  void
+  dump_stats(std::ostream& os = std::cout) const override {
+    stats.dump_stats(os);
   }
 
 protected:

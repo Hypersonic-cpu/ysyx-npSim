@@ -22,6 +22,11 @@ public:
       : entries(size)
       , queue{} {}
 
+  size_t
+  capacity() const {
+    return entries;
+  }
+
   void
   enqueue(tick_t finish, addr_t addr) {
     assert(!is_full());

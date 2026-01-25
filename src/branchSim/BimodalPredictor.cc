@@ -3,7 +3,8 @@
 using namespace branchSim;
 
 BimodalPredictor::BimodalPredictor(size_t entries_pow2)
-    : mask_((1 << entries_pow2) - 1)
+    : BranchPredictor("BimodalPredictor")
+    , mask_((1 << entries_pow2) - 1)
     , table_(1 << entries_pow2, 1) {} // Init to Weak Not Taken (1)
 
 bool

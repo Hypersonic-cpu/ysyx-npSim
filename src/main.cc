@@ -3,10 +3,13 @@
 #include <fstream>
 #include <getopt.h>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <vector>
 
+#include "base.hh"
 #include "branchSim/BranchPredictor.hh"
 #include "cacheSim/CacheSimulator.hh"
 #include "debug.hh"
@@ -36,6 +39,7 @@ static size_t l1i_blksize = 64;
 static size_t l1i_assoc = 8;
 static size_t max_insts = 0;
 static std::string out_file;
+static std::vector<SimObject*> simlist{};
 
 // Dummy pmem_read for CacheSimulator
 tint_t
@@ -122,6 +126,49 @@ parse_args(int argc, char* argv[]) {
   return 0;
 }
 
+#include "nlohmann/json.hpp"
+
+using json = nlohmann::ordered_json;
+
+inline json
+collect_stats_json(const std::vector<SimObject*>& simlist) {
+  json stats_obj;
+  for (const auto* obj : simlist) {
+    stats_obj[obj->name()] = obj->stats_json();
+  }
+  return stats_obj;
+}
+
+inline json
+collect_config_json(const std::vector<SimObject*>& simlist) {
+  json config_obj;
+  for (const auto* obj : simlist) {
+    config_obj[obj->name()] = obj->config_json();
+  }
+  return config_obj;
+}
+
+inline void
+append_stats_json(json& root, size_t curr_cnt) {
+  // Generate and store stats
+  std::string key = "stats" + std::to_string(curr_cnt);
+  root[key] = collect_stats_json(simlist);
+
+  // Write to file immediately
+  if (!out_file.empty()) {
+    std::string dir = "./simout";
+    std::string path = dir + "/" + out_file;
+    std::ofstream ofs(path);
+    if (!ofs) {
+      std::cerr << "Cannot open output file for writing: " << path << "\n";
+    } else {
+      ofs << root.dump(4) << "\n";
+      ofs.close();
+      std::cout << "Wrote stats JSON to " << path << "\n";
+    }
+  }
+}
+
 int
 main(int argc, char** argv) {
   if (auto retcode = parse_args(argc, argv)) {
@@ -133,8 +180,8 @@ main(int argc, char** argv) {
     std::string dir = "./simout";
     std::string path = dir + "/" + out_file;
     std::string cmd = "mkdir -p " + dir;
+    [[maybe_unused]]
     int ret = system(cmd.c_str());
-    (void)ret;
 
     std::ofstream ofs(path);
     if (!ofs) {
@@ -149,9 +196,18 @@ main(int argc, char** argv) {
   Pipeline pipe(3, 0, 2);
   BimodalPredictor bpu(12); // Default 4K entries (2^12)
   CacheSimulator icache(l1i_size, l1i_blksize, l1i_assoc);
+  simlist.push_back(std::addressof(pipe));
+  simlist.push_back(std::addressof(icache));
+  simlist.push_back(std::addressof(bpu));
 
   TraceInst inst;
   word_t dummy_word;
+
+  // Root JSON object
+  json root;
+  // Add config once at the beginning
+  root["config"] = collect_config_json(simlist);
+  int dump_cnt = 0;
 
   // Default data latency
   tint_t load_lat = mem_latency;
@@ -179,31 +235,23 @@ main(int argc, char** argv) {
     tint_t fetch_lat = icache.read_req(inst.pc, &dummy_word);
 
     pipe.iota_inst(inst, fetch_lat, load_lat, store_lat, mispred);
-  }
 
-  // Stats
-  std::cout << "Trace: " << trace_file << "\n";
-  pipe.stats.dump_stats();
-  icache.stats.dump_stats();
-  bpu.stats.dump_stats();
-
-  json root;
-  root["pipe"] = pipe.stats.gen_json();
-  root["iCache"] = icache.stats.gen_json();
-  root["BPU"] = bpu.stats.gen_json();
-  // write JSON to file if requested
-  if (!out_file.empty()) {
-    std::string dir = "./simout";
-    std::string path = dir + "/" + out_file;
-    std::ofstream ofs(path); // Overwrite mode
-    if (!ofs) {
-      std::cerr << "Cannot open output file for writing: " << path << "\n";
-    } else {
-      ofs << root.dump(4) << "\n";
-      ofs.close();
-      std::cout << "Wrote stats JSON to " << path << "\n";
+    if (inst.sys_op == SysOp::SysResetStats) [[unlikely]] {
+      std::println(ANSI_FG_YELLOW
+                   "Reset Stats @ PC 0x{:8x} Cyc #{:d}" ANSI_NONE,
+                   inst.pc, pipe.get_total_cycles());
+      for (auto* obj : simlist) {
+        obj->reset_stats();
+      }
+    } else if (inst.sys_op == SysOp::SysDumpStats) [[unlikely]] {
+      std::println(ANSI_FG_YELLOW
+                   "Dump Stats @ PC 0x{:8x} Cyc #{:d}" ANSI_NONE,
+                   inst.pc, pipe.get_total_cycles());
+      for (const auto* obj : simlist) {
+        obj->dump_stats();
+      }
+      append_stats_json(root, dump_cnt++);
     }
   }
-
   return 0;
 }

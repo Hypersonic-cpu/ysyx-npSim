@@ -14,7 +14,7 @@
 
 namespace cacheSim {
 
-class CacheSimulator : SimObject {
+class CacheSimulator : public SimObject {
 public:
   // Refactored Stats inner class
   struct CacheStats : public StatsBase {
@@ -69,11 +69,13 @@ public:
   void flush_all();
 
   // Legacy stats accessors removed/redirected
-  auto stats_map() const -> std::unordered_map<std::string, double> override;
-  auto
-  config_map() const -> std::unordered_map<std::string, size_t> override;
+  json stats_json() const override;
+  json config_json() const override;
 
   auto reset_stats() -> void override;
+  void dump_stats(std::ostream& os = std::cout) const override {
+    stats.dump_stats(os);
+  }
 
 protected:
   size_t size() const;

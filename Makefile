@@ -2,10 +2,10 @@ EXEMODE ?= 0
 NPSIMPATH = .
 SRCS_COMMON := $(shell find "$(NPSIMPATH)/src/cacheSim" -name '*.cc' -type f)
 
+CXX := clang++-22
 ifeq ($(EXEMODE),1)
 # Build runnable simulator (do not compile libapi)
-CXX ?= g++
-CXXFLAGS ?= -std=c++20 -O2 -fPIC -I./src -I../npc/libs/json/include
+CXXFLAGS ?= -std=c++23 -stdlib=libc++ -O3 -fPIC -I./src -I../npc/libs/json/include
 SRCS_BRANCH := $(shell find "$(NPSIMPATH)/src/branchSim" -name '*.cc' -type f)
 SRCS_PIPE := $(shell find "$(NPSIMPATH)/src/pipeSim" -name '*.cc' -type f)
 SRCS_TRACE := $(shell find "$(NPSIMPATH)/src" -maxdepth 1 -name 'trace.cc' -type f)

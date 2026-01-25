@@ -5,11 +5,13 @@
 #include <vector>
 #include "stats.hh"
 #include "debug.hh"
+#include "base.hh"
 
 namespace branchSim {
 
-class BranchPredictor {
+class BranchPredictor : public SimObject {
 public:
+  BranchPredictor(const std::string& name) : SimObject(name) {}
   virtual ~BranchPredictor() = default;
   virtual bool predict(addr_t pc) = 0;
   virtual void update(addr_t pc, bool taken) = 0;
@@ -47,6 +49,22 @@ public:
   explicit BimodalPredictor(size_t entries_pow2 = 12);
   bool predict(addr_t pc) override;
   void update(addr_t pc, bool taken) override;
+
+  // SimObject interface
+  json stats_json() const override {
+      return stats.gen_json();
+  }
+  json config_json() const override {
+      json j;
+      j["entries"] = table_.size();
+      return j;
+  }
+  void reset_stats() override {
+      stats.reset_stats();
+  }
+  void dump_stats(std::ostream& os = std::cout) const override {
+      stats.dump_stats(os);
+  }
 
 private:
   size_t mask_;
