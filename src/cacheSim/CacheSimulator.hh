@@ -3,8 +3,8 @@
 #include "CacheLine.hh"
 #include "Prefetcher.hh"
 #include "base.hh"
-#include "stats.hh"
 #include "debug.hh"
+#include "stats.hh"
 #include <cassert>
 #include <climits>
 #include <cstddef>
@@ -18,39 +18,45 @@ class CacheSimulator : SimObject {
 public:
   // Refactored Stats inner class
   struct CacheStats : public StatsBase {
-    CacheStats() : StatsBase("iCache") {}
+    CacheStats()
+        : StatsBase("iCache") {}
     size_t accesses = 0;
     size_t hits = 0;
     size_t misses = 0;
-    
-    double hitRate() const {
+
+    double
+    hitRate() const {
       return accesses ? static_cast<double>(hits) / accesses : 0.0;
     }
-    double missRate() const {
+    double
+    missRate() const {
       return 1.0 - hitRate();
     }
 
-    json gen_json() const override {
-        json j;
-        j["accesses"] = accesses;
-        j["hits"] = hits;
-        j["misses"] = misses;
-        j["miss_rate"] = missRate();
-        return j;
+    json
+    gen_json() const override {
+      json j;
+      j["accesses"] = accesses;
+      j["hits"] = hits;
+      j["misses"] = misses;
+      j["miss_rate"] = missRate();
+      return j;
     }
 
-    void dump_stats(std::ostream& os = std::cout) const override {
-        os << "iCache Stats:\n";
-        os << "  Accesses: " << accesses << "\n";
-        os << "  Hits: " << hits << "\n";
-        os << "  Misses: " << misses << "\n";
-        os << "  Miss Rate: " << missRate() << "\n";
+    void
+    dump_stats(std::ostream& os = std::cout) const override {
+      os << "iCache Stats:\n";
+      os << "  Accesses: " << accesses << "\n";
+      os << "  Hits: " << hits << "\n";
+      os << "  Misses: " << misses << "\n";
+      os << "  Miss Rate: " << missRate() << "\n";
     }
 
-    void reset_stats() override {
-        accesses = 0;
-        hits = 0;
-        misses = 0;
+    void
+    reset_stats() override {
+      accesses = 0;
+      hits = 0;
+      misses = 0;
     }
   } stats;
 
@@ -70,7 +76,6 @@ public:
   auto reset_stats() -> void override;
 
 protected:
-
   size_t size() const;
   size_t assoc() const;
   size_t blksize() const;

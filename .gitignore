@@ -3,3 +3,4 @@
 *.elf
 *.trace
 *.nptr
+simout/
