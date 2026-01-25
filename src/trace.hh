@@ -10,7 +10,8 @@ namespace trace {
 #endif
 
 /** NEMU visible */
-enum MemOp { None = 0, Load = 1, Store = 2 };
+enum MemOp { MemNone = 0, MemLoad = 1, MemStore = 2 };
+enum SysOp { SysNone = 0, SysResetStats = 1, SysDumpStats = 2 };
 
 #pragma pack(push, 1)
 struct TraceInst {
@@ -21,6 +22,8 @@ struct TraceInst {
   /*    10 */ uint8_t br_taken;   // 0: Not Taken, 1: Taken
   /*    11 */ uint8_t dst_reg;    // 0 if unused
   /* 13:12 */ uint8_t src_reg[2]; // 0 if unused
+  /*    14 */ uint8_t sys_op;
+  /*    15 */ uint8_t dummy;
 };
 #pragma pack(pop)
 /** NEMU visible end */
