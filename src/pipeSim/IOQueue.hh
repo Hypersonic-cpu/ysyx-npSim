@@ -14,12 +14,12 @@ public:
   };
 
 private:
-  const size_t size;
+  const size_t entries;
   std::list<BufEntry> queue;
 
 public:
   IOQueue(size_t size)
-      : size(size)
+      : entries(size)
       , queue{} {}
 
   void
@@ -34,9 +34,14 @@ public:
     return queue.empty() ? 0U : queue.front().time;
   }
 
+  tick_t
+  last_poptime() const {
+    return queue.empty() ? 0U : queue.back().time;
+  }
+
   bool
   is_full() const {
-    return queue.size() == size;
+    return queue.size() == entries;
   }
 
   bool
@@ -65,5 +70,10 @@ public:
       }
     }
     return false;
+  }
+
+  bool
+  size() const {
+    return queue.size();
   }
 };

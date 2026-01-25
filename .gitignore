@@ -3,5 +3,6 @@
 *.elf
 *.trace
 *.nptr
+*.xz
 simout/
 .zed/
