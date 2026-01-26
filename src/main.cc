@@ -1,3 +1,5 @@
+#include <cassert>
+#include <cstddef>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -12,6 +14,7 @@
 #include "base.hh"
 #include "branchSim/BranchPredictor.hh"
 #include "cacheSim/CacheSimulator.hh"
+#include "cacheSim/Prefetcher.hh"
 #include "debug.hh"
 #include "pipeSim/Pipeline.hh"
 #include "stats.hh"
@@ -34,23 +37,44 @@ curr_tick() noexcept {
 static tint_t mem_latency = 30;
 static tint_t mem_bstlat = 6;
 static std::string trace_file;
-static size_t l1i_size = 1 * 1024;
+// Tiny defaults
+static size_t l1i_size = 1024;
 static size_t l1i_blksize = 16;
-static size_t l1i_assoc = 8;
+static size_t l1i_assoc = 1;
+static size_t l1d_size = 512;
+static size_t l1d_blksize = 16;
+static size_t l1d_assoc = 1;
+static std::string i_prefetch = "none";
+static std::string d_prefetch = "none";
 static size_t max_insts = 0;
 static std::string out_file;
 static std::vector<SimObject*> simlist{};
 
+// BPU Config
+static std::string bpu_type = "bimodal";
+static size_t bpu_entries_pow2 = 4; // 16
+static size_t btb_entries_pow2 = 4;
+static bool use_ras = false;
+
+// IF Queue size
+static size_t ifq_size = 3;
+
 // Dummy pmem_read for CacheSimulator
+// SDRAM use same wire for R/W
+static tick_t loc_sdram_avail = 0;
 tint_t
 pmem_read(addr_t addr, addr_t* ret, bool bfirst) {
-  // if (ret) *ret = 0;
-  return bfirst ? mem_latency : mem_bstlat;
+  auto wait =
+    loc_sdram_avail > curr_tick() ? loc_sdram_avail - curr_tick() : 0;
+  auto actual = bfirst ? mem_latency : mem_bstlat;
+  loc_sdram_avail = curr_tick() + wait + actual;
+  DPRINTF(Sdram, "SDRAM access @ %8x from %lu to %lu", addr, curr_tick(),
+          loc_sdram_avail);
+  return wait + actual;
 }
-
 tint_t
 pmem_write(addr_t addr, word_t data, unsigned char mask, bool bfirst) {
-  return bfirst ? mem_latency : mem_bstlat;
+  return pmem_read(addr, nullptr, bfirst);
 }
 
 size_t
@@ -75,11 +99,21 @@ parse_args(int argc, char* argv[]) {
     {"l1i-size", required_argument, 0, 's'},
     {"l1i-blksize", required_argument, 0, 'b'},
     {"l1i-assoc", required_argument, 0, 'a'},
+    {"l1d-size", required_argument, 0, 'S'},
+    {"l1d-blksize", required_argument, 0, 'B'},
+    {"l1d-assoc", required_argument, 0, 'A'},
+    {"l1i-pf", required_argument, 0, 'P'},
+    {"l1d-pf", required_argument, 0, 'p'},
     {"max-insts", required_argument, 0, 'n'},
     {"debug-flags", required_argument, 0, 'd'},
     {"mem-lat", required_argument, 0, 'M'},
     {"mem-bstlat", required_argument, 0, 'm'},
     {"outfile", required_argument, 0, 'O'},
+    {"bpu-type", required_argument, 0, 'T'},
+    {"bpu-size", required_argument, 0, 'e'},
+    {"btb-size", required_argument, 0, 't'},
+    {"use-ras", no_argument, 0, 'R'},
+    {"ifq-size", required_argument, 0, 'q'},
     {0, 0, 0, 0}};
 
   int opt;
@@ -96,6 +130,21 @@ parse_args(int argc, char* argv[]) {
     case 'a':
       l1i_assoc = parse_size(optarg);
       break;
+    case 'S':
+      l1d_size = parse_size(optarg);
+      break;
+    case 'B':
+      l1d_blksize = parse_size(optarg);
+      break;
+    case 'A':
+      l1d_assoc = parse_size(optarg);
+      break;
+    case 'P':
+      i_prefetch = optarg;
+      break;
+    case 'p':
+      d_prefetch = optarg;
+      break;
     case 'n':
       max_insts = std::stoul(optarg);
       break;
@@ -111,6 +160,23 @@ parse_args(int argc, char* argv[]) {
     case 'O':
       out_file = optarg;
       break;
+    case 'T':
+      bpu_type = optarg;
+      break;
+    case 'e':
+      bpu_entries_pow2 =
+        std::log2(static_cast<double>(std::stoul(optarg)) + 0.5);
+      break;
+    case 't':
+      btb_entries_pow2 =
+        std::log2(static_cast<double>(std::stoul(optarg)) + 0.5);
+      break;
+    case 'R':
+      use_ras = true;
+      break;
+    case 'q':
+      ifq_size = std::stoul(optarg);
+      break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
       return 1;
@@ -124,6 +190,37 @@ parse_args(int argc, char* argv[]) {
     return 1;
   }
   return 0;
+}
+
+std::shared_ptr<Prefetcher>
+create_prefetcher(const std::string& type, const std::string& name) {
+  if (type == "nextline")
+    return std::make_shared<NextLinePrefetcher>(name);
+  if (type == "stride")
+    return std::make_shared<StridePrefetcher>(name);
+  return nullptr;
+}
+
+std::shared_ptr<BranchPredictor>
+create_bpu() {
+  std::shared_ptr<BranchPredictor> bpu;
+  if (bpu_type == "bimodal") {
+    bpu = std::make_shared<BimodalPredictor>(bpu_entries_pow2);
+  } else if (bpu_type == "alwaystaken") {
+    bpu = std::make_shared<AlwaysTakenPredictor>();
+  } else if (bpu_type == "btfnt") {
+    bpu = std::make_shared<BTFNTPredictor>();
+  } else {
+    std::cerr << "Unknown BPU type: " << bpu_type << ", using Bimodal\n";
+    bpu = std::make_shared<BimodalPredictor>(bpu_entries_pow2);
+  }
+
+  if (use_ras) {
+    assert(0 && "Unimplemented");
+    // Wrap with RAS (16 entries default?)
+    // bpu = std::make_shared<RASPredictorWrapper>(bpu, 16);
+  }
+  return bpu;
 }
 
 #include "nlohmann/json.hpp"
@@ -156,8 +253,15 @@ append_stats_json(json& root, size_t curr_cnt) {
 
   // Write to file immediately
   if (!out_file.empty()) {
-    std::string dir = "./simout";
-    std::string path = dir + "/" + out_file;
+    std::string path = out_file;
+    // Check if path has directory
+    std::string dir = ".";
+    if (path.find('/') != std::string::npos) {
+      dir = path.substr(0, path.find_last_of('/'));
+      std::string cmd = "mkdir -p " + dir;
+      [[maybe_unused]] int ret = system(cmd.c_str());
+    }
+
     std::ofstream ofs(path);
     if (!ofs) {
       std::cerr << "Cannot open output file for writing: " << path << "\n";
@@ -169,6 +273,25 @@ append_stats_json(json& root, size_t curr_cnt) {
   }
 }
 
+inline void
+outfile_check(const std::string& file) {
+  if (!file.empty()) {
+    std::string path = file;
+    // Check if path has directory
+    std::string dir = ".";
+    if (path.find('/') != std::string::npos) {
+      dir = path.substr(0, path.find_last_of('/'));
+      std::string cmd = "mkdir -p " + dir;
+      [[maybe_unused]] int ret = system(cmd.c_str());
+      assert(!ret && "Cannot create output directory");
+    }
+
+    std::ofstream ofs(path);
+    assert(ofs.is_open() && "Cannot create output file");
+    ofs.close();
+  }
+}
+
 int
 main(int argc, char** argv) {
   if (auto retcode = parse_args(argc, argv)) {
@@ -176,29 +299,36 @@ main(int argc, char** argv) {
   }
 
   // Ensure output directory and file exist immediately
-  if (!out_file.empty()) {
-    std::string dir = "./simout";
-    std::string path = dir + "/" + out_file;
-    std::string cmd = "mkdir -p " + dir;
-    [[maybe_unused]]
-    int ret = system(cmd.c_str());
-
-    std::ofstream ofs(path);
-    if (!ofs) {
-      std::cerr << "Error: Cannot create output file: " << path
-                << ". Aborting.\n";
-      return 1;
-    }
-    ofs.close();
-  }
+  outfile_check(out_file);
 
   TraceReader reader(trace_file.c_str());
-  Pipeline pipe(3, 0, 2);
-  BimodalPredictor bpu(12); // Default 4K entries (2^12)
-  CacheSimulator icache(l1i_size, l1i_blksize, l1i_assoc);
+  Pipeline pipe(ifq_size, 0, 2);
+
+  /** Component Configuration */
+  auto bpu = create_bpu();
+  auto btb = std::make_shared<CompressedBTB>(btb_entries_pow2);
+
+  auto iprefetcher = create_prefetcher(i_prefetch, "iPrefetcher");
+  CacheSimulator icache("iCache", l1i_size, l1i_blksize, l1i_assoc,
+                        iprefetcher);
+
+  auto dprefetcher = create_prefetcher(d_prefetch, "dPrefetcher");
+  std::unique_ptr<CacheSimulator> dcache = nullptr;
+  if (l1d_size > 0) {
+    dcache = std::make_unique<CacheSimulator>(
+      "dCache", l1d_size, l1d_blksize, l1d_assoc, dprefetcher);
+  }
+
   simlist.push_back(std::addressof(pipe));
   simlist.push_back(std::addressof(icache));
-  simlist.push_back(std::addressof(bpu));
+  if (dcache)
+    simlist.push_back(dcache.get());
+  simlist.push_back(bpu.get());
+  if (iprefetcher)
+    simlist.push_back(iprefetcher.get());
+  if (dprefetcher)
+    simlist.push_back(dprefetcher.get());
+  /** End of Configuration */
 
   TraceInst inst;
   word_t dummy_word;
@@ -209,43 +339,63 @@ main(int argc, char** argv) {
   root["config"] = collect_config_json(simlist);
   int dump_cnt = 0;
 
-  // Default data latency
-  tint_t load_lat = mem_latency;
-  tint_t store_lat = mem_latency;
-
+  // Main SimLoop
   while (reader.next(inst)) {
     if (max_insts > 0 && pipe.stats.insts >= max_insts)
       break;
 
-    // BPU Predict
-    bool pred_taken = false;
+    // Branch Predict
+    auto mispred = false;
     if (inst.is_branch) {
-      pred_taken = bpu.predict(inst.pc);
-    }
+      bool pred_taken = false;
+      auto btb_tar = btb->lookup(inst.pc);
+      pred_taken = bpu->predict(inst.pc, btb_tar);
 
-    bool real_taken = (inst.br_taken != 0);
-    bool mispred = false;
-    if (inst.is_branch) {
+      bool real_taken = (inst.br_taken != 0);
       mispred = (pred_taken != real_taken);
-      bpu.update(inst.pc, real_taken);
+      if (real_taken) {
+        btb->update(inst.pc, inst.mem_addr);
+      }
+      bpu->update(inst.pc, real_taken);
+      bpu->notify(real_taken, pred_taken, inst.mem_addr, btb_tar);
     }
 
-    g_tick = pipe.get_total_cycles();
+    /** In event-driven simulator we use curr_tick(),
+     * but in trace-driven, g_tick should be set back and forth
+     * for different stage of a single instruction
+     */
+    g_tick = pipe.icache_access_time();
     tint_t fetch_lat = icache.read_req(inst.pc, &dummy_word);
+
+    g_tick = pipe.load_store_time();
+    tint_t load_lat = 0;
+    tint_t store_lat = 0;
+    // TODO: Set dcache size = 0 to disable
+    if (inst.mem_op == MemOp::MemLoad) {
+      if (l1d_size > 0)
+        load_lat = dcache->read_req(inst.mem_addr, &dummy_word);
+      else
+        load_lat = pmem_read(inst.mem_addr, &dummy_word, true);
+    } else if (inst.mem_op == MemOp::MemStore) {
+      if (l1d_size > 0)
+        store_lat = dcache->write_req(inst.mem_addr, 0, 0xF);
+      else
+        store_lat = pmem_write(inst.mem_addr, 0, 0xF, true);
+    }
 
     pipe.iota_inst(inst, fetch_lat, load_lat, store_lat, mispred);
 
     if (inst.sys_op == SysOp::SysResetStats) [[unlikely]] {
       std::println(ANSI_FG_YELLOW
                    "Reset Stats @ PC 0x{:8x} Cyc #{:d}" ANSI_NONE,
-                   inst.pc, pipe.get_total_cycles());
+                   inst.pc, pipe.stats.cycles);
       for (auto* obj : simlist) {
         obj->reset_stats();
       }
     } else if (inst.sys_op == SysOp::SysDumpStats) [[unlikely]] {
       std::println(ANSI_FG_YELLOW
                    "Dump Stats @ PC 0x{:8x} Cyc #{:d}" ANSI_NONE,
-                   inst.pc, pipe.get_total_cycles());
+                   inst.pc, pipe.stats.cycles);
       for (const auto* obj : simlist) {
         obj->dump_stats();
       }

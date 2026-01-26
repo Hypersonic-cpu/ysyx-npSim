@@ -14,12 +14,16 @@
 
 namespace cacheSim {
 
+/**
+ * Readonly cache simulator with prefetcher.
+ * Support functional mode (in timing mode only indicates hit/miss)
+ */
 class CacheSimulator : public SimObject {
 public:
   // Refactored Stats inner class
   struct CacheStats : public StatsBase {
-    CacheStats()
-        : StatsBase("iCache") {}
+    CacheStats(const std::string& parent_name)
+        : StatsBase(parent_name) {}
     size_t accesses = 0;
     size_t hits = 0;
     size_t misses = 0;
@@ -45,7 +49,7 @@ public:
 
     void
     dump_stats(std::ostream& os = std::cout) const override {
-      os << "iCache Stats:\n";
+      os << name() << " Stats:\n";
       os << "  Accesses: " << accesses << "\n";
       os << "  Hits: " << hits << "\n";
       os << "  Misses: " << misses << "\n";
@@ -60,9 +64,11 @@ public:
     }
   } stats;
 
-  CacheSimulator(size_t size_bytes, size_t line_bytes, size_t assoc = 1);
+  CacheSimulator(const std::string& name, size_t size_bytes,
+                 size_t line_bytes, size_t assoc = 1,
+                 std::shared_ptr<Prefetcher> prefetcher = nullptr);
   // Trigger prefetch logic; returns whether a prefetch was issued
-  bool handle_prefetch(addr_t addr, tick_t stamp);
+  bool handle_prefetch(addr_t addr, bool is_hit);
 
   tint_t read_req(addr_t addr, word_t* ret);
   tint_t write_req(addr_t addr, word_t data, uint8_t mask);
@@ -73,7 +79,8 @@ public:
   json config_json() const override;
 
   auto reset_stats() -> void override;
-  void dump_stats(std::ostream& os = std::cout) const override {
+  void
+  dump_stats(std::ostream& os = std::cout) const override {
     stats.dump_stats(os);
   }
 
@@ -97,7 +104,7 @@ protected:
   tint_t const hitTime_;
 
   std::vector<std::vector<CacheLine>> setsArr_;
-  std::unique_ptr<Prefetcher> prefetcher_;
+  std::shared_ptr<Prefetcher> prefetcher_;
   addr_t tagOf(addr_t addr) const;
   size_t setIndexOf(addr_t addr) const;
   size_t offsetOf(addr_t addr) const;
