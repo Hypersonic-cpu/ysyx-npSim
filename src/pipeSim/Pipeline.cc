@@ -26,7 +26,12 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
   auto fetch_avail = start_tick_;
   if (fetch_queue_.is_full()) {
     // Blocked. Delay start time until available
-    fetch_avail = std::max(fetch_avail, fetch_queue_.next_avaiable());
+    auto next_avail = fetch_queue_.next_avaiable();
+    if (next_avail > fetch_avail) {
+      stats.frontend_stalls += (next_avail - fetch_avail);
+      stats.stalls += (next_avail - fetch_avail);
+      fetch_avail = next_avail;
+    }
     fetch_queue_.auto_dequeue(fetch_avail); // prevent capacity overflow
     DPRINTF(IFQueue, "  IFQ Full, next avail @T %lu", fetch_avail);
   }
@@ -37,6 +42,8 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
   DPRINTF(Pipeline, "  Fetch: %lu -> %lu", start_tick_, fetch_end);
 
   start_tick_ = fetch_avail + 1;
+  DPRINTF(Timeline, "  IF Ena Tick -> %lu (fetch avail %lu)", start_tick_,
+          fetch_avail);
   fetch_queue_.enqueue(fetch_end, inst.pc);
 
   stats.stalls += fetch_stalls;
@@ -61,7 +68,7 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
   if (exec_start1 > exec_start0) {
     tick_t stall_cycles = (exec_start1 - exec_start0);
     stats.stalls += stall_cycles;
-    stats.raw_stalls += stall_cycles;
+    stats.backend_stalls += stall_cycles;
     DPRINTF(Pipeline, "  Stall RAW: %lu cycles (RegReady=%lu, Normal=%lu)",
             stall_cycles, operand_ready, exec_start0);
   }
@@ -92,8 +99,12 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
     }
     memst_queue_.enqueue(exec_end + store_lat, inst.mem_addr);
   }
+  lsu_tick_ = mem_avail + 1;
   tick_t mem_end = mem_avail + 1 + mem_duration;
-  DPRINTF(Mem, "  %lu -> %lu", mem_avail, mem_end);
+  DPRINTF(LSUnit, "  %lu -> %lu", mem_avail, mem_end);
+  if (is_load || is_store)
+    DPRINTF(Timeline, "  LS Ena Tick -> %lu (mem avail %lu)", lsu_tick_,
+            mem_avail);
 
   // 5. WB Stage
   tick_t wb_end = mem_end + 1;
@@ -120,6 +131,9 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
     auto next_start = exec_end + 1;
     DPRINTF(Pipeline, "  Branch MisPred: Next fetch delayed from %lu to %lu",
             start_tick_, next_start);
+    if (next_start > start_tick_) {
+      stats.branch_miss_cycles += (next_start - start_tick_);
+    }
     start_tick_ = next_start;
     stats.flush_count++;
   }

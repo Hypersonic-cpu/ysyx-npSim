@@ -1,8 +1,8 @@
 #pragma once
 #include "base.hh"
-#include "trace.hh"
 #include "pipeSim/IOQueue.hh"
 #include "stats.hh"
+#include "trace.hh"
 
 namespace pipeSim {
 
@@ -14,7 +14,9 @@ public:
     size_t insts = 0;
     size_t cycles = 0;
     size_t stalls = 0;
-    size_t raw_stalls = 0;
+    size_t frontend_stalls = 0; // IFQ full
+    size_t backend_stalls = 0;  // RAW
+    size_t branch_miss_cycles = 0;
     size_t flush_count = 0;
 
     json
@@ -24,7 +26,9 @@ public:
       j["cycles"] = cycles;
       j["ipc"] = cycles > 0 ? (double)insts / cycles : 0.0;
       j["stalls"] = stalls;
-      j["raw_stalls"] = raw_stalls;
+      j["frontend_stalls"] = frontend_stalls;
+      j["backend_stalls"] = backend_stalls;
+      j["branch_miss_cycles"] = branch_miss_cycles;
       j["flush_count"] = flush_count;
       return j;
     }
@@ -35,7 +39,10 @@ public:
       os << "  Insts: " << insts << "\n";
       os << "  Cycles: " << cycles << "\n";
       os << "  IPC: " << (cycles > 0 ? (double)insts / cycles : 0.0) << "\n";
-      os << "  Stalls: " << stalls << " (RAW: " << raw_stalls << ")\n";
+      os << "  Stalls: " << stalls << "\n";
+      os << "    Frontend: " << frontend_stalls << "\n";
+      os << "    Backend: " << backend_stalls << "\n";
+      os << "  BrMissCyc: " << branch_miss_cycles << "\n";
       os << "  Flushes: " << flush_count << "\n";
     }
 
@@ -44,16 +51,19 @@ public:
       insts = 0;
       cycles = 0;
       stalls = 0;
-      raw_stalls = 0;
+      frontend_stalls = 0;
+      backend_stalls = 0;
+      branch_miss_cycles = 0;
       flush_count = 0;
     }
   } stats;
 
   Pipeline() = delete;
 
-  Pipeline(size_t ifq_size, size_t ldq_size, size_t stq_size)
+  explicit Pipeline(size_t ifq_size, size_t ldq_size, size_t stq_size)
       : SimObject("Pipeline")
       , start_tick_(1)
+      , lsu_tick_(4)
       , fetch_queue_(ifq_size)
       , memld_queue_(ldq_size)
       , memst_queue_(stq_size) {}
@@ -62,22 +72,18 @@ public:
   // fetch_latency: cycles taken by iCache (including hit/miss latency).
   // data_latency: cycles taken by LSU (dCache or memory).
   // is_mispred: true if BPU mispredicted this instruction.
-  void iota_inst(const trace::TraceInst& inst, tint_t fetch_latency,
-                 tint_t load_latency, tint_t store_latency, bool is_mispred);
+  void iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
+                 tint_t load_lat, tint_t store_lat, bool is_mispred);
 
-  size_t
-  get_total_cycles() const {
-    return stats.cycles;
+  tick_t
+  icache_access_time() const {
+    return std::max(fetch_queue_.next_avaiable(), start_tick_);
   }
 
-  size_t
-  get_total_insts() const {
-    return stats.insts;
-  }
-
-  size_t
-  get_total_stalls() const {
-    return stats.stalls;
+  tick_t
+  load_store_time() const {
+    return std::max(lsu_tick_, std::max(memld_queue_.next_avaiable(),
+                                        memst_queue_.next_avaiable()));
   }
 
   // SimObject Interface
@@ -110,6 +116,7 @@ protected:
   tick_t reg_ready_[32] = {0};
 
   tick_t start_tick_;
+  tick_t lsu_tick_;
 
   IOQueue fetch_queue_;
   IOQueue memld_queue_;

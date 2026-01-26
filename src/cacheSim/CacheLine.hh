@@ -20,7 +20,8 @@ public:
       , tag(0)
       , valid(false)
       , data(line_size >> WordShift, 0)
-      , stamp(0) {
+      , stamp(0)
+      , is_prefetched(false) {
   }
 
   void
@@ -29,9 +30,11 @@ public:
     this->tag = 0;
     this->stamp = 0;
     this->valid = false;
+    this->is_prefetched = false;
   }
 
   tick_t stamp;
+  bool is_prefetched;
 
   bool
   isValid() const {

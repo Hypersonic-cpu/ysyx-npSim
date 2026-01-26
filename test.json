@@ -1,0 +1,57 @@
+{
+    "config": {
+        "Pipeline": {
+            "ifq_size": 3,
+            "ldq_size": 0,
+            "stq_size": 2
+        },
+        "iCache": {
+            "size": 1024,
+            "assoc": 1,
+            "blkSize": 16,
+            "latency": 3
+        },
+        "dCache": {
+            "size": 512,
+            "assoc": 1,
+            "blkSize": 16,
+            "latency": 3
+        },
+        "BimodalPredictor": {
+            "entries": 4
+        }
+    },
+    "stats0": {
+        "Pipeline": {
+            "insts": 3187012,
+            "cycles": 16569221,
+            "ipc": 0.1923453130355374,
+            "stalls": 50272276,
+            "frontend_stalls": 8829928,
+            "backend_stalls": 6885146,
+            "branch_miss_cycles": 4404532,
+            "flush_count": 159732
+        },
+        "iCache": {
+            "accesses": 3187012,
+            "hits": 3162363,
+            "misses": 24649,
+            "miss_rate": 0.007734203699264364
+        },
+        "dCache": {
+            "accesses": 572307,
+            "hits": 560046,
+            "misses": 12261,
+            "miss_rate": 0.021423816238487436
+        },
+        "BimodalPredictor": {
+            "accesses": 652297,
+            "notify_times": 652297,
+            "misses": 163906,
+            "miss_no_target": 66053,
+            "miss_bad_pred": 64196,
+            "miss_bad_target": 62134,
+            "miss_rate": 0.2512751093443631
+        }
+    }
+}
