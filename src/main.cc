@@ -158,7 +158,7 @@ parse_args(int argc, char* argv[]) {
       mem_bstlat = std::stoul(optarg);
       break;
     case 'O':
-      out_file = optarg;
+      out_file = std::string{"simout/"} + optarg;
       break;
     case 'T':
       bpu_type = optarg;
