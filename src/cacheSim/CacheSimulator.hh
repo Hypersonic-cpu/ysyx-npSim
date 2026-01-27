@@ -3,14 +3,17 @@
 #include "CacheLine.hh"
 #include "Prefetcher.hh"
 #include "base.hh"
-#include "debug.hh"
 #include "stats.hh"
 #include <cassert>
-#include <climits>
 #include <cstddef>
 #include <memory>
-#include <unordered_map>
 #include <vector>
+
+#if ACTIVE_MODE
+#include "debug.hh"
+#else
+#define DPRINTF(...) do {} while (0)
+#endif
 
 namespace cacheSim {
 

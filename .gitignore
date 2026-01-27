@@ -4,6 +4,7 @@
 *.trace
 *.nptr
 *.xz
+*.zst
 simout/
 .zed/
 build/

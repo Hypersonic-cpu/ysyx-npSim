@@ -5,7 +5,6 @@
 #include <cassert>
 #include <cstddef>
 #include <string>
-#include <unordered_map>
 
 using namespace cacheSim;
 

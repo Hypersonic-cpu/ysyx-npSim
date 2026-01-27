@@ -66,4 +66,4 @@ inline void set_flags(const std::string& flag_str) {
 #define ANSI_BG_MAGENTA "\33[1;45m"
 #define ANSI_BG_CYAN    "\33[1;46m"
 #define ANSI_BG_WHITE   "\33[1;47m"
-#define ANSI_NONE       "\33[0m"
+#define ANSI_ALL_NONE   "\33[0m"
