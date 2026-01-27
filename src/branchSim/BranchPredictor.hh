@@ -105,7 +105,7 @@ struct BPStatsBase : public StatsBase {
     j["miss_bad_target"] = bad_target;
     j["miss_rate"] = miss_rate();
     if (notify != accesses) {
-      std::cerr << std::format(ANSI_BG_RED "BPU Inaccuarte stats" ANSI_NONE)
+      std::cerr << std::format(ANSI_BG_RED "BPU Inaccuarte stats" ANSI_ALL_NONE)
                 << std::endl;
     }
     return j;
@@ -147,7 +147,23 @@ public:
   virtual void update(addr_t pc, bool taken) = 0;
   virtual bool judge(bool taken_gold, bool taken_pred, addr_t tar_gold,
                      addr_t tar_pred);
-};
+  void
+  reset_stats() override {
+    stats.reset_stats();
+  }
+  void
+  dump_stats(std::ostream& os = std::cout) const override {
+    stats.dump_stats(os);
+  }
+  json
+  config_json() const override {
+    return json({});
+  }
+  json
+  stats_json() const override {
+    return stats.gen_json();
+  }
+}; // namespace branchSim
 
 // Simple 2-bit bimodal predictor
 class BimodalPredictor : public BranchPredictor {
@@ -159,22 +175,10 @@ public:
 
   // SimObject interface
   json
-  stats_json() const override {
-    return stats.gen_json();
-  }
-  json
   config_json() const override {
     json j;
     j["entries"] = table_.size();
     return j;
-  }
-  void
-  reset_stats() override {
-    stats.reset_stats();
-  }
-  void
-  dump_stats(std::ostream& os = std::cout) const override {
-    stats.dump_stats(os);
   }
 
 private:
@@ -192,31 +196,12 @@ public:
 
   bool
   predict(addr_t pc, addr_t) override {
+    stats.accesses++;
     return true;
   }
 
   void
-  update(addr_t pc, bool taken) override {
-    stats.accesses++;
-    stats.misses += !taken;
-  }
-
-  json
-  stats_json() const override {
-    return stats.gen_json();
-  }
-  json
-  config_json() const override {
-    return json({});
-  }
-  void
-  reset_stats() override {
-    stats.reset_stats();
-  }
-  void
-  dump_stats(std::ostream& os) const override {
-    stats.dump_stats(os);
-  }
+  update(addr_t pc, bool taken) override {}
 };
 
 // Backward Taken, Forward Not Taken
@@ -227,23 +212,11 @@ public:
 
   bool
   predict(addr_t pc, addr_t target) override {
+    stats.accesses++;
     return target < pc;
   }
   void
   update(addr_t pc, bool taken) override {}
-
-  json
-  stats_json() const override {
-    return json({});
-  }
-  json
-  config_json() const override {
-    return json({});
-  }
-  void
-  reset_stats() override {}
-  void
-  dump_stats(std::ostream& os) const override {}
 };
 
 // Return Address Stack Wrapper
@@ -255,11 +228,9 @@ class RASPredictorWrapper : public BranchPredictor {
   size_t cap_;
 
 public:
-  RASPredictorWrapper(std::shared_ptr<BranchPredictor> base, size_t entries)
-      : BranchPredictor(base->name() + "+RAS")
-      , base_(base)
-      , stack_(entries)
-      , cap_(entries) {}
+  RASPredictorWrapper(std::shared_ptr<BranchPredictor> base, size_t
+entries) : BranchPredictor(base->name() + "+RAS") , base_(base) ,
+stack_(entries) , cap_(entries) {}
 
   bool
   predict(addr_t pc, addr_t target, bool is_call, bool is_ret) override {

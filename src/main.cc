@@ -120,7 +120,8 @@ parse_args(int argc, char* argv[]) {
     {"btb-size", required_argument, 0, 't'},
     {"use-ras", no_argument, 0, 'R'},
     {"ifq-size", required_argument, 0, 'q'},
-    {"print-brief", no_argument, 0, 200U},
+    {"print-brief", no_argument, 0, 201U},
+    {"print-none", no_argument, 0, 200U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -184,8 +185,11 @@ parse_args(int argc, char* argv[]) {
     case 'q':
       ifq_size = std::stoul(optarg);
       break;
-    case 200:
+    case 201:
       print_mode = 1;
+      break;
+    case 200:
+      print_mode = 0;
       break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
@@ -220,6 +224,9 @@ create_bpu() {
     bpu = std::make_shared<AlwaysTakenPredictor>();
   } else if (bpu_type == "btfnt") {
     bpu = std::make_shared<BTFNTPredictor>();
+  } else if (bpu_type == "none" || bpu_type.empty()) {
+  } else {
+    assert(false && "No such branch predictor");
   }
 
   if (use_ras) {
@@ -350,8 +357,9 @@ main(int argc, char** argv) {
     auto mispred = false;
     if (inst.is_branch) {
       auto btb_tar = btb->lookup(inst.pc);
-      // BPU makes independent prediction based on history
-      bool pred_taken = bpu ? bpu->predict(inst.pc, btb_tar) : false;
+      // When BTB miss, predict as not taken
+      bool bpu_result = bpu ? bpu->predict(inst.pc, btb_tar) : false;
+      bool pred_taken = bpu_result && btb_tar != 0;
 
       bool real_taken = (inst.br_taken != 0);
 
@@ -396,14 +404,14 @@ main(int argc, char** argv) {
 
     if (inst.sys_op == SysOp::SysResetStats) [[unlikely]] {
       std::println(ANSI_FG_YELLOW
-                   "Reset Stats @ PC 0x{:8x} Cyc #{:d}" ANSI_NONE,
+                   "Reset Stats @ PC 0x{:8x} Cyc #{:d}" ANSI_ALL_NONE,
                    inst.pc, pipe.stats.cycles);
       for (auto* obj : simlist) {
         obj->reset_stats();
       }
     } else if (inst.sys_op == SysOp::SysDumpStats) [[unlikely]] {
       std::println(ANSI_FG_YELLOW
-                   "Dump Stats @ PC 0x{:8x} Cyc #{:d}" ANSI_NONE,
+                   "Dump Stats @ PC 0x{:8x} Cyc #{:d}" ANSI_ALL_NONE,
                    inst.pc, pipe.stats.cycles);
       if (print_mode == 2) {
         for (const auto* obj : simlist) {
