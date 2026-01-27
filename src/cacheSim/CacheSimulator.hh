@@ -29,12 +29,12 @@ public:
     size_t misses = 0;
 
     double
-    hitRate() const {
+    hit_rate() const {
       return accesses ? static_cast<double>(hits) / accesses : 0.0;
     }
     double
-    missRate() const {
-      return 1.0 - hitRate();
+    miss_rate() const {
+      return 1.0 - hit_rate();
     }
 
     json
@@ -43,7 +43,7 @@ public:
       j["accesses"] = accesses;
       j["hits"] = hits;
       j["misses"] = misses;
-      j["miss_rate"] = missRate();
+      j["miss_rate"] = miss_rate();
       return j;
     }
 
@@ -53,7 +53,7 @@ public:
       os << "  Accesses: " << accesses << "\n";
       os << "  Hits: " << hits << "\n";
       os << "  Misses: " << misses << "\n";
-      os << "  Miss Rate: " << missRate() << "\n";
+      os << "  Miss Rate: " << miss_rate() << "\n";
     }
 
     void
