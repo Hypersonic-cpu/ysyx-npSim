@@ -134,7 +134,7 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
     if (next_start > start_tick_) {
       stats.branch_miss_cycles += (next_start - start_tick_);
     }
-    start_tick_ = next_start;
+    start_tick_ = std::max(start_tick_, next_start);
     stats.flush_count++;
   }
 }

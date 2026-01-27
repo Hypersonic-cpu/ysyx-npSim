@@ -12,7 +12,7 @@ private:
   std::string name_;
 
 public:
-  SimObject() = default;
+  SimObject() = delete;
   SimObject(const std::string& name_in)
       : name_{name_in} {}
   virtual ~SimObject() = default;

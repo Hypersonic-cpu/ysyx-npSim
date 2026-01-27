@@ -5,11 +5,13 @@
 #include "stats.hh"
 #include <cstddef>
 #include <cstdint>
+#include <print>
+#include <string>
 #include <vector>
 
 namespace branchSim {
 
-class BTBBase {
+class BTBBase : public SimObject {
 public:
   struct BTBEntry {
     addr_t pc_tag = 0;
@@ -18,10 +20,23 @@ public:
     uint8_t type = 0;
   };
 
-  explicit BTBBase(size_t entries_pow2)
-      : table_(1 << entries_pow2) {}
+  explicit BTBBase(const std::string& name, size_t entries_pow2)
+      : SimObject(name)
+      , table_(1 << entries_pow2) {}
   virtual addr_t lookup(addr_t pc) const = 0;
   virtual void update(addr_t pc, addr_t target) = 0;
+  json
+  stats_json() const override {
+    return json{};
+  }
+  json
+  config_json() const override {
+    return json{{"entries", table_.size()}};
+  }
+  void
+  reset_stats() override {}
+  void
+  dump_stats(std::ostream& os = std::cout) const override {}
 
 protected:
   std::vector<BTBEntry> table_;
@@ -40,9 +55,9 @@ private:
   }
 
 public:
-  explicit CompressedBTB(size_t entries_pow2, size_t tag_bits = 10,
-                         size_t target_bits = 20)
-      : BTBBase(entries_pow2)
+  explicit CompressedBTB(const std::string& name, size_t entries_pow2,
+                         size_t tag_bits = 10, size_t target_bits = 20)
+      : BTBBase(name, entries_pow2)
       , tag_bits_(tag_bits)
       , tag_mask_((1 << tag_bits) - 1)
       , target_bits_(target_bits)
@@ -58,19 +73,6 @@ private:
   size_t index_bits_;
   addr_t index_mask_;
   size_t target_bits_;
-};
-
-class BranchPredictor : public SimObject {
-public:
-  explicit BranchPredictor(const std::string& name)
-      : SimObject(name) {}
-  virtual ~BranchPredictor() = default;
-  virtual bool predict(addr_t pc, addr_t target) = 0;
-  virtual void update(addr_t pc, bool taken) = 0;
-  // For stats only
-  virtual void
-  notify(bool taken_gold, bool taken_pred, addr_t tar_gold,
-         addr_t tar_pred) {}
 };
 
 struct BPStatsBase : public StatsBase {
@@ -106,6 +108,9 @@ struct BPStatsBase : public StatsBase {
     os << "  Misses: " << misses << "\n";
     os << "  Miss Rate: " << (accesses > 0 ? (double)misses / accesses : 0.0)
        << "\n";
+    os << "  Miss:: No Target: " << no_target << "\n";
+    os << "  Miss:: Bad Pred: " << bad_pred << "\n";
+    os << "  Miss:: Bad Target: " << bad_target << "\n";
   }
 
   void
@@ -120,16 +125,28 @@ struct BPStatsBase : public StatsBase {
   }
 };
 
-// Simple 2-bit bimodal predictor
-class BimodalPredictor : public BranchPredictor {
+class BranchPredictor : public SimObject {
 public:
   BPStatsBase stats;
 
-  explicit BimodalPredictor(size_t entries_pow2 = 2);
+public:
+  explicit BranchPredictor(const std::string& name)
+      : SimObject(name)
+      , stats(name) {}
+  virtual ~BranchPredictor() = default;
+  virtual bool predict(addr_t pc, addr_t target) = 0;
+  virtual void update(addr_t pc, bool taken) = 0;
+  virtual bool judge(bool taken_gold, bool taken_pred, addr_t tar_gold,
+                     addr_t tar_pred);
+};
+
+// Simple 2-bit bimodal predictor
+class BimodalPredictor : public BranchPredictor {
+public:
+  explicit BimodalPredictor(const std::string& name, size_t entries_pow2,
+                            uint8_t init_val = 1);
   bool predict(addr_t pc, addr_t target) override;
   void update(addr_t pc, bool taken) override;
-  void notify(bool taken_gold, bool taken_pred, addr_t tar_gold,
-              addr_t tar_pred) override;
 
   // SimObject interface
   json
@@ -152,6 +169,7 @@ public:
   }
 
 private:
+  const uint8_t init_state_;
   size_t mask_;
   std::vector<uint8_t> table_; // 2-bit saturating counters
   size_t index(addr_t pc) const;
@@ -161,10 +179,7 @@ private:
 class AlwaysTakenPredictor : public BranchPredictor {
 public:
   explicit AlwaysTakenPredictor()
-      : BranchPredictor("AlwaysTaken")
-      , stats("AlawysTakenBrPred") {}
-
-  BPStatsBase stats;
+      : BranchPredictor("AlwaysTaken") {}
 
   bool
   predict(addr_t pc, addr_t) override {
@@ -199,10 +214,7 @@ public:
 class BTFNTPredictor : public BranchPredictor {
 public:
   BTFNTPredictor()
-      : BranchPredictor("BTFNTPredictor")
-      , stats("BackTakenBrPred") {}
-
-  BPStatsBase stats;
+      : BranchPredictor("BTFNTPredictor") {}
 
   bool
   predict(addr_t pc, addr_t target) override {

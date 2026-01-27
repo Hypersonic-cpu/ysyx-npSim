@@ -16,6 +16,7 @@
 #include "cacheSim/CacheSimulator.hh"
 #include "cacheSim/Prefetcher.hh"
 #include "debug.hh"
+#include "nlohmann/detail/value_t.hpp"
 #include "pipeSim/Pipeline.hh"
 #include "stats.hh"
 #include "trace.hh"
@@ -51,7 +52,7 @@ static std::string out_file;
 static std::vector<SimObject*> simlist{};
 
 // BPU Config
-static std::string bpu_type = "bimodal";
+static std::string bpu_type = "";
 static size_t bpu_entries_pow2 = 4; // 16
 static size_t btb_entries_pow2 = 4;
 static bool use_ras = false;
@@ -203,16 +204,13 @@ create_prefetcher(const std::string& type, const std::string& name) {
 
 std::shared_ptr<BranchPredictor>
 create_bpu() {
-  std::shared_ptr<BranchPredictor> bpu;
+  std::shared_ptr<BranchPredictor> bpu = nullptr;
   if (bpu_type == "bimodal") {
-    bpu = std::make_shared<BimodalPredictor>(bpu_entries_pow2);
+    bpu = std::make_shared<BimodalPredictor>("BinmodalBP", bpu_entries_pow2);
   } else if (bpu_type == "alwaystaken") {
     bpu = std::make_shared<AlwaysTakenPredictor>();
   } else if (bpu_type == "btfnt") {
     bpu = std::make_shared<BTFNTPredictor>();
-  } else {
-    std::cerr << "Unknown BPU type: " << bpu_type << ", using Bimodal\n";
-    bpu = std::make_shared<BimodalPredictor>(bpu_entries_pow2);
   }
 
   if (use_ras) {
@@ -250,26 +248,17 @@ append_stats_json(json& root, size_t curr_cnt) {
   // Generate and store stats
   std::string key = "stats" + std::to_string(curr_cnt);
   root[key] = collect_stats_json(simlist);
+}
 
-  // Write to file immediately
-  if (!out_file.empty()) {
-    std::string path = out_file;
-    // Check if path has directory
-    std::string dir = ".";
-    if (path.find('/') != std::string::npos) {
-      dir = path.substr(0, path.find_last_of('/'));
-      std::string cmd = "mkdir -p " + dir;
-      [[maybe_unused]] int ret = system(cmd.c_str());
-    }
-
-    std::ofstream ofs(path);
-    if (!ofs) {
-      std::cerr << "Cannot open output file for writing: " << path << "\n";
-    } else {
-      ofs << root.dump(4) << "\n";
-      ofs.close();
-      std::cout << "Wrote stats JSON to " << path << "\n";
-    }
+inline void
+outfile_write(const std::string& path, const json& root) {
+  std::ofstream ofs(path);
+  if (!ofs) {
+    std::cerr << "Cannot open output file for writing: " << path << "\n";
+  } else {
+    ofs << root.dump(4) << "\n";
+    ofs.close();
+    std::cout << "Wrote stats JSON to " << path << "\n";
   }
 }
 
@@ -306,7 +295,7 @@ main(int argc, char** argv) {
 
   /** Component Configuration */
   auto bpu = create_bpu();
-  auto btb = std::make_shared<CompressedBTB>(btb_entries_pow2);
+  auto btb = std::make_shared<CompressedBTB>("BTB", btb_entries_pow2);
 
   auto iprefetcher = create_prefetcher(i_prefetch, "iPrefetcher");
   CacheSimulator icache("iCache", l1i_size, l1i_blksize, l1i_assoc,
@@ -323,7 +312,9 @@ main(int argc, char** argv) {
   simlist.push_back(std::addressof(icache));
   if (dcache)
     simlist.push_back(dcache.get());
-  simlist.push_back(bpu.get());
+  if (bpu)
+    simlist.push_back(bpu.get());
+  simlist.push_back(btb.get());
   if (iprefetcher)
     simlist.push_back(iprefetcher.get());
   if (dprefetcher)
@@ -347,17 +338,34 @@ main(int argc, char** argv) {
     // Branch Predict
     auto mispred = false;
     if (inst.is_branch) {
-      bool pred_taken = false;
       auto btb_tar = btb->lookup(inst.pc);
-      pred_taken = bpu->predict(inst.pc, btb_tar);
+      // BPU makes independent prediction based on history
+      bool pred_taken = bpu ? bpu->predict(inst.pc, btb_tar) : false;
 
       bool real_taken = (inst.br_taken != 0);
-      mispred = (pred_taken != real_taken);
+
+      // // Misprediction occurs if:
+      // // 1. Direction wrong (pred_taken != real_taken), OR
+      // // 2. Both taken but target wrong (BTB miss or wrong target)
+      // if (pred_taken != real_taken) {
+      //   mispred = true; // Direction misprediction
+      // } else if (pred_taken && real_taken) {
+      //   // Both predict taken and actually taken: must check target
+      //   // BTB miss (target=0) or wrong target both count as misprediction
+      //   mispred = (btb_tar == 0 || btb_tar != inst.mem_addr);
+      // } else {
+      //   mispred = false; // Both not-taken: correct
+      // }
+
       if (real_taken) {
         btb->update(inst.pc, inst.mem_addr);
       }
-      bpu->update(inst.pc, real_taken);
-      bpu->notify(real_taken, pred_taken, inst.mem_addr, btb_tar);
+      if (bpu) {
+        mispred = !bpu->judge(real_taken, pred_taken, inst.mem_addr, btb_tar);
+        bpu->update(inst.pc, real_taken);
+      } else {
+        mispred = real_taken;
+      }
     }
 
     /** In event-driven simulator we use curr_tick(),
@@ -402,5 +410,9 @@ main(int argc, char** argv) {
       append_stats_json(root, dump_cnt++);
     }
   }
+
+  // Dump final stats
+  append_stats_json(root, dump_cnt++);
+  outfile_write(out_file, root);
   return 0;
 }
