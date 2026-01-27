@@ -3,6 +3,7 @@
 #include "trace.hh"
 #include "types.hh"
 #include <algorithm>
+#include <cassert>
 
 namespace pipeSim {
 
@@ -13,10 +14,12 @@ namespace pipeSim {
 void
 Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
                     tint_t load_lat, tint_t store_lat, bool is_mispred) {
+  assert(load_lat < 10'000 && store_lat < 10'000);
   stats.insts++;
 
-  DPRINTF(Pipeline, "PC=0x%x FetchLat=%u DataLat(Ld:St)=(%u:%u) Mispred=%d",
-          inst.pc, fetch_lat, load_lat, store_lat, is_mispred);
+  DPRINTF(Pipeline,
+          "I#%lu PC=0x%x FetchLat=%u DataLat(Ld:St)=(%u:%u) Mispred=%d",
+          stats.insts, inst.pc, fetch_lat, load_lat, store_lat, is_mispred);
 
   // 1. IF Stage
   // iCache hit time is covered by fetch_lat
@@ -36,9 +39,11 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
     DPRINTF(IFQueue, "  IFQ Full, next avail @T %lu", fetch_avail);
   }
 
-  auto fetch_start = std::max(fetch_avail, fetch_queue_.last_poptime());
-  auto fetch_end = fetch_start + fetch_lat;
-  auto fetch_stalls = fetch_start - start_tick_;
+  // auto fetch_start = std::max(fetch_avail, fetch_queue_.last_poptime());
+  // auto fetch_end = fetch_start + fetch_lat;
+  // auto fetch_stalls = fetch_start - start_tick_;
+  auto fetch_end = fetch_avail + fetch_lat;
+  auto fetch_stalls = fetch_avail - start_tick_;
   DPRINTF(Pipeline, "  Fetch: %lu -> %lu", start_tick_, fetch_end);
 
   start_tick_ = fetch_avail + 1;
@@ -114,13 +119,14 @@ Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
   // Forwarding / Register Update
   if (inst.dst_reg != 0) {
     uint8_t rd = inst.dst_reg;
+    auto& ent = reg_ready_.at(rd);
     // 1 cycle lat for forward.
     if (is_load) {
-      reg_ready_[rd] = mem_end;
+      ent = mem_end;
     } else {
-      reg_ready_[rd] = exec_end;
+      ent = exec_end;
     }
-    DPRINTF(Pipeline, "  RegUpd: x%d ready @T %lu", rd, reg_ready_[rd]);
+    DPRINTF(Pipeline, "  RegUpd: x%d ready @T %lu", rd, ent);
   }
 
   // Branch misprediction: next instruction fetch delayed
