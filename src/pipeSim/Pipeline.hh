@@ -20,12 +20,17 @@ public:
     size_t branch_miss_cycles = 0;
     size_t flush_count = 0;
 
+    double
+    get_ipc() const {
+      return cycles > 0 ? (double)insts / cycles : 0.0;
+    }
+
     json
     gen_json() const override {
       json j;
       j["insts"] = insts;
       j["cycles"] = cycles;
-      j["ipc"] = cycles > 0 ? (double)insts / cycles : 0.0;
+      j["ipc"] = get_ipc();
       j["stalls"] = stalls;
       j["frontend_stalls"] = frontend_stalls;
       j["backend_stalls"] = backend_stalls;
@@ -39,7 +44,7 @@ public:
       os << "Pipeline Stats:\n";
       os << "  Insts: " << insts << "\n";
       os << "  Cycles: " << cycles << "\n";
-      os << "  IPC: " << (cycles > 0 ? (double)insts / cycles : 0.0) << "\n";
+      os << "  IPC: " << get_ipc() << "\n";
       os << "  Stalls: " << stalls << "\n";
       os << "    Frontend: " << frontend_stalls << "\n";
       os << "    Backend: " << backend_stalls << "\n";

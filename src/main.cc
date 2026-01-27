@@ -35,14 +35,14 @@ curr_tick() noexcept {
 }
 
 // Configuration parameters
-static tint_t mem_latency = 30;
-static tint_t mem_bstlat = 6;
+static tint_t mem_latency = 40;
+static tint_t mem_bstlat = 10;
 static std::string trace_file;
 // Tiny defaults
-static size_t l1i_size = 1024;
+static size_t l1i_size = 512;
 static size_t l1i_blksize = 16;
 static size_t l1i_assoc = 1;
-static size_t l1d_size = 512;
+static size_t l1d_size = 0;
 static size_t l1d_blksize = 16;
 static size_t l1d_assoc = 1;
 static std::string i_prefetch = "none";
@@ -56,6 +56,7 @@ static std::string bpu_type = "";
 static size_t bpu_entries_pow2 = 4; // 16
 static size_t btb_entries_pow2 = 4;
 static bool use_ras = false;
+static uint8_t print_mode = 2;
 
 // IF Queue size
 static size_t ifq_size = 3;
@@ -65,15 +66,18 @@ static size_t ifq_size = 3;
 static tick_t loc_sdram_avail = 0;
 tint_t
 pmem_read(addr_t addr, addr_t* ret, bool bfirst) {
-  auto wait =
-    loc_sdram_avail > curr_tick() ? loc_sdram_avail - curr_tick() : 0;
-  auto total = bfirst ? (mem_latency + wait) : mem_bstlat;
-  loc_sdram_avail = curr_tick() + total;
-  DPRINTF(Sdram, "SDRAM access @ %8x from %lu to %lu (wait %lu, total %lu)",
-          addr, curr_tick(),
-          loc_sdram_avail, wait, total);
-  return total;
+  //   auto wait =
+  //     loc_sdram_avail > curr_tick() ? loc_sdram_avail - curr_tick() : 0;
+  //   auto total = bfirst ? (mem_latency + wait) : mem_bstlat;
+  //   loc_sdram_avail = curr_tick() + total;
+  //   DPRINTF(Sdram, "SDRAM access @ %8x from %lu to %lu (wait %lu, total
+  //   %lu)",
+  //           addr, curr_tick(),
+  //           loc_sdram_avail, wait, total);
+  // return total;
+  return bfirst ? mem_latency : mem_bstlat;
 }
+
 tint_t
 pmem_write(addr_t addr, word_t data, unsigned char mask, bool bfirst) {
   return pmem_read(addr, nullptr, bfirst);
@@ -116,6 +120,7 @@ parse_args(int argc, char* argv[]) {
     {"btb-size", required_argument, 0, 't'},
     {"use-ras", no_argument, 0, 'R'},
     {"ifq-size", required_argument, 0, 'q'},
+    {"print-brief", no_argument, 0, 200U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -178,6 +183,9 @@ parse_args(int argc, char* argv[]) {
       break;
     case 'q':
       ifq_size = std::stoul(optarg);
+      break;
+    case 200:
+      print_mode = 1;
       break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
@@ -337,7 +345,6 @@ main(int argc, char** argv) {
     if (max_insts > 0 && inst_cnt >= max_insts)
       break;
     inst_cnt++;
-    if (inst_cnt <= 18602) continue;
 
     // Branch Predict
     auto mispred = false;
@@ -347,19 +354,6 @@ main(int argc, char** argv) {
       bool pred_taken = bpu ? bpu->predict(inst.pc, btb_tar) : false;
 
       bool real_taken = (inst.br_taken != 0);
-
-      // // Misprediction occurs if:
-      // // 1. Direction wrong (pred_taken != real_taken), OR
-      // // 2. Both taken but target wrong (BTB miss or wrong target)
-      // if (pred_taken != real_taken) {
-      //   mispred = true; // Direction misprediction
-      // } else if (pred_taken && real_taken) {
-      //   // Both predict taken and actually taken: must check target
-      //   // BTB miss (target=0) or wrong target both count as misprediction
-      //   mispred = (btb_tar == 0 || btb_tar != inst.mem_addr);
-      // } else {
-      //   mispred = false; // Both not-taken: correct
-      // }
 
       if (real_taken) {
         btb->update(inst.pc, inst.mem_addr);
@@ -395,7 +389,8 @@ main(int argc, char** argv) {
       else
         store_lat = pmem_write(inst.mem_addr, 0, 0xF, true);
     }
-    // std::println("g_tick {:d} ld/st lat {:d} {:d}", g_tick, load_lat, store_lat);
+    // std::println("g_tick {:d} ld/st lat {:d} {:d}", g_tick, load_lat,
+    // store_lat);
 
     pipe.iota_inst(inst, fetch_lat, load_lat, store_lat, mispred);
 
@@ -410,8 +405,16 @@ main(int argc, char** argv) {
       std::println(ANSI_FG_YELLOW
                    "Dump Stats @ PC 0x{:8x} Cyc #{:d}" ANSI_NONE,
                    inst.pc, pipe.stats.cycles);
-      for (const auto* obj : simlist) {
-        obj->dump_stats();
+      if (print_mode == 2) {
+        for (const auto* obj : simlist) {
+          obj->dump_stats();
+        }
+      } else if (print_mode == 1) {
+        std::println(
+          "#Cyc {:d} IPC {:.6f} BPMR {:.6f} i$MR {:.6f} d$MR {:.6f}",
+          pipe.stats.cycles, pipe.stats.get_ipc(),
+          bpu ? bpu->stats.miss_rate() : -1, icache.stats.miss_rate(),
+          dcache ? dcache->stats.miss_rate() : -1);
       }
       append_stats_json(root, dump_cnt++);
     }

@@ -5,6 +5,7 @@
 #include "stats.hh"
 #include <cstddef>
 #include <cstdint>
+#include <format>
 #include <print>
 #include <string>
 #include <vector>
@@ -88,6 +89,11 @@ struct BPStatsBase : public StatsBase {
   size_t bad_target = 0;
   size_t bad_pred = 0;
 
+  double
+  miss_rate() const {
+    return accesses > 0 ? (double)misses / accesses : 0.0;
+  }
+
   json
   gen_json() const override {
     json j;
@@ -97,7 +103,11 @@ struct BPStatsBase : public StatsBase {
     j["miss_no_target"] = no_target;
     j["miss_bad_pred"] = bad_pred;
     j["miss_bad_target"] = bad_target;
-    j["miss_rate"] = accesses > 0 ? (double)misses / accesses : 0.0;
+    j["miss_rate"] = miss_rate();
+    if (notify != accesses) {
+      std::cerr << std::format(ANSI_BG_RED "BPU Inaccuarte stats" ANSI_NONE)
+                << std::endl;
+    }
     return j;
   }
 
@@ -106,8 +116,7 @@ struct BPStatsBase : public StatsBase {
     os << "BranchPredictor Stats:\n";
     os << "  Accesses: " << accesses << "\n";
     os << "  Misses: " << misses << "\n";
-    os << "  Miss Rate: " << (accesses > 0 ? (double)misses / accesses : 0.0)
-       << "\n";
+    os << "  Miss Rate: " << miss_rate() << "\n";
     os << "  Miss:: No Target: " << no_target << "\n";
     os << "  Miss:: Bad Pred: " << bad_pred << "\n";
     os << "  Miss:: Bad Target: " << bad_target << "\n";
