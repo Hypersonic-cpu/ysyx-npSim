@@ -67,11 +67,12 @@ tint_t
 pmem_read(addr_t addr, addr_t* ret, bool bfirst) {
   auto wait =
     loc_sdram_avail > curr_tick() ? loc_sdram_avail - curr_tick() : 0;
-  auto actual = bfirst ? mem_latency : mem_bstlat;
-  loc_sdram_avail = curr_tick() + wait + actual;
-  DPRINTF(Sdram, "SDRAM access @ %8x from %lu to %lu", addr, curr_tick(),
-          loc_sdram_avail);
-  return wait + actual;
+  auto total = bfirst ? (mem_latency + wait) : mem_bstlat;
+  loc_sdram_avail = curr_tick() + total;
+  DPRINTF(Sdram, "SDRAM access @ %8x from %lu to %lu (wait %lu, total %lu)",
+          addr, curr_tick(),
+          loc_sdram_avail, wait, total);
+  return total;
 }
 tint_t
 pmem_write(addr_t addr, word_t data, unsigned char mask, bool bfirst) {
@@ -328,12 +329,15 @@ main(int argc, char** argv) {
   json root;
   // Add config once at the beginning
   root["config"] = collect_config_json(simlist);
-  int dump_cnt = 0;
 
+  int dump_cnt = 0;
+  int inst_cnt = 0;
   // Main SimLoop
   while (reader.next(inst)) {
-    if (max_insts > 0 && pipe.stats.insts >= max_insts)
+    if (max_insts > 0 && inst_cnt >= max_insts)
       break;
+    inst_cnt++;
+    if (inst_cnt <= 18602) continue;
 
     // Branch Predict
     auto mispred = false;
@@ -361,7 +365,8 @@ main(int argc, char** argv) {
         btb->update(inst.pc, inst.mem_addr);
       }
       if (bpu) {
-        mispred = !bpu->judge(real_taken, pred_taken, inst.mem_addr, btb_tar);
+        mispred =
+          !bpu->judge(real_taken, pred_taken, inst.mem_addr, btb_tar);
         bpu->update(inst.pc, real_taken);
       } else {
         mispred = real_taken;
@@ -390,6 +395,7 @@ main(int argc, char** argv) {
       else
         store_lat = pmem_write(inst.mem_addr, 0, 0xF, true);
     }
+    // std::println("g_tick {:d} ld/st lat {:d} {:d}", g_tick, load_lat, store_lat);
 
     pipe.iota_inst(inst, fetch_lat, load_lat, store_lat, mispred);
 

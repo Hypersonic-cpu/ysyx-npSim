@@ -3,6 +3,7 @@
 #include "pipeSim/IOQueue.hh"
 #include "stats.hh"
 #include "trace.hh"
+#include "types.hh"
 
 namespace pipeSim {
 
@@ -64,6 +65,7 @@ public:
       : SimObject("Pipeline")
       , start_tick_(1)
       , lsu_tick_(4)
+      , reg_ready_{}
       , fetch_queue_(ifq_size)
       , memld_queue_(ldq_size)
       , memst_queue_(stq_size) {}
@@ -113,7 +115,7 @@ public:
 
 protected:
   // Cycle when register value is ready for consumption in EX stage
-  tick_t reg_ready_[32] = {0};
+  std::array<tick_t, 32> reg_ready_;
 
   tick_t start_tick_;
   tick_t lsu_tick_;

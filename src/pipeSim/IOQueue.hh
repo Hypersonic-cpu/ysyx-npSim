@@ -39,10 +39,10 @@ public:
     return queue.empty() ? 0U : queue.front().time;
   }
 
-  tick_t
-  last_poptime() const {
-    return queue.empty() ? 0U : queue.back().time;
-  }
+  // tick_t
+  // last_poptime() const {
+  //   return queue.empty() ? 0U : queue.back().time;
+  // }
 
   bool
   is_full() const {
