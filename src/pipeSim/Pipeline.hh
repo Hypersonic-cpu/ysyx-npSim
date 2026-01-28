@@ -1,13 +1,29 @@
 #pragma once
 #include "base.hh"
+#include "branchSim/BranchPredictor.hh"
+#include "cacheSim/CacheSimulator.hh"
 #include "pipeSim/IOQueue.hh"
 #include "stats.hh"
 #include "trace.hh"
 #include "types.hh"
+#include <cassert>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <queue>
+#include <utility>
+#include <vector>
+
+extern void set_global_tick(tick_t t);
 
 namespace pipeSim {
 
-class Pipeline : public SimObject {
+using Inst = trace::TraceInst;
+using Cache = cacheSim::CacheSimulator;
+using BrPred = branchSim::BranchPredictor;
+
+class Pipeline final : public SimObject {
+
 public:
   struct PipelineStats : public StatsBase {
     PipelineStats()
@@ -66,31 +82,34 @@ public:
 
   Pipeline() = delete;
 
-  explicit Pipeline(size_t ifq_size, size_t ldq_size, size_t stq_size)
+  explicit Pipeline(size_t ifq_size, size_t ldq_size, size_t stq_size,
+                    Cache* iport, Cache* dport, BrPred* bpu)
       : SimObject("Pipeline")
-      , start_tick_(1)
-      , lsu_tick_(4)
       , reg_ready_{}
+      , imem{iport}
+      , dmem{dport}
+      , bpu{bpu}
       , fetch_queue_(ifq_size)
       , memld_queue_(ldq_size)
       , memst_queue_(stq_size) {}
 
-  // Simulate one instruction.
-  // fetch_latency: cycles taken by iCache (including hit/miss latency).
-  // data_latency: cycles taken by LSU (dCache or memory).
-  // is_mispred: true if BPU mispredicted this instruction.
-  void iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
-                 tint_t load_lat, tint_t store_lat, bool is_mispred);
+  // Simulate all events in next timestamp
+  void iota_loop();
 
-  tick_t
-  icache_access_time() const {
-    return std::max(fetch_queue_.next_avaiable(), start_tick_);
+  bool
+  is_finished() const {
+    return sim_que_.empty();
   }
 
-  tick_t
-  load_store_time() const {
-    return std::max(lsu_tick_, std::max(memld_queue_.next_avaiable(),
-                                        memst_queue_.next_avaiable()));
+  bool
+  fetch_avail() const {
+    return !fetch_queue_.is_full();
+  }
+
+  bool
+  feed_inst(const Inst& inst) {
+    auto trans = std::make_unique<Transaction>(inst);
+    do_fetch(std::move(trans));
   }
 
   // SimObject Interface
@@ -119,15 +138,83 @@ public:
   }
 
 protected:
+  enum PipeStage {
+    Fetch = 0,
+    Decode,
+    Execute,
+    Memory,
+    WriteBack,
+    Num_PipeStage
+  };
+
+  struct Transaction {
+    Inst trace_inst;
+    tick_t finish_time;
+    PipeStage next_stage;
+
+    explicit Transaction() = delete;
+    explicit Transaction(const Inst& inst)
+        : trace_inst{inst}
+        , finish_time{0}
+        , next_stage{Fetch} {}
+  };
+  using TransPtr = std::unique_ptr<Transaction>;
+  static constexpr tick_t BlockedTime{std::numeric_limits<tick_t>::max()};
+
+  struct TransactionComparator {
+    bool
+    operator()(const TransPtr& lhs, const TransPtr& rhs) const {
+      if (lhs->finish_time != rhs->finish_time)
+        return lhs->finish_time > rhs->finish_time;
+      return lhs->next_stage < rhs->next_stage;
+    }
+  };
+
+  using SimQue = std::priority_queue<TransPtr, std::vector<TransPtr>,
+                                     TransactionComparator>;
+  SimQue sim_que_;
+
+  using stage_t = void (*)(TransPtr);
+
+  void do_fetch(TransPtr);
+  // bool do_fetch(const Inst*);
+  void do_decode(TransPtr);
+  void do_execute(TransPtr);
+  void do_memory(TransPtr);
+  void do_writeback(TransPtr);
+
+  void wakeup_pending();
+  void update_raw_time(const TransPtr& updated);
+
+  tick_t
+  stage_avail_time(PipeStage target_stage) {
+    auto future_stages =
+      stage_ready_ | std::views::drop(static_cast<int>(target_stage));
+    return std::ranges::max(future_stages);
+  }
+
+  // TransPtr pending_;
+  std::list<TransPtr> pending_que_;
+  std::pair<uint8_t, uint8_t> raw_rs_;
+
   // Cycle when register value is ready for consumption in EX stage
   std::array<tick_t, 32> reg_ready_;
-
-  tick_t start_tick_;
-  tick_t lsu_tick_;
+  std::array<tick_t, Num_PipeStage> stage_ready_;
+  std::array<stage_t, Num_PipeStage> stage_handler_;
 
   IOQueue fetch_queue_;
+  // Currently unused. This RTL version has a 2-entry store
+  // buffer but no dCache. So load will block the LSU when buffer miss.
   IOQueue memld_queue_;
   IOQueue memst_queue_;
+
+  Cache* imem;
+  Cache* dmem;
+
+  BrPred* bpu;
+
+private:
+  word_t dummy;
 };
 
 } // namespace pipeSim
