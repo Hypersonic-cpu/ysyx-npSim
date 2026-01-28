@@ -6,8 +6,10 @@
 #include "stats.hh"
 #include "trace.hh"
 #include "types.hh"
+#include <array>
 #include <cassert>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <queue>
@@ -86,30 +88,52 @@ public:
                     Cache* iport, Cache* dport, BrPred* bpu)
       : SimObject("Pipeline")
       , reg_ready_{}
+      , stage_valid_{}
+      , sim_pipe_({nullptr, nullptr, nullptr, nullptr, nullptr})
+      , stage_handler_{&Pipeline::do_fetch, &Pipeline::do_decode,
+                       &Pipeline::do_execute, &Pipeline::do_memory,
+                       &Pipeline::do_writeback}
       , imem{iport}
       , dmem{dport}
       , bpu{bpu}
       , fetch_queue_(ifq_size)
       , memld_queue_(ldq_size)
-      , memst_queue_(stq_size) {}
+      , memst_queue_(stq_size)
+      , ongoing_insts_{0} {}
 
-  // Simulate all events in next timestamp
-  void iota_loop();
+  // Simulate all events before next IF time.
+  // Should be called after the inst is feed, which
+  // will set the next available IF tick.
+  void iota_inst(bool is_drain = false);
 
   bool
   is_finished() const {
-    return sim_que_.empty();
+    return ongoing_insts_ == 0;
   }
 
   bool
   fetch_avail() const {
-    return !fetch_queue_.is_full();
+    return input_buffer_ == nullptr;
+    // return !fetch_queue_.is_full();
   }
 
-  bool
+  tick_t
+  next_fetch() const {
+    auto ret = stage_valid_.at(Fetch);
+    assert(!fetch_queue_.is_full() || ret == fetch_queue_.next_poptime());
+    return ret;
+  }
+
+  void
   feed_inst(const Inst& inst) {
+    assert(input_buffer_ == nullptr);
+    ongoing_insts_++;
     auto trans = std::make_unique<Transaction>(inst);
-    do_fetch(std::move(trans));
+    // set_global_tick(next_fetch());
+    // do_fetch(std::move(trans));
+    input_buffer_ = std::move(trans);
+    DPRINTF(Pipeline, "FeedInst PC=0x%08x Remain %lu", inst.pc,
+            ongoing_insts_);
   }
 
   // SimObject Interface
@@ -149,64 +173,75 @@ protected:
 
   struct Transaction {
     Inst trace_inst;
-    tick_t finish_time;
-    PipeStage next_stage;
+    // tick_t finish_time;
+    // PipeStage next_stage;
 
     explicit Transaction() = delete;
     explicit Transaction(const Inst& inst)
-        : trace_inst{inst}
-        , finish_time{0}
-        , next_stage{Fetch} {}
+        : trace_inst{inst} // , finish_time{0} // , next_stage{Fetch}
+    {}
   };
   using TransPtr = std::unique_ptr<Transaction>;
-  static constexpr tick_t BlockedTime{std::numeric_limits<tick_t>::max()};
 
-  struct TransactionComparator {
-    bool
-    operator()(const TransPtr& lhs, const TransPtr& rhs) const {
-      if (lhs->finish_time != rhs->finish_time)
-        return lhs->finish_time > rhs->finish_time;
-      return lhs->next_stage < rhs->next_stage;
-    }
+  struct IFEntry : public IOEntryBase {
+    TransPtr trans;
+    explicit IFEntry() = delete;
+    explicit IFEntry(tick_t t, addr_t a, TransPtr trans)
+        : IOEntryBase{t, a}
+        , trans{std::move(trans)} {}
   };
 
-  using SimQue = std::priority_queue<TransPtr, std::vector<TransPtr>,
-                                     TransactionComparator>;
-  SimQue sim_que_;
+  static constexpr tick_t BlockedTime{std::numeric_limits<tick_t>::max()};
 
-  using stage_t = void (*)(TransPtr);
+  // struct TransactionComparator {
+  //   bool
+  //   operator()(const TransPtr& lhs, const TransPtr& rhs) const {
+  //     if (lhs->finish_time != rhs->finish_time)
+  //       return lhs->finish_time > rhs->finish_time;
+  //     return lhs->next_stage < rhs->next_stage;
+  //   }
+  // };
 
-  void do_fetch(TransPtr);
+  // using SimQue = std::priority_queue<TransPtr, std::vector<TransPtr>,
+  //                                    TransactionComparator>;
+  // SimQue sim_que_;
+  using SimPipe = std::array<TransPtr, Num_PipeStage>;
+  TransPtr input_buffer_;
+
+  // sim_pipe_.at(Stage) is the OUTPUT of stage
+  SimPipe sim_pipe_;
+
+  using stage_t = void (Pipeline::*)();
+
+  void do_fetch();
   // bool do_fetch(const Inst*);
-  void do_decode(TransPtr);
-  void do_execute(TransPtr);
-  void do_memory(TransPtr);
-  void do_writeback(TransPtr);
+  void do_decode();
+  void do_execute();
+  void do_memory();
+  void do_writeback();
 
   void wakeup_pending();
-  void update_raw_time(const TransPtr& updated);
+  void update_raw_time(const Inst& inst, tick_t when);
 
   tick_t
   stage_avail_time(PipeStage target_stage) {
     auto future_stages =
-      stage_ready_ | std::views::drop(static_cast<int>(target_stage));
+      stage_valid_ | std::views::drop(static_cast<int>(target_stage));
     return std::ranges::max(future_stages);
   }
 
-  // TransPtr pending_;
-  std::list<TransPtr> pending_que_;
+  std::array<tick_t, 32> reg_ready_;
   std::pair<uint8_t, uint8_t> raw_rs_;
 
-  // Cycle when register value is ready for consumption in EX stage
-  std::array<tick_t, 32> reg_ready_;
-  std::array<tick_t, Num_PipeStage> stage_ready_;
-  std::array<stage_t, Num_PipeStage> stage_handler_;
+  // When OUTPUT of current stage is valid
+  std::array<tick_t, Num_PipeStage> stage_valid_;
+  std::array<stage_t, Num_PipeStage> const stage_handler_;
 
-  IOQueue fetch_queue_;
+  IOQueue<IFEntry> fetch_queue_;
   // Currently unused. This RTL version has a 2-entry store
   // buffer but no dCache. So load will block the LSU when buffer miss.
-  IOQueue memld_queue_;
-  IOQueue memst_queue_;
+  IOQueue<IOEntryBase> memld_queue_;
+  IOQueue<IOEntryBase> memst_queue_;
 
   Cache* imem;
   Cache* dmem;
@@ -214,6 +249,7 @@ protected:
   BrPred* bpu;
 
 private:
+  size_t ongoing_insts_;
   word_t dummy;
 };
 

@@ -34,6 +34,7 @@ public:
   }
 
   tick_t stamp;
+  tick_t ready;
   bool is_prefetched;
 
   bool

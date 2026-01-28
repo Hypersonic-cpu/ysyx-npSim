@@ -3,19 +3,22 @@
 #include "types.hh"
 #include <algorithm>
 #include <cassert>
+#include <concepts>
 #include <cstddef>
 #include <list>
 
+namespace pipeSim {
+struct IOEntryBase {
+  tick_t time;
+  addr_t addr;
+};
+
+template <std::derived_from<IOEntryBase> T>
 class IOQueue {
 public:
-  struct BufEntry {
-    tick_t time;
-    addr_t addr;
-  };
-
 private:
   const size_t entries;
-  std::list<BufEntry> queue;
+  std::list<T> queue;
 
 public:
   IOQueue(size_t size)
@@ -28,10 +31,11 @@ public:
   }
 
   void
-  enqueue(tick_t finish, addr_t addr) {
+  enqueue(T elem) {
     assert(!is_full());
-    tick_t t = std::max(finish, next_poptime());
-    queue.emplace_back(t, addr);
+    tick_t t = std::max(elem.time, next_poptime());
+    elem.time = t;
+    queue.emplace_back(std::move(elem));
   }
 
   tick_t
@@ -54,10 +58,12 @@ public:
     return queue.empty();
   }
 
-  void
+  T
   dequeue() {
     assert(!queue.empty());
+    T elem = std::move(queue.front());
     queue.pop_front();
+    return std::move(elem);
   }
 
   void
@@ -77,8 +83,9 @@ public:
     return false;
   }
 
-  bool
+  auto
   size() const {
     return queue.size();
   }
 };
+} // namespace pipeSim

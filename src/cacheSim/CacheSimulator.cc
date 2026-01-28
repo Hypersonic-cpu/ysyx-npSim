@@ -1,5 +1,6 @@
 
 #include "cacheSim/CacheSimulator.hh"
+#include "debug.hh"
 #include "types.hh"
 #include <algorithm>
 #include <cassert>
@@ -18,6 +19,7 @@ CacheSimulator::CacheSimulator(const std::string& name, size_t size_bytes,
     , sets_(size_bytes / (line_bytes * assoc))
     , assoc_(assoc)
     , hitTime_(3)
+    , judgeTime_(2)
     , setsArr_(sets_, std::vector<CacheLine>(assoc_, {line_bytes}))
     , prefetcher_(prefetcher) {
   assert(size_bytes % (line_bytes * assoc) == 0);
@@ -65,26 +67,28 @@ CacheSimulator::latency() const {
   return hitTime_;
 }
 
-tint_t
+tick_t
 CacheSimulator::read_req(addr_t addr, word_t* ret) {
   auto blk = access(addr);
   auto off = offsetOf(addr);
   assert(blk);
   if (blk->isValid()) {
     // hit
-    DPRINTF(Cache, "Hit: Addr=0x%x Tag=0x%x Set=%lu", addr, tagOf(addr),
-            setIndexOf(addr));
+    auto blk_ready = std::max(curr_tick(), blk->ready);
     *ret = blk->atAligned(off);
     handle_prefetch(addr, true);
-    return hitTime_;
+    DPRINTF(Cache, "Hit: Addr=0x%x Tag=0x%x Set=%lu Ready @ %lu", addr, tagOf(addr),
+            setIndexOf(addr), blk->ready);
+    blk->ready++; // At most serve one per cycle
+    return blk_ready + hitTime_;
   } else {
     // TODO: if dirty, write back;
     DPRINTF(Cache, "Miss: Addr=0x%x Tag=0x%x Set=%lu", addr, tagOf(addr),
             setIndexOf(addr));
-    tint_t latency = hitTime_ + handle_fill(blk, addr);
+    tick_t fill_done = handle_fill(blk, addr);
     *ret = blk->atAligned(off);
     handle_prefetch(addr, false);
-    return latency;
+    return judgeTime_ + fill_done;
   }
 }
 
@@ -98,7 +102,8 @@ CacheSimulator::flush_all() {
   }
 }
 
-tint_t
+// TODO: timing
+tick_t
 CacheSimulator::write_req(addr_t addr, word_t data, uint8_t mask) {
   auto blk = access(addr);
   auto off = offsetOf(addr);
@@ -121,18 +126,21 @@ CacheSimulator::write_req(addr_t addr, word_t data, uint8_t mask) {
   }
 }
 
-tint_t
+tick_t
 CacheSimulator::handle_fill(CacheLine* blk, addr_t addr) {
   addr_t block_addr = blockAddrOf(addr);
   auto ptr_raw = blk->getRawData<uint8_t>();
-  tint_t latency = 0;
+  tick_t arrived_time = curr_tick() + judgeTime_;
+  tick_t memory_done = 0;
   for (size_t i = 0; i < lineBytes_; i += sizeof(word_t)) {
-    latency += pmem_read(block_addr + i, (word_t*)(ptr_raw + i), i == 0);
+    // overwrite
+    memory_done = pmem_read(block_addr + i, (word_t*)(ptr_raw + i), i == 0);
   }
   blk->setTag(tagOf(addr));
   blk->setValid();
-  blk->stamp = curr_tick();
-  return latency;
+  blk->ready = memory_done;
+  DPRINTF(Cache, "Fill cache line addr %8x T@ %lu", blk->getTag(), blk->ready);
+  return memory_done;
 }
 
 CacheLine*
@@ -220,4 +228,19 @@ CacheSimulator::config_json() const {
 auto
 CacheSimulator::reset_stats() -> void {
   stats.reset_stats();
+}
+
+// NoCache implementation - direct memory access without caching
+tick_t
+NoCache::read_req(addr_t addr, word_t* ret) {
+  ++stats.accesses;
+  ++stats.misses;
+  return pmem_read(addr, ret, true);
+}
+
+tick_t
+NoCache::write_req(addr_t addr, word_t data, uint8_t mask) {
+  ++stats.accesses;
+  ++stats.misses;
+  return pmem_write(addr, data, mask, true);
 }

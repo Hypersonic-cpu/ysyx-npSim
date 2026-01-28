@@ -72,11 +72,12 @@ public:
   CacheSimulator(const std::string& name, size_t size_bytes,
                  size_t line_bytes, size_t assoc = 1,
                  std::shared_ptr<Prefetcher> prefetcher = nullptr);
+  virtual ~CacheSimulator() = default;
   // Trigger prefetch logic; returns whether a prefetch was issued
   bool handle_prefetch(addr_t addr, bool is_hit);
 
-  tint_t read_req(addr_t addr, word_t* ret);
-  tint_t write_req(addr_t addr, word_t data, uint8_t mask);
+  virtual tick_t read_req(addr_t addr, word_t* ret);
+  virtual tick_t write_req(addr_t addr, word_t data, uint8_t mask);
   void flush_all();
 
   // Legacy stats accessors removed/redirected
@@ -98,7 +99,7 @@ protected:
 protected:
   // Access with externally provided stamp, return true on hit
   CacheLine* access(addr_t addr);
-  tint_t handle_fill(CacheLine* blk, addr_t addr);
+  tick_t handle_fill(CacheLine* blk, addr_t addr);
 
   size_t const lineBytes_;
   // log2 lineBytes_
@@ -107,6 +108,8 @@ protected:
   size_t const assoc_;
   // Set select + tag compare time
   tint_t const hitTime_;
+  // Time to know hit or miss
+  tint_t const judgeTime_;
 
   std::vector<std::vector<CacheLine>> setsArr_;
   std::shared_ptr<Prefetcher> prefetcher_;
@@ -115,6 +118,27 @@ protected:
   size_t offsetOf(addr_t addr) const;
   addr_t wordAligned(addr_t addr) const;
   addr_t blockAddrOf(addr_t addr) const;
+};
+
+/**
+ * NoCache: Direct memory access without caching.
+ * Inherits from CacheSimulator but overrides read/write to bypass cache.
+ */
+class NoCache : public CacheSimulator {
+public:
+  explicit NoCache(const std::string& name)
+      : CacheSimulator(name, 64, 16, 1, nullptr) {} // Dummy values for base
+
+  tick_t read_req(addr_t addr, word_t* ret) override;
+  tick_t write_req(addr_t addr, word_t data, uint8_t mask) override;
+
+  json
+  config_json() const override {
+    json j;
+    j["type"] = "NoCache";
+    j["size"] = 0;
+    return j;
+  }
 };
 
 } // namespace cacheSim

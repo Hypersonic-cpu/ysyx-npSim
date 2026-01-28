@@ -17,7 +17,8 @@ enum Flag : uint64_t {
     STQueue = 1U << 6,
     LSUnit = LDQueue | STQueue,
     Sdram = 1U << 20,
-    Timeline = 1U << 31,
+    Clock = 1ULL << 62,
+    Event = 1ULL << 63,
     All = UINT64_MAX
 };
 
@@ -35,8 +36,9 @@ inline void set_flags(const std::string& flag_str) {
         else if (segment == "STQueue") enabled_flags |= STQueue;
         else if (segment == "LSUnit") enabled_flags |= LSUnit;
         else if (segment == "Sdram") enabled_flags |= Sdram;
-        else if (segment == "Timeline") enabled_flags |= Timeline;
         else if (segment == "Main") enabled_flags |= Main;
+        else if (segment == "Clock") enabled_flags |= Clock;
+        else if (segment == "Event") enabled_flags |= Event;
         else if (segment == "All") enabled_flags |= All;
     }
 }
