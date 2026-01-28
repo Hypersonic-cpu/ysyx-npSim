@@ -34,6 +34,12 @@ curr_tick() noexcept {
   return g_tick;
 }
 
+void
+set_global_tick(tick_t t) {
+  assert(t >= g_tick);
+  g_tick = t;
+}
+
 // Configuration parameters
 static tint_t mem_latency = 40;
 static tint_t mem_bstlat = 10;
@@ -375,32 +381,37 @@ main(int argc, char** argv) {
       }
     }
 
+    while (!pipe.fetch_avail()) {
+      pipe.iota_loop();
+    }
+    pipe.feed_inst(inst);
+
     /** In event-driven simulator we use curr_tick(),
      * but in trace-driven, g_tick should be set back and forth
      * for different stage of a single instruction
      */
-    g_tick = pipe.icache_access_time();
-    tint_t fetch_lat = icache.read_req(inst.pc, &dummy_word);
+    // g_tick = pipe.icache_access_time();
+    // tint_t fetch_lat = icache.read_req(inst.pc, &dummy_word);
 
-    g_tick = pipe.load_store_time();
-    tint_t load_lat = 0;
-    tint_t store_lat = 0;
-    // TODO: Set dcache size = 0 to disable
-    if (inst.mem_op == MemOp::MemLoad) {
-      if (l1d_size > 0)
-        load_lat = dcache->read_req(inst.mem_addr, &dummy_word);
-      else
-        load_lat = pmem_read(inst.mem_addr, &dummy_word, true);
-    } else if (inst.mem_op == MemOp::MemStore) {
-      if (l1d_size > 0)
-        store_lat = dcache->write_req(inst.mem_addr, 0, 0xF);
-      else
-        store_lat = pmem_write(inst.mem_addr, 0, 0xF, true);
-    }
+    // g_tick = pipe.load_store_time();
+    // tint_t load_lat = 0;
+    // tint_t store_lat = 0;
+    // // TODO: Set dcache size = 0 to disable
+    // if (inst.mem_op == MemOp::MemLoad) {
+    //   if (l1d_size > 0)
+    //     load_lat = dcache->read_req(inst.mem_addr, &dummy_word);
+    //   else
+    //     load_lat = pmem_read(inst.mem_addr, &dummy_word, true);
+    // } else if (inst.mem_op == MemOp::MemStore) {
+    //   if (l1d_size > 0)
+    //     store_lat = dcache->write_req(inst.mem_addr, 0, 0xF);
+    //   else
+    //     store_lat = pmem_write(inst.mem_addr, 0, 0xF, true);
+    // }
     // std::println("g_tick {:d} ld/st lat {:d} {:d}", g_tick, load_lat,
     // store_lat);
 
-    pipe.iota_inst(inst, fetch_lat, load_lat, store_lat, mispred);
+    // pipe.iota_inst(inst, fetch_lat, load_lat, store_lat, mispred);
 
     if (inst.sys_op == SysOp::SysResetStats) [[unlikely]] {
       std::println(ANSI_FG_YELLOW

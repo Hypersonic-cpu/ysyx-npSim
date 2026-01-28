@@ -21,6 +21,8 @@ namespace cacheSim {
  * Readonly cache simulator with prefetcher.
  * Support functional mode (in timing mode only indicates hit/miss)
  */
+
+// TODO: 访问内存时, 不能用 curr_tick()? j还是说算了 (相差 3cyc)
 class CacheSimulator : public SimObject {
 public:
   // Refactored Stats inner class

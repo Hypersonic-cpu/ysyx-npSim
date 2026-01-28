@@ -30,12 +30,12 @@ public:
   void
   enqueue(tick_t finish, addr_t addr) {
     assert(!is_full());
-    tick_t t = std::max(finish, next_avaiable());
+    tick_t t = std::max(finish, next_poptime());
     queue.emplace_back(t, addr);
   }
 
   tick_t
-  next_avaiable() const {
+  next_poptime() const {
     return queue.empty() ? 0U : queue.front().time;
   }
 
@@ -69,7 +69,7 @@ public:
 
   bool
   contains(addr_t addr) const {
-    for (const auto &entry : queue) {
+    for (const auto& entry : queue) {
       if (entry.addr == addr) {
         return true;
       }

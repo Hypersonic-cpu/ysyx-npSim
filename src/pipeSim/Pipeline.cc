@@ -4,144 +4,200 @@
 #include "types.hh"
 #include <algorithm>
 #include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <ranges>
+#include <utility>
 
 namespace pipeSim {
+
+/**
+ * NOTE: In each do_stage handler,
+ * - Push unique ptr into sim queue
+ * - Update ready time (No such case that do_stage is called but
+ *   this stage is blocked due to IO buffer or else)
+ * - Mem buffer enqueue
+ */
+
+void
+Pipeline::do_fetch(Pipeline::TransPtr trans) {
+  fetch_queue_.auto_dequeue(curr_tick());
+
+  assert(stage_ready_.at(Fetch) <= curr_tick());
+  assert(!fetch_queue_.is_full());
+  assert(!trans);
+
+  const auto& inst = trans->trace_inst;
+  auto if_time = imem->read_req(inst.pc, &dummy);
+  assert(if_time < 20'000U);
+  fetch_queue_.enqueue(curr_tick() + if_time, /* not used */ inst.pc);
+
+  if (fetch_queue_.is_full()) {
+    auto ins_time = fetch_queue_.next_poptime();
+    assert(ins_time > curr_tick());
+    // Only for assertion. This method will be called only whne is_full is
+    // false
+    stage_ready_.at(Fetch) = ins_time;
+  } else {
+    stage_ready_.at(Fetch) = curr_tick() + 1;
+  }
+}
+
+void
+Pipeline::do_decode(Pipeline::TransPtr trans) {
+  assert(stage_ready_.at(Decode) <= curr_tick());
+  // trans->finish_time = std::max()
+  const auto& inst = trans->trace_inst;
+  auto ready_time =
+    std::max(reg_ready_.at(inst.src_reg[0]), reg_ready_.at(inst.src_reg[1]));
+  auto rd = inst.dst_reg;
+  if (ready_time == BlockedTime) {
+    trans->next_stage = Decode;
+    trans->finish_time = BlockedTime;
+    raw_rs_ = std::make_pair(inst.src_reg[0], inst.src_reg[1]);
+    pending_que_.emplace_back(std::move(trans));
+    return;
+  } else {
+    auto finish_time = std::max(curr_tick(), ready_time) + 1;
+    trans->next_stage = Execute;
+    trans->finish_time = finish_time;
+    sim_que_.emplace(std::move(trans));
+    if (rd) {
+      reg_ready_.at(rd) = BlockedTime;
+    }
+  }
+}
+
+void
+Pipeline::do_execute(Pipeline::TransPtr trans) {
+  assert(stage_ready_.at(Execute) <= curr_tick());
+  trans->next_stage = Memory;
+  trans->finish_time = curr_tick() + 1;
+
+  if (trans->trace_inst.mem_op == trace::MemNone) {
+    update_raw_time(trans);
+  }
+
+  sim_que_.emplace(std::move(trans));
+  stage_ready_.at(Execute) = curr_tick() + 1;
+}
+
+void
+Pipeline::do_memory(Pipeline::TransPtr trans) {
+  memst_queue_.auto_dequeue(curr_tick());
+  memld_queue_.auto_dequeue(curr_tick());
+
+  assert(stage_ready_.at(Memory) <= curr_tick());
+  assert(!memst_queue_.is_full());
+
+  const auto& inst = trans->trace_inst;
+  auto memlat = 1;
+  if (inst.mem_op == trace::MemLoad) {
+    if (auto bufhit = memst_queue_.contains(inst.mem_addr)) {
+      memlat = 2;
+    } else {
+      memlat = 1 + dmem->read_req(inst.mem_addr, &dummy);
+    }
+  } else if (inst.mem_op == trace::MemStore) {
+    memlat = 2;
+    // NOTE: Approximate. In fact we should access dCache when at dequeue.
+    auto storelat = dmem->write_req(inst.mem_addr, 0, 0xf);
+    assert(storelat < 20'000);
+    memst_queue_.enqueue(curr_tick() + storelat, inst.mem_addr);
+  }
+
+  trans->finish_time = curr_tick() + memlat;
+  if (memst_queue_.is_full()) {
+    auto pop_time = memst_queue_.next_poptime();
+    assert(pop_time > curr_tick());
+    stage_ready_.at(Memory) = pop_time;
+  } else {
+    stage_ready_.at(curr_tick()) = memlat;
+  }
+  trans->next_stage = WriteBack;
+
+  if (inst.mem_op != trace::MemNone) {
+    update_raw_time(trans);
+  }
+  sim_que_.emplace(std::move(trans));
+}
+
+void
+Pipeline::do_writeback(Pipeline::TransPtr trans) {
+  stats.insts++;
+  stats.cycles = curr_tick();
+  // ready time === 0
+}
+
+void
+Pipeline::wakeup_pending() {
+  auto removed = false;
+  for (auto& req : pending_que_) {
+    const auto& inst = req->trace_inst;
+    if (stage_avail_time(req->next_stage) == BlockedTime)
+      continue;
+    req->finish_time = curr_tick();
+    sim_que_.emplace(std::move(req));
+    removed = true;
+  }
+  if (removed) {
+    pending_que_.remove_if(
+      [](const TransPtr& ptr) -> bool { return ptr == nullptr; });
+  }
+}
+
+void
+Pipeline::update_raw_time(const TransPtr& trans) {
+  const auto& inst = trans->trace_inst;
+  if (auto rd = inst.dst_reg) {
+    // Stall 1 cycle after finish
+    // ID |stall| --> |
+    // EX | --> | ^   ^
+    //    forward |   | IDU finished
+    reg_ready_.at(rd) = trans->finish_time;
+  }
+  if (raw_rs_.first || raw_rs_.second) {
+    auto ready_time =
+      std::max(reg_ready_.at(raw_rs_.first), reg_ready_.at(raw_rs_.second));
+    if (ready_time < BlockedTime) {
+      stage_ready_.at(Decode) = ready_time;
+    }
+  }
+  assert(reg_ready_.at(0) == 0);
+}
 
 /**
  * Processing follow the instruction order. Thus start from PCGEN to WB,
  * unlike the backward approach used in gem5.
  */
 void
-Pipeline::iota_inst(const trace::TraceInst& inst, tint_t fetch_lat,
-                    tint_t load_lat, tint_t store_lat, bool is_mispred) {
-  assert(load_lat < 10'000 && store_lat < 10'000);
-  stats.insts++;
+Pipeline::iota_loop() {
+  auto this_tick = sim_que_.top()->finish_time;
+  set_global_tick(this_tick);
 
-  DPRINTF(Pipeline,
-          "I#%lu PC=0x%x FetchLat=%u DataLat(Ld:St)=(%u:%u) Mispred=%d",
-          stats.insts, inst.pc, fetch_lat, load_lat, store_lat, is_mispred);
+  while (sim_que_.top()->finish_time <= this_tick) {
+    auto trans = std::move(const_cast<TransPtr&>(sim_que_.top()));
+    sim_que_.pop();
 
-  // 1. IF Stage
-  // iCache hit time is covered by fetch_lat
-  // [0] ## BLOCKED ## [ ] [ ] [ ]
-  // [1]    INSERT   ^ [*]
-  fetch_queue_.auto_dequeue(start_tick_);
-  auto fetch_avail = start_tick_;
-  if (fetch_queue_.is_full()) {
-    // Blocked. Delay start time until available
-    auto next_avail = fetch_queue_.next_avaiable();
-    if (next_avail > fetch_avail) {
-      stats.frontend_stalls += (next_avail - fetch_avail);
-      stats.stalls += (next_avail - fetch_avail);
-      fetch_avail = next_avail;
+    // Blocked
+    // auto ready_time = *std::max_element(
+    //   stage_ready_.begin() + static_cast<size_t>(trans->next_stage),
+    //   stage_ready_.end());
+
+    auto stage_avail = stage_avail_time(trans->next_stage);
+    if (stage_avail == BlockedTime) {
+      pending_que_.emplace_back(std::move(stage_avail));
+    } else if (stage_avail > trans->finish_time) {
+      trans->finish_time = stage_avail;
+      sim_que_.emplace(std::move(trans));
+      continue;
     }
-    fetch_queue_.auto_dequeue(fetch_avail); // prevent capacity overflow
-    DPRINTF(IFQueue, "  IFQ Full, next avail @T %lu", fetch_avail);
+
+    // Trigger
+    auto time = curr_tick();
+    std::invoke(stage_handler_.at(trans->next_stage), std::move(trans));
   }
-
-  // auto fetch_start = std::max(fetch_avail, fetch_queue_.last_poptime());
-  // auto fetch_end = fetch_start + fetch_lat;
-  // auto fetch_stalls = fetch_start - start_tick_;
-  auto fetch_end = fetch_avail + fetch_lat;
-  auto fetch_stalls = fetch_avail - start_tick_;
-  DPRINTF(Pipeline, "  Fetch: %lu -> %lu", start_tick_, fetch_end);
-
-  start_tick_ = fetch_avail + 1;
-  DPRINTF(Timeline, "  IF Ena Tick -> %lu (fetch avail %lu)", start_tick_,
-          fetch_avail);
-  fetch_queue_.enqueue(fetch_end, inst.pc);
-
-  stats.stalls += fetch_stalls;
-
-  // 2. ID Stage
-  tick_t decode_end = fetch_end + 1;
-
-  // 3. EX Stage
-  // Can start after decode_end and after previous exec is done
-  // AND after operands are ready
-  tick_t operand_ready = 0;
-  // RAW hazard check
-  for (int i = 0; i < 2; ++i) {
-    operand_ready = std::max(operand_ready, reg_ready_[inst.src_reg[i]]);
-  }
-
-  tick_t exec_start0 = decode_end + 1;
-  tick_t exec_start1 = std::max(exec_start0, operand_ready);
-  tick_t exec_end = exec_start1 + 1;
-
-  // Stall accounting (if wait for operands > wait for pipeline slot)
-  if (exec_start1 > exec_start0) {
-    tick_t stall_cycles = (exec_start1 - exec_start0);
-    stats.stalls += stall_cycles;
-    stats.backend_stalls += stall_cycles;
-    DPRINTF(Pipeline, "  Stall RAW: %lu cycles (RegReady=%lu, Normal=%lu)",
-            stall_cycles, operand_ready, exec_start0);
-  }
-  DPRINTF(Pipeline, "  Exec: %lu -> %lu", exec_start0, exec_end);
-
-  // 4. MEM Stage
-  bool is_load = inst.mem_op == trace::MemOp::MemLoad;
-  bool is_store = inst.mem_op == trace::MemOp::MemStore;
-  tint_t mem_duration = 1;
-  tick_t mem_avail = exec_end;
-  memst_queue_.auto_dequeue(exec_end);
-  if (is_load) {
-    if (memst_queue_.contains(inst.mem_addr)) {
-      // Hit buffer, 1 cycle lat
-      // TODO: Only word read/write can hit buffer.
-      DPRINTF(LDQueue, "  load @ %x buffer hit", inst.mem_addr);
-    } else {
-      mem_duration = load_lat;
-      DPRINTF(LDQueue, "  load @ %x buffer miss, finish @T %lu",
-              inst.mem_addr, mem_avail + mem_duration);
-    }
-  } else if (is_store) {
-    // TODO: coalesce multiple store to the same addr
-    if (memst_queue_.is_full()) {
-      mem_avail = std::max(mem_avail, memst_queue_.next_avaiable());
-      memst_queue_.auto_dequeue(mem_avail);
-      DPRINTF(STQueue, "  store buffer full, next avail @T %lu", mem_avail);
-    }
-    memst_queue_.enqueue(exec_end + store_lat, inst.mem_addr);
-  }
-  lsu_tick_ = mem_avail + 1;
-  tick_t mem_end = mem_avail + 1 + mem_duration;
-  DPRINTF(LSUnit, "  %lu -> %lu", mem_avail, mem_end);
-  if (is_load || is_store)
-    DPRINTF(Timeline, "  LS Ena Tick -> %lu (mem avail %lu)", lsu_tick_,
-            mem_avail);
-
-  // 5. WB Stage
-  tick_t wb_end = mem_end + 1;
-  stats.cycles = wb_end; // Update total cycles
-
-  /** Overwrite */
-  // Forwarding / Register Update
-  if (inst.dst_reg != 0) {
-    uint8_t rd = inst.dst_reg;
-    auto& ent = reg_ready_.at(rd);
-    // 1 cycle lat for forward.
-    if (is_load) {
-      ent = mem_end;
-    } else {
-      ent = exec_end;
-    }
-    DPRINTF(Pipeline, "  RegUpd: x%d ready @T %lu", rd, ent);
-  }
-
-  // Branch misprediction: next instruction fetch delayed
-  if (inst.is_branch && is_mispred) {
-    // [IF 1 2 3] [ID] [EX]
-    //                     [ IF 1 2 3 ]
-    // flushed -----------|
-    auto next_start = exec_end + 1;
-    DPRINTF(Pipeline, "  Branch MisPred: Next fetch delayed from %lu to %lu",
-            start_tick_, next_start);
-    if (next_start > start_tick_) {
-      stats.branch_miss_cycles += (next_start - start_tick_);
-    }
-    start_tick_ = std::max(start_tick_, next_start);
-    stats.flush_count++;
-  }
+  wakeup_pending();
 }
 } // namespace pipeSim
