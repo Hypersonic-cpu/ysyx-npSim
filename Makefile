@@ -1,6 +1,6 @@
 CXX := clang++-22
 # Build runnable simulator (do not compile libapi)
-CXXFLAGS ?= -std=c++23 -stdlib=libc++ -O3 -fPIC -I./src
+CXXFLAGS ?= -std=c++23 -stdlib=libc++ -O1 -g -fPIC -I./src
 CXXFLAGS += -I $(NPC_HOME)/libs/json/include
 CXXFLAGS += -I $(NPC_HOME)/rvproc/sim-cxx
 CXXFLAGS += -D ACTIVE_MODE=1

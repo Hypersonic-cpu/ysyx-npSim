@@ -6,6 +6,7 @@
 #include <getopt.h>
 #include <iostream>
 #include <memory>
+#include <print>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -36,13 +37,14 @@ curr_tick() noexcept {
 
 void
 set_global_tick(tick_t t) {
+  DPRINTF(Clock, " == Global Tick Fwd @ %lu -> %lu ==", g_tick, t);
   assert(t >= g_tick);
   g_tick = t;
 }
 
 // Configuration parameters
-static tint_t mem_latency = 40;
-static tint_t mem_bstlat = 10;
+static tint_t mem_latency = 30;
+static tint_t mem_bstlat = 5;
 static std::string trace_file;
 // Tiny defaults
 static size_t l1i_size = 512;
@@ -70,21 +72,19 @@ static size_t ifq_size = 3;
 // Dummy pmem_read for CacheSimulator
 // SDRAM use same wire for R/W
 static tick_t loc_sdram_avail = 0;
-tint_t
+tick_t
 pmem_read(addr_t addr, addr_t* ret, bool bfirst) {
-  //   auto wait =
-  //     loc_sdram_avail > curr_tick() ? loc_sdram_avail - curr_tick() : 0;
-  //   auto total = bfirst ? (mem_latency + wait) : mem_bstlat;
-  //   loc_sdram_avail = curr_tick() + total;
-  //   DPRINTF(Sdram, "SDRAM access @ %8x from %lu to %lu (wait %lu, total
-  //   %lu)",
-  //           addr, curr_tick(),
-  //           loc_sdram_avail, wait, total);
-  // return total;
-  return bfirst ? mem_latency : mem_bstlat;
+  auto avail_tick = std::max(loc_sdram_avail, curr_tick());
+  auto latency =  bfirst ? mem_latency : mem_bstlat;
+  auto done_tick = avail_tick + latency;
+  loc_sdram_avail = done_tick;
+  DPRINTF(Sdram, "SDRAM access @ %8x from %lu to %lu (lat %u, avail @ %lu)",
+          addr, curr_tick(), done_tick, latency, avail_tick);
+  return done_tick;
+  // return bfirst ? mem_latency : mem_bstlat;
 }
 
-tint_t
+tick_t
 pmem_write(addr_t addr, word_t data, unsigned char mask, bool bfirst) {
   return pmem_read(addr, nullptr, bfirst);
 }
@@ -313,27 +313,29 @@ main(int argc, char** argv) {
   outfile_check(out_file);
 
   TraceReader reader(trace_file.c_str());
-  Pipeline pipe(ifq_size, 0, 2);
 
   /** Component Configuration */
   auto bpu = create_bpu();
   auto btb = std::make_shared<CompressedBTB>("BTB", btb_entries_pow2);
 
   auto iprefetcher = create_prefetcher(i_prefetch, "iPrefetcher");
-  CacheSimulator icache("iCache", l1i_size, l1i_blksize, l1i_assoc,
-                        iprefetcher);
+  auto icache = std::make_unique<CacheSimulator>(
+    "iCache", l1i_size, l1i_blksize, l1i_assoc, iprefetcher);
 
   auto dprefetcher = create_prefetcher(d_prefetch, "dPrefetcher");
   std::unique_ptr<CacheSimulator> dcache = nullptr;
   if (l1d_size > 0) {
     dcache = std::make_unique<CacheSimulator>(
       "dCache", l1d_size, l1d_blksize, l1d_assoc, dprefetcher);
+  } else {
+    dcache = std::make_unique<NoCache>("dCache");
   }
 
+  Pipeline pipe(ifq_size, 0, 2, icache.get(), dcache.get(), nullptr);
+
   simlist.push_back(std::addressof(pipe));
-  simlist.push_back(std::addressof(icache));
-  if (dcache)
-    simlist.push_back(dcache.get());
+  simlist.push_back(icache.get());
+  simlist.push_back(dcache.get());
   if (bpu)
     simlist.push_back(bpu.get());
   simlist.push_back(btb.get());
@@ -359,32 +361,37 @@ main(int argc, char** argv) {
       break;
     inst_cnt++;
 
+    DPRINTF(Main, "INST FEED: PC %8x rs%2d:%2d rd%2d mem%1d:%8x br%1d:%1d",
+            inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg,
+            inst.mem_op, inst.mem_addr, inst.is_branch, inst.br_taken);
     // Branch Predict
-    auto mispred = false;
-    if (inst.is_branch) {
-      auto btb_tar = btb->lookup(inst.pc);
-      // When BTB miss, predict as not taken
-      bool bpu_result = bpu ? bpu->predict(inst.pc, btb_tar) : false;
-      bool pred_taken = bpu_result && btb_tar != 0;
+    // auto mispred = false;
+    // if (inst.is_branch) {
+    //   auto btb_tar = btb->lookup(inst.pc);
+    //   // When BTB miss, predict as not taken
+    //   bool bpu_result = bpu ? bpu->predict(inst.pc, btb_tar) : false;
+    //   bool pred_taken = bpu_result && btb_tar != 0;
 
-      bool real_taken = (inst.br_taken != 0);
+    //   bool real_taken = (inst.br_taken != 0);
 
-      if (real_taken) {
-        btb->update(inst.pc, inst.mem_addr);
-      }
-      if (bpu) {
-        mispred =
-          !bpu->judge(real_taken, pred_taken, inst.mem_addr, btb_tar);
-        bpu->update(inst.pc, real_taken);
-      } else {
-        mispred = real_taken;
-      }
-    }
+    //   if (real_taken) {
+    //     btb->update(inst.pc, inst.mem_addr);
+    //   }
+    //   if (bpu) {
+    //     mispred =
+    //       !bpu->judge(real_taken, pred_taken, inst.mem_addr, btb_tar);
+    //     bpu->update(inst.pc, real_taken);
+    //   } else {
+    //     mispred = real_taken;
+    //   }
+    // }
 
-    while (!pipe.fetch_avail()) {
-      pipe.iota_loop();
-    }
+    // std::println("===FEED INST {:d} ===", curr_tick());
+    // First feed
     pipe.feed_inst(inst);
+    // Then process until next IF is available;
+    // std::println("===IOTA INST {:d} ===", curr_tick());
+    pipe.iota_inst();
 
     /** In event-driven simulator we use curr_tick(),
      * but in trace-driven, g_tick should be set back and forth
@@ -432,11 +439,16 @@ main(int argc, char** argv) {
         std::println(
           "#Cyc {:d} IPC {:.6f} BPMR {:.6f} i$MR {:.6f} d$MR {:.6f}",
           pipe.stats.cycles, pipe.stats.get_ipc(),
-          bpu ? bpu->stats.miss_rate() : -1, icache.stats.miss_rate(),
+          bpu ? bpu->stats.miss_rate() : -1, icache->stats.miss_rate(),
           dcache ? dcache->stats.miss_rate() : -1);
       }
       append_stats_json(root, dump_cnt++);
     }
+  }
+
+  // Drain the pipeline - process remaining in-flight instructions
+  while (!pipe.is_finished()) {
+    pipe.iota_inst(true);
   }
 
   // Dump final stats
