@@ -221,26 +221,35 @@ create_prefetcher(const std::string& type, const std::string& name) {
   return nullptr;
 }
 
-std::shared_ptr<BranchPredictor>
-create_bpu() {
-  std::shared_ptr<BranchPredictor> bpu = nullptr;
+std::unique_ptr<BranchPredictor>
+create_bpu_core() {
   if (bpu_type == "bimodal") {
-    bpu = std::make_shared<BimodalPredictor>("BinmodalBP", bpu_entries_pow2);
+    return std::make_unique<BimodalPredictor>("BimodalBP", bpu_entries_pow2);
   } else if (bpu_type == "alwaystaken") {
-    bpu = std::make_shared<AlwaysTakenPredictor>();
+    return std::make_unique<AlwaysTakenPredictor>();
   } else if (bpu_type == "btfnt") {
-    bpu = std::make_shared<BTFNTPredictor>();
+    return std::make_unique<BTFNTPredictor>();
   } else if (bpu_type == "none" || bpu_type.empty()) {
+    return std::make_unique<NoBPU>();
   } else {
     assert(false && "No such branch predictor");
+    return nullptr;
   }
+}
 
-  if (use_ras) {
-    assert(0 && "Unimplemented");
-    // Wrap with RAS (16 entries default?)
-    // bpu = std::make_shared<RASPredictorWrapper>(bpu, 16);
+std::unique_ptr<BTBBase>
+create_btb() {
+  if (btb_entries_pow2 == 0) {
+    return std::make_unique<NoBTB>();
   }
-  return bpu;
+  return std::make_unique<CompressedBTB>("BTB", btb_entries_pow2);
+}
+
+std::unique_ptr<BranchUnit>
+create_branch_unit() {
+  auto bpu = create_bpu_core();
+  auto btb = create_btb();
+  return std::make_unique<BranchUnit>(std::move(bpu), std::move(btb));
 }
 
 #include "nlohmann/json.hpp"
@@ -315,8 +324,7 @@ main(int argc, char** argv) {
   TraceReader reader(trace_file.c_str());
 
   /** Component Configuration */
-  auto bpu = create_bpu();
-  auto btb = std::make_shared<CompressedBTB>("BTB", btb_entries_pow2);
+  auto branch_unit = create_branch_unit();
 
   auto iprefetcher = create_prefetcher(i_prefetch, "iPrefetcher");
   auto icache = std::make_unique<CacheSimulator>(
@@ -331,14 +339,12 @@ main(int argc, char** argv) {
     dcache = std::make_unique<NoCache>("dCache");
   }
 
-  Pipeline pipe(ifq_size, 0, 2, icache.get(), dcache.get(), nullptr);
+  Pipeline pipe(ifq_size, 0, 2, icache.get(), dcache.get(), branch_unit.get());
 
   simlist.push_back(std::addressof(pipe));
   simlist.push_back(icache.get());
   simlist.push_back(dcache.get());
-  if (bpu)
-    simlist.push_back(bpu.get());
-  simlist.push_back(btb.get());
+  simlist.push_back(branch_unit.get());
   if (iprefetcher)
     simlist.push_back(iprefetcher.get());
   if (dprefetcher)
@@ -439,7 +445,7 @@ main(int argc, char** argv) {
         std::println(
           "#Cyc {:d} IPC {:.6f} BPMR {:.6f} i$MR {:.6f} d$MR {:.6f}",
           pipe.stats.cycles, pipe.stats.get_ipc(),
-          bpu ? bpu->stats.miss_rate() : -1, icache->stats.miss_rate(),
+          branch_unit->stats.miss_rate(), icache->stats.miss_rate(),
           dcache ? dcache->stats.miss_rate() : -1);
       }
       append_stats_json(root, dump_cnt++);
