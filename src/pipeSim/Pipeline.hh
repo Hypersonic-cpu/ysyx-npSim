@@ -106,6 +106,14 @@ public:
 
   Pipeline() = delete;
 
+  void update_fetch_ready(tick_t new_ready_time) {
+    if (stage_valid_.at(Fetch) < new_ready_time) {
+      DPRINTF(Pipeline, "Fetch Delayed by arbiter: %lu -> %lu", 
+              stage_valid_.at(Fetch), new_ready_time);
+      stage_valid_.at(Fetch) = new_ready_time;
+    }
+  }
+
   explicit Pipeline(size_t ifq_size, size_t ldq_size, size_t stq_size,
                     Cache* iport, Cache* dport, BranchUnit* bpu)
       : SimObject("Pipeline")
@@ -215,7 +223,7 @@ protected:
   };
 
   static constexpr tick_t BlockedTime{std::numeric_limits<tick_t>::max()};
-  static constexpr tick_t BranchMissPenalty{3}; // Branch misprediction penalty cycles
+  static constexpr tick_t BranchMissPenalty{7}; // Branch misprediction penalty cycles
 
   // struct TransactionComparator {
   //   bool

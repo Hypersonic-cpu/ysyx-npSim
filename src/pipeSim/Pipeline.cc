@@ -309,6 +309,14 @@ Pipeline::iota_inst(bool is_drain) {
       }
     }
 
+    // Also consider memory queues
+    if (!memld_queue_.is_empty()) {
+      next_event = std::min(next_event, memld_queue_.next_poptime());
+    }
+    if (!memst_queue_.is_empty()) {
+      next_event = std::min(next_event, memst_queue_.next_poptime());
+    }
+
     // Advance time: skip to next event or advance by 1
     if (next_event > curr_tick() && next_event != BlockedTime) {
       set_global_tick(next_event);

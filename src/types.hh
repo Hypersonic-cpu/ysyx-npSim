@@ -13,8 +13,8 @@ constexpr addr_t WordShift{2};
 
 extern tick_t curr_tick() noexcept;
 
-extern tick_t pmem_read (addr_t addr, addr_t* ret, bool bfirst);
-extern tick_t pmem_write(addr_t addr, word_t data, unsigned char mask, bool bfirst);
+extern tick_t pmem_read (addr_t addr, addr_t* ret, bool bfirst, uint16_t cache_id);
+extern tick_t pmem_write(addr_t addr, word_t data, unsigned char mask, bool bfirst, uint16_t cache_id);
 
 inline bool
 isDevice(addr_t a) {

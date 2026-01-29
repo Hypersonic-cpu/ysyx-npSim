@@ -71,8 +71,12 @@ public:
 
   CacheSimulator(const std::string& name, size_t size_bytes,
                  size_t line_bytes, size_t assoc = 1,
-                 std::shared_ptr<Prefetcher> prefetcher = nullptr);
+                 std::shared_ptr<Prefetcher> prefetcher = nullptr,
+                 uint16_t cache_id = 0);
   virtual ~CacheSimulator() = default;
+  
+  uint16_t cache_id() const { return cache_id_; }
+  
   // Trigger prefetch logic; returns whether a prefetch was issued
   bool handle_prefetch(addr_t addr, bool is_hit);
 
@@ -110,6 +114,8 @@ protected:
   tint_t const hitTime_;
   // Time to know hit or miss
   tint_t const judgeTime_;
+  
+  uint16_t const cache_id_; // 0=ICache, 1=DCache
 
   std::vector<std::vector<CacheLine>> setsArr_;
   std::shared_ptr<Prefetcher> prefetcher_;
@@ -126,8 +132,8 @@ protected:
  */
 class NoCache : public CacheSimulator {
 public:
-  explicit NoCache(const std::string& name)
-      : CacheSimulator(name, 64, 16, 1, nullptr) {} // Dummy values for base
+  explicit NoCache(const std::string& name, uint16_t cache_id = 1)
+      : CacheSimulator(name, 64, 16, 1, nullptr, cache_id) {} // Dummy values for base
 
   tick_t read_req(addr_t addr, word_t* ret) override;
   tick_t write_req(addr_t addr, word_t data, uint8_t mask) override;
