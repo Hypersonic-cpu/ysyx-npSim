@@ -30,6 +30,7 @@ using namespace cacheSim;
 
 // Global tick for CacheSimulator
 static tick_t g_tick = 0;
+
 tick_t
 curr_tick() noexcept {
   return g_tick;
@@ -69,24 +70,22 @@ static uint8_t print_mode = 2;
 // IF Queue size
 static size_t ifq_size = 3;
 
+#include "sdram.hh"
+static std::unique_ptr<SDRAM> sdram;
+
 // Dummy pmem_read for CacheSimulator
 // SDRAM use same wire for R/W
-static tick_t loc_sdram_avail = 0;
+// cache_id: 0=ICache, 1=DCache (LSU)
 tick_t
-pmem_read(addr_t addr, addr_t* ret, bool bfirst) {
-  auto avail_tick = std::max(loc_sdram_avail, curr_tick());
-  auto latency =  bfirst ? mem_latency : mem_bstlat;
-  auto done_tick = avail_tick + latency;
-  loc_sdram_avail = done_tick;
-  DPRINTF(Sdram, "SDRAM access @ %8x from %lu to %lu (lat %u, avail @ %lu)",
-          addr, curr_tick(), done_tick, latency, avail_tick);
-  return done_tick;
-  // return bfirst ? mem_latency : mem_bstlat;
+pmem_read(addr_t addr, addr_t* ret, bool bfirst, uint16_t cache_id) {
+  if (!sdram) return curr_tick();
+  bool is_lsu = (cache_id == 1);
+  return sdram->request_access(addr, bfirst, is_lsu);
 }
 
 tick_t
-pmem_write(addr_t addr, word_t data, unsigned char mask, bool bfirst) {
-  return pmem_read(addr, nullptr, bfirst);
+pmem_write(addr_t addr, word_t data, unsigned char mask, bool bfirst, uint16_t cache_id) {
+  return pmem_read(addr, nullptr, bfirst, cache_id);
 }
 
 size_t
@@ -326,17 +325,19 @@ main(int argc, char** argv) {
   /** Component Configuration */
   auto branch_unit = create_branch_unit();
 
+  sdram = std::make_unique<SDRAM>(mem_latency, mem_bstlat);
+
   auto iprefetcher = create_prefetcher(i_prefetch, "iPrefetcher");
   auto icache = std::make_unique<CacheSimulator>(
-    "iCache", l1i_size, l1i_blksize, l1i_assoc, iprefetcher);
+    "iCache", l1i_size, l1i_blksize, l1i_assoc, iprefetcher, 0); // cache_id=0 for ICache
 
   auto dprefetcher = create_prefetcher(d_prefetch, "dPrefetcher");
   std::unique_ptr<CacheSimulator> dcache = nullptr;
   if (l1d_size > 0) {
     dcache = std::make_unique<CacheSimulator>(
-      "dCache", l1d_size, l1d_blksize, l1d_assoc, dprefetcher);
+      "dCache", l1d_size, l1d_blksize, l1d_assoc, dprefetcher, 1); // cache_id=1 for DCache
   } else {
-    dcache = std::make_unique<NoCache>("dCache");
+    dcache = std::make_unique<NoCache>("dCache", 1); // cache_id=1
   }
 
   Pipeline pipe(ifq_size, 0, 2, icache.get(), dcache.get(), branch_unit.get());

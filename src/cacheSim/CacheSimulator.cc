@@ -1,6 +1,5 @@
 
 #include "cacheSim/CacheSimulator.hh"
-#include "debug.hh"
 #include "types.hh"
 #include <algorithm>
 #include <cassert>
@@ -11,7 +10,8 @@ using namespace cacheSim;
 
 CacheSimulator::CacheSimulator(const std::string& name, size_t size_bytes,
                                size_t line_bytes, size_t assoc,
-                               std::shared_ptr<Prefetcher> prefetcher)
+                               std::shared_ptr<Prefetcher> prefetcher,
+                               uint16_t cache_id)
     : SimObject(name)
     , stats(name)
     , lineBytes_(line_bytes)
@@ -20,6 +20,7 @@ CacheSimulator::CacheSimulator(const std::string& name, size_t size_bytes,
     , assoc_(assoc)
     , hitTime_(3)
     , judgeTime_(2)
+    , cache_id_(cache_id)
     , setsArr_(sets_, std::vector<CacheLine>(assoc_, {line_bytes}))
     , prefetcher_(prefetcher) {
   assert(size_bytes % (line_bytes * assoc) == 0);
@@ -134,7 +135,7 @@ CacheSimulator::handle_fill(CacheLine* blk, addr_t addr) {
   tick_t memory_done = 0;
   for (size_t i = 0; i < lineBytes_; i += sizeof(word_t)) {
     // overwrite
-    memory_done = pmem_read(block_addr + i, (word_t*)(ptr_raw + i), i == 0);
+    memory_done = pmem_read(block_addr + i, (word_t*)(ptr_raw + i), i == 0, cache_id_);
   }
   blk->setTag(tagOf(addr));
   blk->setValid();
@@ -235,12 +236,12 @@ tick_t
 NoCache::read_req(addr_t addr, word_t* ret) {
   ++stats.accesses;
   ++stats.misses;
-  return pmem_read(addr, ret, true);
+  return pmem_read(addr, ret, true, cache_id_);
 }
 
 tick_t
 NoCache::write_req(addr_t addr, word_t data, uint8_t mask) {
   ++stats.accesses;
   ++stats.misses;
-  return pmem_write(addr, data, mask, true);
+  return pmem_write(addr, data, mask, true, cache_id_);
 }
