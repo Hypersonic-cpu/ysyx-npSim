@@ -20,7 +20,7 @@ namespace pipeSim {
 
 void
 Pipeline::do_fetch() {
-  // fetch_queue_.auto_dequeue(curr_tick());
+  // Dequeue from fetch queue if ready
   if (fetch_queue_.is_empty()) {
   } else if (fetch_queue_.next_poptime() <= curr_tick()) {
     auto deq = fetch_queue_.dequeue();
@@ -28,8 +28,9 @@ Pipeline::do_fetch() {
             deq.trans->trace_inst.pc, curr_tick());
     sim_pipe_.at(Fetch) = std::move(deq.trans);
   } else {
-    // Full
+    // ICache not ready yet - frontend stall
     stage_valid_.at(Fetch) = fetch_queue_.next_poptime();
+    stats.frontend_stalls += fetch_queue_.next_poptime() - curr_tick();
     return;
   }
 
@@ -40,20 +41,45 @@ Pipeline::do_fetch() {
     return;
   auto trans = std::move(input_buffer_);
   const auto& inst = trans->trace_inst;
+
+  // Branch prediction at IF stage (before knowing if it's actually a branch)
+  auto pred = bpu->predict(inst.pc);
+  trans->br_pred = pred;
+
+  // Judge immediately using trace info (we know the real outcome)
+  // For non-branch instructions, real_taken=false
+  bool real_taken = inst.is_branch && inst.br_taken;
+  addr_t real_target = real_taken ? inst.mem_addr : 0;
+
+  // Use BranchUnit::judge to check accuracy and update stats
+  bool accurate = bpu->judge(real_taken, real_target, pred);
+  trans->br_mispred = !accurate;
+
+  if (!accurate) {
+    // Apply misprediction penalty immediately
+    stats.branch_miss_cycles += BranchMissPenalty;
+    stats.flush_count++;
+    stage_valid_.at(Fetch) =
+      std::max(stage_valid_.at(Fetch), curr_tick() + BranchMissPenalty);
+    DPRINTF(Pipeline,
+            "Fetch PC=0x%08x MISPRED: pred_redir=%d real_redir=%d pen=%lu",
+            inst.pc, pred.will_redirect, real_taken, BranchMissPenalty);
+  }
+
+  if (inst.is_branch) {
+    stats.branches++;
+  }
+
   tick_t fetch_done = imem->read_req(inst.pc, &dummy);
-  DPRINTF(Pipeline, "Fetch PC=0x%08x finish %lu -> %lu", inst.pc,
-          curr_tick(), fetch_done);
+  DPRINTF(Pipeline, "Fetch PC=0x%08x finish %lu -> %lu", inst.pc, curr_tick(),
+          fetch_done);
   assert(fetch_done - curr_tick() < 20'000U);
   IFEntry ifent(fetch_done, /* addr */ inst.pc, std::move(trans));
   fetch_queue_.enqueue(std::move(ifent));
 
-  // Use current tick for timing if stage is ready, otherwise use stage_ready
-  // time
-  // auto start_time = std::max(curr_tick(), stage_valid_.at(Fetch));
-  // fetch_queue_.enqueue(start_time + if_time, /* not used */ inst.pc);
-
-  stage_valid_.at(Fetch) =
-    fetch_queue_.is_full() ? fetch_queue_.next_poptime() : (curr_tick() + 1);
+  // Keep misprediction penalty if set, otherwise use normal timing
+  tick_t next_avail = fetch_queue_.is_full() ? fetch_queue_.next_poptime() : (curr_tick() + 1);
+  stage_valid_.at(Fetch) = std::max(stage_valid_.at(Fetch), next_avail);
   DPRINTF(Event, " - IF -> ID - Sched @ %lu, IFU ready @ %lu", fetch_done,
           stage_valid_.at(Fetch));
 }
@@ -61,27 +87,24 @@ Pipeline::do_fetch() {
 void
 Pipeline::do_decode() {
   assert(stage_valid_.at(Fetch) <= curr_tick());
-  // trans->finish_time = std::max()
   const auto& trans = sim_pipe_.at(Fetch);
   const auto& inst = trans->trace_inst;
   auto ready_time =
     std::max(reg_ready_.at(inst.src_reg[0]), reg_ready_.at(inst.src_reg[1]));
   auto rd = inst.dst_reg;
   if (ready_time == BlockedTime) {
-    // trans->next_stage = Decode;
-    // trans->finish_time = BlockedTime;
     raw_rs_ = std::make_pair(inst.src_reg[0], inst.src_reg[1]);
-    // pending_que_.emplace_back(std::move(trans));
     stage_valid_.at(Decode) = BlockedTime;
     DPRINTF(Pipeline, "Decode PC=0x%08x src[%d,%d] dst=%d T@ %lu -> blocked",
             inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg,
             curr_tick());
     return;
   } else {
-    // Dependencies finish time known
+    // Track RAW stalls
+    if (ready_time > curr_tick()) {
+      stats.backend_stalls += ready_time - curr_tick();
+    }
     auto finish_time = std::max(curr_tick(), ready_time) + 1;
-    // trans->next_stage = Execute;
-    // trans->finish_time = finish_time;
     sim_pipe_.at(Decode) = std::move(sim_pipe_.at(Fetch));
     stage_valid_.at(Decode) = finish_time;
     if (rd) {
@@ -99,10 +122,17 @@ Pipeline::do_execute() {
   const auto& trans = sim_pipe_.at(Decode);
   const auto& inst = trans->trace_inst;
 
+  // Update BPU and BTB with actual outcome (prediction was done at IF)
+  if (inst.is_branch) {
+    bool real_taken = inst.br_taken != 0;
+    addr_t real_target = real_taken ? inst.mem_addr : 0;
+    // Update BPU state based on actual outcome
+    bpu->update(inst.pc, real_taken, real_target);
+    // Judge was done at IF, stats already updated there
+  }
+
   DPRINTF(Pipeline, "Execute PC=0x%08x T@ %lu -> %lu", inst.pc, curr_tick(),
           curr_tick() + 1);
-  // trans->next_stage = Memory;
-  // trans->finish_time = curr_tick() + 1;
 
   if (inst.mem_op == trace::MemNone) {
     update_raw_time(inst, curr_tick() + 1);
@@ -128,18 +158,21 @@ Pipeline::do_memory() {
               inst.pc, inst.mem_addr);
     } else {
       mem_done = 1 + dmem->read_req(inst.mem_addr, &dummy);
+      // Track memory stalls
+      if (mem_done > curr_tick() + 1) {
+        stats.mem_stalls += mem_done - curr_tick() - 1;
+      }
       DPRINTF(Pipeline, "Memory Load PC=0x%08x addr=0x%08x finish T@ %lu",
               inst.pc, inst.mem_addr, mem_done);
     }
   } else if (inst.mem_op == trace::MemStore) {
     if (memst_queue_.is_full()) {
+      auto wait_time = memst_queue_.next_poptime() - curr_tick();
+      stats.mem_stalls += wait_time;
       stage_valid_.at(Memory) = memst_queue_.next_poptime();
-      // Leave sim pipe (out buffer) empty to block. Out buf of EXU
-      // will not be cleared;
       return;
     }
     mem_done = curr_tick() + 2;
-    // NOTE: Approximate. In fact we should access dCache when at dequeue.
     auto store_done = dmem->write_req(inst.mem_addr, 0, 0xf);
     DPRINTF(Pipeline,
             "Memory Store PC=0x%08x addr=0x%08x store finish T@ %lu",
@@ -150,21 +183,10 @@ Pipeline::do_memory() {
     DPRINTF(Pipeline, "Memory PC=0x%08x (no mem op)", inst.pc);
   }
 
-  // trans->finish_time = curr_tick() + memlat;
-  // if (memst_queue_.is_full()) {
-  //   auto pop_time = memst_queue_.next_poptime();
-  //   assert(pop_time > curr_tick());
-  //   stage_valid_.at(Memory) = pop_time;
-  // } else {
-  //   stage_valid_.at(Memory) = curr_tick() + memlat;
-  // }
-  // trans->next_stage = WriteBack;
-
   if (inst.mem_op != trace::MemNone) {
     update_raw_time(inst, mem_done);
   }
   stage_valid_.at(Memory) = mem_done;
-  // sim_que_.emplace(std::move(trans));
   sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
 }
 
@@ -238,26 +260,29 @@ Pipeline::update_raw_time(const Inst& inst, tick_t when) {
  */
 void
 Pipeline::iota_inst(bool is_drain) {
-  // assert(!sim_que_.empty());
-  // DPRINTF(Event, "Top finish @ %lu next fetch @ %lu",
-  //         sim_que_.top()->finish_time, next_fetch());
-  // assert(is_drain || sim_que_.top()->finish_time > next_fetch());
+  // Process pipeline until we can accept the next instruction
+  // In drain mode, keep going until all instructions complete
+  while (true) {
+    // Check exit condition first (after time advance)
+    if (!is_drain && input_buffer_ == nullptr) {
+      // Input buffer consumed, ready for next instruction
+      break;
+    }
+    if (is_drain && is_finished()) {
+      break;
+    }
 
-  while (is_drain ? !is_finished() : (input_buffer_ != nullptr)) {
-    auto last_tick = curr_tick();
-
+    // Process all stages that can advance at current tick
+    bool any_progress = false;
     for (int i = Num_PipeStage - 1; i >= 0; i--) {
-      // Can output -> next ready, can input -> previous ready.
-      // For a blocked stage, although it can output to sim pipe,
-      // its subsequent stage cannot process so the sim pipe will not
-      // be nullptr until the block time arrived.
-      if (sim_pipe_.at(i) == nullptr &&
-          (i == 0 || stage_valid_.at(i - 1) <= curr_tick()) &&
-          (!i || sim_pipe_.at(i - 1))
-          // (i ? sim_pipe_.at(i - 1) : input_buffer_)
-      ) {
+      // For Fetch (i==0): check stage_valid_.at(Fetch) for mispred stall
+      bool stage_ready = (i == 0) ? (stage_valid_.at(Fetch) <= curr_tick())
+                                  : (stage_valid_.at(i - 1) <= curr_tick());
+      if (sim_pipe_.at(i) == nullptr && stage_ready &&
+          (!i || sim_pipe_.at(i - 1))) {
         DPRINTF(Event, "  Moved (to S%d) T@ %lu", i, curr_tick());
         std::invoke(stage_handler_.at(i), this);
+        any_progress = true;
       }
     }
 
@@ -266,15 +291,30 @@ Pipeline::iota_inst(bool is_drain) {
       for (const auto& st : stage_valid_) {
         std::cerr << std::dec << st << ", ";
       }
-      std::cerr << "}\n";
-      std::cerr << "[Event]  StagePointer {";
-      for (const auto& st : sim_pipe_) {
-        std::cerr << std::dec << st << ", ";
-      }
-      std::cerr << "}\n";
+      std::cerr << "} T@ " << curr_tick() << "\n";
     }
 
-    set_global_tick(curr_tick() + 1);
+    // Find next event time (minimum of all pending stage times)
+    tick_t next_event = BlockedTime;
+    for (int i = 0; i < Num_PipeStage; i++) {
+      if (i == 0) {
+        // Fetch: consider IFQ poptime or stage_valid
+        if (!fetch_queue_.is_empty()) {
+          next_event = std::min(next_event, fetch_queue_.next_poptime());
+        }
+        next_event = std::min(next_event, stage_valid_.at(Fetch));
+      } else if (sim_pipe_.at(i - 1) != nullptr) {
+        // Stage has input ready
+        next_event = std::min(next_event, stage_valid_.at(i - 1));
+      }
+    }
+
+    // Advance time: skip to next event or advance by 1
+    if (next_event > curr_tick() && next_event != BlockedTime) {
+      set_global_tick(next_event);
+    } else {
+      set_global_tick(curr_tick() + 1);
+    }
   }
 }
 

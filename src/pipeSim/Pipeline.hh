@@ -22,7 +22,7 @@ namespace pipeSim {
 
 using Inst = trace::TraceInst;
 using Cache = cacheSim::CacheSimulator;
-using BrPred = branchSim::BranchPredictor;
+using BranchUnit = branchSim::BranchUnit;
 
 class Pipeline final : public SimObject {
 
@@ -33,10 +33,12 @@ public:
     size_t insts = 0;
     size_t cycles = 0;
     size_t stalls = 0;
-    size_t frontend_stalls = 0; // IFQ full
-    size_t backend_stalls = 0;  // RAW
-    size_t branch_miss_cycles = 0;
+    size_t frontend_stalls = 0;    // ICache miss stalls
+    size_t backend_stalls = 0;     // RAW hazard stalls
+    size_t branch_miss_cycles = 0; // Branch misprediction penalty
     size_t flush_count = 0;
+    size_t mem_stalls = 0;         // Memory access stalls
+    size_t branches = 0;           // Total branch instructions
 
     double
     get_ipc() const {
@@ -52,8 +54,17 @@ public:
       j["stalls"] = stalls;
       j["frontend_stalls"] = frontend_stalls;
       j["backend_stalls"] = backend_stalls;
+      j["mem_stalls"] = mem_stalls;
       j["branch_miss_cycles"] = branch_miss_cycles;
       j["flush_count"] = flush_count;
+      j["branches"] = branches;
+      // Bottleneck analysis
+      if (cycles > 0) {
+        j["frontend_stall_pct"] = 100.0 * frontend_stalls / cycles;
+        j["backend_stall_pct"] = 100.0 * backend_stalls / cycles;
+        j["mem_stall_pct"] = 100.0 * mem_stalls / cycles;
+        j["branch_miss_pct"] = 100.0 * branch_miss_cycles / cycles;
+      }
       return j;
     }
 
@@ -64,10 +75,19 @@ public:
       os << "  Cycles: " << cycles << "\n";
       os << "  IPC: " << get_ipc() << "\n";
       os << "  Stalls: " << stalls << "\n";
-      os << "    Frontend: " << frontend_stalls << "\n";
-      os << "    Backend: " << backend_stalls << "\n";
-      os << "  BrMissCyc: " << branch_miss_cycles << "\n";
-      os << "  Flushes: " << flush_count << "\n";
+      os << "    Frontend: " << frontend_stalls;
+      if (cycles > 0) os << " (" << (100.0 * frontend_stalls / cycles) << "%)";
+      os << "\n";
+      os << "    Backend (RAW): " << backend_stalls;
+      if (cycles > 0) os << " (" << (100.0 * backend_stalls / cycles) << "%)";
+      os << "\n";
+      os << "    Memory: " << mem_stalls;
+      if (cycles > 0) os << " (" << (100.0 * mem_stalls / cycles) << "%)";
+      os << "\n";
+      os << "  BrMissCyc: " << branch_miss_cycles;
+      if (cycles > 0) os << " (" << (100.0 * branch_miss_cycles / cycles) << "%)";
+      os << "\n";
+      os << "  Branches: " << branches << ", Flushes: " << flush_count << "\n";
     }
 
     void
@@ -79,13 +99,15 @@ public:
       backend_stalls = 0;
       branch_miss_cycles = 0;
       flush_count = 0;
+      mem_stalls = 0;
+      branches = 0;
     }
   } stats;
 
   Pipeline() = delete;
 
   explicit Pipeline(size_t ifq_size, size_t ldq_size, size_t stq_size,
-                    Cache* iport, Cache* dport, BrPred* bpu)
+                    Cache* iport, Cache* dport, BranchUnit* bpu)
       : SimObject("Pipeline")
       , reg_ready_{}
       , stage_valid_{}
@@ -99,7 +121,9 @@ public:
       , fetch_queue_(ifq_size)
       , memld_queue_(ldq_size)
       , memst_queue_(stq_size)
-      , ongoing_insts_{0} {}
+      , ongoing_insts_{0} {
+    assert(bpu && "BranchUnit must not be null");
+  }
 
   // Simulate all events before next IF time.
   // Should be called after the inst is feed, which
@@ -129,8 +153,6 @@ public:
     assert(input_buffer_ == nullptr);
     ongoing_insts_++;
     auto trans = std::make_unique<Transaction>(inst);
-    // set_global_tick(next_fetch());
-    // do_fetch(std::move(trans));
     input_buffer_ = std::move(trans);
     DPRINTF(Pipeline, "FeedInst PC=0x%08x Remain %lu", inst.pc,
             ongoing_insts_);
@@ -173,13 +195,14 @@ protected:
 
   struct Transaction {
     Inst trace_inst;
-    // tick_t finish_time;
-    // PipeStage next_stage;
+    branchSim::BranchResult br_pred; // Branch prediction made at IF stage
+    bool br_mispred = false;         // Set at IF when misprediction detected
 
     explicit Transaction() = delete;
     explicit Transaction(const Inst& inst)
-        : trace_inst{inst} // , finish_time{0} // , next_stage{Fetch}
-    {}
+        : trace_inst{inst}
+        , br_pred{false, 0, false}
+        , br_mispred{false} {}
   };
   using TransPtr = std::unique_ptr<Transaction>;
 
@@ -192,6 +215,7 @@ protected:
   };
 
   static constexpr tick_t BlockedTime{std::numeric_limits<tick_t>::max()};
+  static constexpr tick_t BranchMissPenalty{3}; // Branch misprediction penalty cycles
 
   // struct TransactionComparator {
   //   bool
@@ -246,7 +270,7 @@ protected:
   Cache* imem;
   Cache* dmem;
 
-  BrPred* bpu;
+  BranchUnit* bpu;
 
 private:
   size_t ongoing_insts_;
