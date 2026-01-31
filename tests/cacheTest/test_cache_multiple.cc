@@ -52,11 +52,30 @@ void dcache_write_callback(addr_t addr) {
               << std::hex << addr << std::dec << std::endl;
 }
 
+// Proper event-driven simulation step
 void step(std::vector<ClockedObject*>& objects, int cycles = 1) {
     for (int i = 0; i < cycles; ++i) {
-        current_time++;
+        // (I) Find minimum next_update() time
+        tick_t next_tick = InfTime;
         for (auto* obj : objects) {
-            obj->do_update();
+            tick_t obj_next = obj->next_update();
+            if (obj_next < next_tick) {
+                next_tick = obj_next;
+            }
+        }
+        
+        // (II) Forward time to that tick
+        if (next_tick == InfTime) {
+            current_time++;  // No pending events, just advance by 1
+        } else {
+            current_time = next_tick;
+        }
+        
+        // (III) Call do_update to all clocked objects in order: mem -> cache
+        for (auto* obj : objects) {
+            if (obj->next_update() <= current_time) {
+                obj->do_update();
+            }
         }
     }
 }

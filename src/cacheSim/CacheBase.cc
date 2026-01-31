@@ -217,22 +217,24 @@ PipeCache::handle_hit(const PipePtr& bk) {
     is_read ? bk->line->atAligned(offsetOf(bk->addr)) : bk->wrdata;
   blocked_until_ = curr_tick() + 1;
   if (is_read) {
-    std::invoke(read_resp_handler, bk->addr, dt);
+    std::invoke(r_resp_handler, bk->addr, dt);
   } else {
     auto mask = CacheBase::strbExtend(bk->wrstrb);
     dt = (~mask & dt) | (mask & bk->wrdata);
     bk->line->setDirty();
-    std::invoke(write_resp_handler, bk->addr);
+    std::invoke(w_resp_handler, bk->addr);
   }
   DPRINTF(Cache, "Cache Resp (%s) @ addr %08x data %08x",
           bk->op == MemLoad ? "Rd" : "Wr", bk->addr, dt);
 }
 
+// MUST be called by memory do_update, before cache->do_update
+// Triggering next-cycle response to CPU
 void
 PipeCache::memr_resp(addr_t addr, const std::vector<word_t>& ret) {
   assert(r_waiting_);
   handle_fill(pipe_.back()->line, addr, ret);
-  blocked_until_ = curr_tick();
+  blocked_until_ = curr_tick() + 1;
   r_waiting_ = false;
 }
 
@@ -240,7 +242,7 @@ void
 PipeCache::memw_resp(addr_t addr) {
   assert(w_waiting_);
   w_waiting_ = false;
-  blocked_until_ = curr_tick();
+  blocked_until_ = curr_tick() + 1;
 }
 
 void
@@ -274,6 +276,8 @@ PipeCache::update_impl() {
     pipe_[i] = std::move(pipe_[i - 1]);
   }
   is_shifted_ = true;
+  // Notify the CPU-side that cache is available this cycle
+  std::invoke(avail_handler);
 }
 
 bool
@@ -355,13 +359,13 @@ NoCache::write_req(addr_t addr, word_t data, uint8_t mask) {
 void NoCache::memr_resp(addr_t addr, const std::vector<word_t>& ret) {
   assert(r_busy_);
   assert(ret.size() == 1);
-  std::invoke(read_resp_handler, addr, ret[0]);
+  std::invoke(r_resp_handler, addr, ret[0]);
   r_busy_ = false;
 }
 
 void NoCache::memw_resp(addr_t addr) {
   assert(w_busy_);
-  std::invoke(write_resp_handler, addr);
+  std::invoke(w_resp_handler, addr);
   w_busy_ = false;
 }
 
