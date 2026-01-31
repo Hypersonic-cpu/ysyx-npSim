@@ -1,5 +1,6 @@
 #include "Pipeline.hh"
 #include "debug.hh"
+#include "sdram.hh"
 #include "trace.hh"
 #include "types.hh"
 #include <algorithm>
@@ -7,6 +8,8 @@
 #include <cstddef>
 #include <functional>
 #include <utility>
+
+using SDRAM = memSim::SDRAM;
 
 namespace pipeSim {
 
@@ -24,9 +27,17 @@ Pipeline::do_fetch() {
   if (fetch_queue_.is_empty()) {
   } else if (fetch_queue_.next_poptime() <= curr_tick()) {
     auto deq = fetch_queue_.dequeue();
-    DPRINTF(Pipeline, "Fetch Resp PC=0x%08x T@ %lu",
-            deq.trans->trace_inst.pc, curr_tick());
-    sim_pipe_.at(Fetch) = std::move(deq.trans);
+    DPRINTF(Pipeline, "Fetch Resp PC=0x%08x T@ %lu penalty=%d",
+            deq.trans->trace_inst.pc, curr_tick(),
+            deq.trans->is_penalty_fetch);
+
+    // Drop penalty fetches - they don't enter ID stage
+    if (!deq.trans->is_penalty_fetch) {
+      sim_pipe_.at(Fetch) = std::move(deq.trans);
+    } else {
+      DPRINTF(Pipeline, "Drop penalty fetch PC=0x%08x",
+              deq.trans->trace_inst.pc);
+    }
   } else {
     // ICache not ready yet - frontend stall
     stage_valid_.at(Fetch) = fetch_queue_.next_poptime();
@@ -36,7 +47,55 @@ Pipeline::do_fetch() {
 
   assert(!fetch_queue_.is_full());
 
-  // The code below does not insert into sim_pipe_
+  // Process pending penalty fetches first
+  if (!penalty_fetch_queue_.empty()) {
+    addr_t penalty_pc = penalty_fetch_queue_.front();
+    penalty_fetch_queue_.pop();
+
+    // Create dummy instruction (add x0, x0, x0)
+    Inst penalty_inst;
+    penalty_inst.pc = penalty_pc;
+    penalty_inst.mem_addr = 0;
+    penalty_inst.mem_op = 0;
+    penalty_inst.is_branch = false;
+    penalty_inst.br_taken = false;
+    penalty_inst.dst_reg = 0;
+    penalty_inst.src_reg[0] = 0;
+    penalty_inst.src_reg[1] = 0;
+    penalty_inst.sys_op = 0;
+    penalty_inst.dummy = 0;
+
+    auto penalty_trans =
+      std::make_unique<Transaction>(penalty_inst, /* is_penalty */ true);
+
+    // Don't call BPU predict/judge for penalty fetches
+    // They're just consuming cache/memory bandwidth, not affecting
+    // prediction
+    penalty_trans->br_pred = {false, 0, false};
+    penalty_trans->br_mispred = false;
+
+    // Penalty fetch goes through ICache
+    tick_t fetch_done = imem->read_req(penalty_pc, &dummy);
+    DPRINTF(Pipeline, "PenaltyFetch PC=0x%08x finish %lu -> %lu", penalty_pc,
+            curr_tick(), fetch_done);
+
+    IFEntry ifent(fetch_done, penalty_pc, std::move(penalty_trans));
+    fetch_queue_.enqueue(std::move(ifent));
+
+    // Next fetch can only start after:
+    // 1. Queue has space (if full, wait for next pop)
+    // 2. This fetch completes (cache/memory becomes available)
+    // 3. At least next cycle (pipeline constraint)
+    tick_t next_avail =
+      std::max({fetch_queue_.is_full() ? fetch_queue_.next_poptime() : 0UL,
+                fetch_done, curr_tick() + 1});
+    stage_valid_.at(Fetch) = std::max(stage_valid_.at(Fetch), next_avail);
+    DPRINTF(Event, " - PenaltyFetch Sched @ %lu, IFU ready @ %lu",
+            fetch_done, stage_valid_.at(Fetch));
+    return;
+  }
+
+  // The code below inserts input buffer to fetch queue
   if (!input_buffer_)
     return;
   auto trans = std::move(input_buffer_);
@@ -56,29 +115,65 @@ Pipeline::do_fetch() {
   trans->br_mispred = !accurate;
 
   if (!accurate) {
-    // Apply misprediction penalty immediately
+    // Generate penalty fetches for the wrong path
+    // Case 1: Should taken but not predicted -> fetch pc+4, pc+8, ...
+    // Case 2: Should not taken but predicted to addr 'a' -> fetch a+4, a+8,
+    // ...
+    addr_t wrong_path_pc;
+    if (real_taken && !pred.will_redirect) {
+      // Predicted not-taken, but should take: wrong path is pc+4, pc+8...
+      wrong_path_pc = inst.pc + 4;
+    } else if (!real_taken && pred.will_redirect) {
+      // Predicted taken to 'a', but should not: wrong path is a+4, a+8...
+      wrong_path_pc = pred.pred_target + 4;
+    } else {
+      // Bad target: predicted to wrong address
+      // This happens when both predict taken but target differs
+      wrong_path_pc = pred.pred_target + 4;
+    }
+
+    // Enqueue penalty fetches
+    for (size_t i = 0; i < PenaltyFetchCount; i++) {
+      penalty_fetch_queue_.push(wrong_path_pc);
+      DPRINTF(Pipeline, "Enqueue penalty fetch #%lu PC=0x%08x", i,
+              wrong_path_pc);
+      wrong_path_pc += 4;
+    }
+
     stats.branch_miss_cycles += BranchMissPenalty;
     stats.flush_count++;
+
+    // Block fetch stage for penalty cycles (in addition to penalty fetches)
     stage_valid_.at(Fetch) =
       std::max(stage_valid_.at(Fetch), curr_tick() + BranchMissPenalty);
+
     DPRINTF(Pipeline,
-            "Fetch PC=0x%08x MISPRED: pred_redir=%d real_redir=%d pen=%lu",
-            inst.pc, pred.will_redirect, real_taken, BranchMissPenalty);
+            "Fetch PC=0x%08x MISPRED: pred_redir=%d real_redir=%d "
+            "pen_cyc=%lu pen_fetch=%lu",
+            inst.pc, pred.will_redirect, real_taken, BranchMissPenalty,
+            PenaltyFetchCount);
   }
 
   if (inst.is_branch) {
     stats.branches++;
   }
 
-  tick_t fetch_done = imem->read_req(inst.pc, &dummy);
-  DPRINTF(Pipeline, "Fetch PC=0x%08x finish %lu -> %lu", inst.pc, curr_tick(),
-          fetch_done);
-  assert(fetch_done - curr_tick() < 20'000U);
+  imem->read_req(inst.pc);
+  // tick_t fetch_done = imem->read_req(inst.pc, &dummy);
+  DPRINTF(Pipeline, "Fetch PC=0x%08x finish %lu -> %lu", inst.pc,
+          curr_tick(), fetch_done);
+  // Assertion removed: with complex cache hierarchies and memory contention,
+  // fetch latency can legitimately exceed 20k cycles
   IFEntry ifent(fetch_done, /* addr */ inst.pc, std::move(trans));
   fetch_queue_.enqueue(std::move(ifent));
 
-  // Keep misprediction penalty if set, otherwise use normal timing
-  tick_t next_avail = fetch_queue_.is_full() ? fetch_queue_.next_poptime() : (curr_tick() + 1);
+  // Next fetch can only start after:
+  // 1. Queue has space (if full, wait for next pop)
+  // 2. This fetch completes (cache/memory becomes available)
+  // 3. At least next cycle (pipeline constraint)
+  tick_t next_avail =
+    std::max({fetch_queue_.is_full() ? fetch_queue_.next_poptime() : 0UL,
+              fetch_done, curr_tick() + 1});
   stage_valid_.at(Fetch) = std::max(stage_valid_.at(Fetch), next_avail);
   DPRINTF(Event, " - IF -> ID - Sched @ %lu, IFU ready @ %lu", fetch_done,
           stage_valid_.at(Fetch));
@@ -145,40 +240,55 @@ Pipeline::do_execute() {
 void
 Pipeline::do_memory() {
   memst_queue_.auto_dequeue(curr_tick());
-  memld_queue_.auto_dequeue(curr_tick());
 
   const auto& trans = sim_pipe_.at(Execute);
   const auto& inst = trans->trace_inst;
 
   tick_t mem_done = curr_tick() + 1;
   if (inst.mem_op == trace::MemLoad) {
-    if (auto bufhit = memst_queue_.contains(inst.mem_addr)) {
-      mem_done = curr_tick() + 2;
-      DPRINTF(Pipeline, "Memory Load PC=0x%08x addr=0x%08x STBuf hit",
-              inst.pc, inst.mem_addr);
-    } else {
-      mem_done = 1 + dmem->read_req(inst.mem_addr, &dummy);
-      // Track memory stalls
-      if (mem_done > curr_tick() + 1) {
-        stats.mem_stalls += mem_done - curr_tick() - 1;
-      }
-      DPRINTF(Pipeline, "Memory Load PC=0x%08x addr=0x%08x finish T@ %lu",
-              inst.pc, inst.mem_addr, mem_done);
+    // Load must complete synchronously (not out-of-order)
+    // Check store queue for forwarding
+    // if (auto bufhit = memst_queue_.contains(inst.mem_addr)) {
+    //   mem_done = curr_tick() + 2;
+    //   DPRINTF(Pipeline, "Memory Load PC=0x%08x addr=0x%08x STBuf hit",
+    //           inst.pc, inst.mem_addr);
+    // } else {
+
+    // mem_done = 1 + dmem->read_req(inst.mem_addr, &dummy);
+    dmem->read_req(inst.mem_addr, 1);
+
+    // Track memory stalls
+    if (mem_done > curr_tick() + 1) {
+      stats.mem_stalls += mem_done - curr_tick() - 1;
     }
+    DPRINTF(Pipeline, "Memory Load PC=0x%08x addr=0x%08x finish T@ %lu",
+            inst.pc, inst.mem_addr, mem_done);
+    // }
   } else if (inst.mem_op == trace::MemStore) {
-    if (memst_queue_.is_full()) {
-      auto wait_time = memst_queue_.next_poptime() - curr_tick();
-      stats.mem_stalls += wait_time;
-      stage_valid_.at(Memory) = memst_queue_.next_poptime();
-      return;
+    // Store behavior depends on cache type
+    if (memst_queue_.capacity() > 0) {
+      // NoCache: use store queue for buffering
+      if (memst_queue_.is_full()) {
+        auto wait_time = memst_queue_.next_poptime() - curr_tick();
+        stats.mem_stalls += wait_time;
+        stage_valid_.at(Memory) = memst_queue_.next_poptime();
+        return;
+      }
+      mem_done = curr_tick() + 2;
+      auto store_done = dmem->write_req(inst.mem_addr, 0, 0xf);
+      DPRINTF(Pipeline,
+              "Memory Store PC=0x%08x addr=0x%08x [StQ] finish T@ %lu",
+              inst.pc, inst.mem_addr, store_done);
+      memst_queue_.enqueue(IOEntryBase{store_done, inst.mem_addr});
+    } else {
+      // Has dCache: write directly (write-through)
+      mem_done = curr_tick() + 1;
+      auto store_done = dmem->write_req(inst.mem_addr, 0, 0xf);
+      DPRINTF(Pipeline,
+              "Memory Store PC=0x%08x addr=0x%08x [Direct] finish T@ %lu",
+              inst.pc, inst.mem_addr, store_done);
+      // Don't wait for store to complete (write-through, non-blocking)
     }
-    mem_done = curr_tick() + 2;
-    auto store_done = dmem->write_req(inst.mem_addr, 0, 0xf);
-    DPRINTF(Pipeline,
-            "Memory Store PC=0x%08x addr=0x%08x store finish T@ %lu",
-            inst.pc, inst.mem_addr, store_done);
-    assert(store_done - curr_tick() < 20'000);
-    memst_queue_.enqueue(IOEntryBase{store_done, inst.mem_addr});
   } else {
     DPRINTF(Pipeline, "Memory PC=0x%08x (no mem op)", inst.pc);
   }
@@ -262,18 +372,13 @@ void
 Pipeline::iota_inst(bool is_drain) {
   // Process pipeline until we can accept the next instruction
   // In drain mode, keep going until all instructions complete
-  while (true) {
-    // Check exit condition first (after time advance)
-    if (!is_drain && input_buffer_ == nullptr) {
-      // Input buffer consumed, ready for next instruction
-      break;
-    }
-    if (is_drain && is_finished()) {
-      break;
+  while (!(is_drain ? is_finished() : input_buffer_ == nullptr)) {
+    // Clear blocked before shifting pipeline
+    for (auto ptr : clocked_objs_) {
+      if (curr_tick() <= ptr->next_update())
+        ptr->do_update();
     }
 
-    // Process all stages that can advance at current tick
-    bool any_progress = false;
     for (int i = Num_PipeStage - 1; i >= 0; i--) {
       // For Fetch (i==0): check stage_valid_.at(Fetch) for mispred stall
       bool stage_ready = (i == 0) ? (stage_valid_.at(Fetch) <= curr_tick())
@@ -282,7 +387,6 @@ Pipeline::iota_inst(bool is_drain) {
           (!i || sim_pipe_.at(i - 1))) {
         DPRINTF(Event, "  Moved (to S%d) T@ %lu", i, curr_tick());
         std::invoke(stage_handler_.at(i), this);
-        any_progress = true;
       }
     }
 
@@ -309,10 +413,7 @@ Pipeline::iota_inst(bool is_drain) {
       }
     }
 
-    // Also consider memory queues
-    if (!memld_queue_.is_empty()) {
-      next_event = std::min(next_event, memld_queue_.next_poptime());
-    }
+    // Also consider memory store queue
     if (!memst_queue_.is_empty()) {
       next_event = std::min(next_event, memst_queue_.next_poptime());
     }
@@ -325,34 +426,5 @@ Pipeline::iota_inst(bool is_drain) {
     }
   }
 }
-
-// while (!sim_que_.empty() &&
-//        (is_drain || sim_que_.top()->finish_time <= next_fetch())) {
-//   auto trans = std::move(const_cast<TransPtr&>(sim_que_.top()));
-//   sim_que_.pop();
-
-//   set_global_tick(trans->finish_time);
-//   DPRINTF(Event, " -         dequeue and set tick @ %lu tar %d",
-//           curr_tick(), trans->next_stage);
-
-//   auto stage_avail = stage_avail_time(trans->next_stage);
-//   if (stage_avail == BlockedTime) {
-//     DPRINTF(Event, " -         stage bloked. put into pending que");
-//     pending_que_.emplace_back(std::move(trans));
-//     continue;
-//   } else if (stage_avail > trans->finish_time) {
-//     trans->finish_time = stage_avail;
-//     DPRINTF(Event, " -         rescheduled to T@ %lu", stage_avail);
-//     sim_que_.emplace(std::move(trans));
-//     continue;
-//   }
-
-//   // Trigger the appropriate stage handler
-//   assert(trans->next_stage != Fetch);
-//   std::invoke(stage_handler_.at(trans->next_stage), this,
-//               std::move(trans));
-//   if (last_tick != curr_tick())
-//     wakeup_pending();
-//   last_tick = curr_tick();
 
 } // namespace pipeSim

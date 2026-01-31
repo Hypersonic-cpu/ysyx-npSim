@@ -1,8 +1,8 @@
 #pragma once
 #include "../types.hh"
 #include <cassert>
-#include <vector>
 #include <iostream>
+#include <vector>
 
 namespace cacheSim {
 
@@ -10,6 +10,7 @@ class CacheLine {
 private:
   addr_t tag;
   bool valid;
+  bool dirty;
   const size_t lineSize_;
   std::vector<word_t> data;
 
@@ -19,10 +20,10 @@ public:
       : lineSize_(line_size)
       , tag(0)
       , valid(false)
+      , dirty(false)
       , data(line_size >> WordShift, 0)
       , stamp(0)
-      , is_prefetched(false) {
-  }
+      , is_prefetched(false) {}
 
   void
   invalidate() {
@@ -30,16 +31,26 @@ public:
     this->tag = 0;
     this->stamp = 0;
     this->valid = false;
-    this->is_prefetched = false;
+  }
+
+  void activate() {
+    this->valid = true;
+    this->dirty = false;
+    this->stamp = curr_tick();
   }
 
   tick_t stamp;
-  tick_t ready;
+  // tick_t ready;
   bool is_prefetched;
 
   bool
   isValid() const {
     return this->valid;
+  }
+
+  bool
+  isDirty() const {
+    return this->dirty;
   }
 
   addr_t
@@ -57,10 +68,21 @@ public:
     this->valid = true;
   }
 
+  void
+  setDirty() {
+    this->dirty = true;
+  }
+
   template <typename T>
   T*
   getRawData() {
     return reinterpret_cast<T*>(this->data.data());
+  }
+
+  void
+  setVecData(const std::vector<word_t>& in) {
+    assert(in.size() == this->data.size());
+    std::copy(in.begin(), in.end(), data.begin());
   }
 
   word_t

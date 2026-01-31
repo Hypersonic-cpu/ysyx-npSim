@@ -27,6 +27,7 @@ using namespace trace;
 using namespace pipeSim;
 using namespace branchSim;
 using namespace cacheSim;
+using namespace debug;
 
 // Global tick for CacheSimulator
 static tick_t g_tick = 0;
@@ -38,7 +39,7 @@ curr_tick() noexcept {
 
 void
 set_global_tick(tick_t t) {
-  DPRINTF(Clock, " == Global Tick Fwd @ %lu -> %lu ==", g_tick, t);
+  DPRINTFS(Clock, " == Global Tick Fwd @ %lu -> %lu ==", g_tick, t);
   assert(t >= g_tick);
   g_tick = t;
 }
@@ -67,8 +68,9 @@ static size_t btb_entries_pow2 = 4;
 static bool use_ras = false;
 static uint8_t print_mode = 2;
 
-// IF Queue size
-static size_t ifq_size = 3;
+// Pipeline Queue sizes
+static size_t ifq_size = 8;
+static size_t stq_size = 8; // Only used when dCache is NoCache
 
 #include "sdram.hh"
 static std::unique_ptr<SDRAM> sdram;
@@ -76,17 +78,15 @@ static std::unique_ptr<SDRAM> sdram;
 // Dummy pmem_read for CacheSimulator
 // SDRAM use same wire for R/W
 // cache_id: 0=ICache, 1=DCache (LSU)
-tick_t
-pmem_read(addr_t addr, addr_t* ret, bool bfirst, uint16_t cache_id) {
-  if (!sdram) return curr_tick();
-  bool is_lsu = (cache_id == 1);
-  return sdram->request_access(addr, bfirst, is_lsu);
-}
+// if (!sdram) return curr_tick();
+// bool is_lsu = (cache_id == 1);
+// return sdram->request_access(addr, bfirst, is_lsu);
 
-tick_t
-pmem_write(addr_t addr, word_t data, unsigned char mask, bool bfirst, uint16_t cache_id) {
-  return pmem_read(addr, nullptr, bfirst, cache_id);
-}
+// Always functional
+void
+pmem_read(addr_t addr, addr_t* ret) {}
+void
+pmem_write(addr_t addr, word_t data, unsigned char mask) {}
 
 size_t
 parse_size(const std::string& s) {
@@ -125,6 +125,7 @@ parse_args(int argc, char* argv[]) {
     {"btb-size", required_argument, 0, 't'},
     {"use-ras", no_argument, 0, 'R'},
     {"ifq-size", required_argument, 0, 'q'},
+    {"stq-size", required_argument, 0, 'w'},
     {"print-brief", no_argument, 0, 201U},
     {"print-none", no_argument, 0, 200U},
     {0, 0, 0, 0}};
@@ -190,6 +191,9 @@ parse_args(int argc, char* argv[]) {
     case 'q':
       ifq_size = std::stoul(optarg);
       break;
+    case 'w':
+      stq_size = std::stoul(optarg);
+      break;
     case 201:
       print_mode = 1;
       break;
@@ -224,6 +228,12 @@ std::unique_ptr<BranchPredictor>
 create_bpu_core() {
   if (bpu_type == "bimodal") {
     return std::make_unique<BimodalPredictor>("BimodalBP", bpu_entries_pow2);
+  } else if (bpu_type == "gshare") {
+    return std::make_unique<GSharePredictor>("GShareBP", bpu_entries_pow2,
+                                             12); // 12-bit history
+  } else if (bpu_type == "tournament") {
+    return std::make_unique<TournamentPredictor>(
+      "TournamentBP", bpu_entries_pow2, 12); // 12-bit history
   } else if (bpu_type == "alwaystaken") {
     return std::make_unique<AlwaysTakenPredictor>();
   } else if (bpu_type == "btfnt") {
@@ -329,18 +339,25 @@ main(int argc, char** argv) {
 
   auto iprefetcher = create_prefetcher(i_prefetch, "iPrefetcher");
   auto icache = std::make_unique<CacheSimulator>(
-    "iCache", l1i_size, l1i_blksize, l1i_assoc, iprefetcher, 0); // cache_id=0 for ICache
+    "iCache", l1i_size, l1i_blksize, l1i_assoc, iprefetcher,
+    0); // cache_id=0 for ICache
 
   auto dprefetcher = create_prefetcher(d_prefetch, "dPrefetcher");
   std::unique_ptr<CacheSimulator> dcache = nullptr;
   if (l1d_size > 0) {
     dcache = std::make_unique<CacheSimulator>(
-      "dCache", l1d_size, l1d_blksize, l1d_assoc, dprefetcher, 1); // cache_id=1 for DCache
+      "dCache", l1d_size, l1d_blksize, l1d_assoc, dprefetcher,
+      1); // cache_id=1 for DCache
   } else {
     dcache = std::make_unique<NoCache>("dCache", 1); // cache_id=1
   }
 
-  Pipeline pipe(ifq_size, 0, 2, icache.get(), dcache.get(), branch_unit.get());
+  // When dCache exists, no need for store queue (write-through)
+  // Only use store queue when NoCache (need buffering for SDRAM)
+  size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
+
+  Pipeline pipe(ifq_size, actual_stq_size, icache.get(), dcache.get(),
+                branch_unit.get());
 
   simlist.push_back(std::addressof(pipe));
   simlist.push_back(icache.get());
@@ -368,7 +385,7 @@ main(int argc, char** argv) {
       break;
     inst_cnt++;
 
-    DPRINTF(Main, "INST FEED: PC %8x rs%2d:%2d rd%2d mem%1d:%8x br%1d:%1d",
+    DPRINTFS(Main, "INST FEED: PC %8x rs%2d:%2d rd%2d mem%1d:%8x br%1d:%1d",
             inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg,
             inst.mem_op, inst.mem_addr, inst.is_branch, inst.br_taken);
     // Branch Predict
