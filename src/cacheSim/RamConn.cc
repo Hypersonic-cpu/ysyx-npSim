@@ -1,26 +1,27 @@
-#include "cacheSim/RamConn.hh"
 #include "cacheSim/CacheBase.hh"
+#include "cacheSim/RamConn.hh"
+#include "trace.hh"
 #include <algorithm>
 
 namespace memSim {
 void
 RAMArbiter::recv_req(const MemReq& req) {
   auto id = req.id;
-  assert(reqs_.at(id).op == MemNone);
   assert(req.op != MemNone);
-  auto& ent = reqs_.at(id);
+  auto& ent = req.op == MemLoad ? reqs_.at(id).first : reqs_.at(id).second;
+  assert(ent.op == MemNone);
   ent = req;
   ent.lat = lat_of(req);
   if (busy_until_ == InfTime) {
     busy_until_ = curr_tick() + ent.lat;
-    serving_id_ = id;
+    serving_req_ = &ent;
   }
 }
 
 void
 RAMArbiter::update_impl() {
   // Response current target
-  auto ent = reqs_.at(serving_id_);
+  auto& ent = *serving_req_;
   if (ent.op == trace::MemLoad) {
     std::vector<word_t> buf(ent.bst_len);
     for (auto i = 0; i < buf.size(); i++) {
@@ -35,15 +36,18 @@ RAMArbiter::update_impl() {
   }
 
   // Find next serve target
-  auto it =
-    std::find_if(reqs_.rbegin(), reqs_.rend(), [](MemReq ent) -> bool {
-      return ent.op != trace::MemNone;
+  auto it = std::find_if(
+    reqs_.rbegin(), reqs_.rend(), [](const HostPort& hst) -> bool {
+      return hst.first.op != MemNone || hst.second.op != MemNone;
     });
   if (it == reqs_.rend()) {
+    // Empty. Do not update anymore
     busy_until_ = InfTime;
   } else {
-    busy_until_ = curr_tick() + it->lat;
-    serving_id_ = it->id;
+    // Read prior controller
+    auto& nxt = it->first.op == MemNone ? it->first : it->second;
+    busy_until_ = curr_tick() + nxt.lat;
+    serving_req_ = &nxt;
   }
 }
 

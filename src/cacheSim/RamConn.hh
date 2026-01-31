@@ -11,7 +11,7 @@
 #include <vector>
 
 namespace cacheSim {
-  class CacheBase;
+class CacheBase;
 }
 
 namespace memSim {
@@ -41,12 +41,12 @@ public:
   RAMArbiter(const std::string& name, tint_t lat, tint_t bst_lat,
              const std::vector<Cache*>& hosts)
       : ClockedObject(name)
-      , serving_id_{0xffff}
+      , serving_req_{nullptr}
       , latency_(lat)
       , burst_latency_(bst_lat)
       , busy_until_(0)
       , hosts_{hosts}
-      , reqs_(hosts.size(), {MemNone}) {}
+      , reqs_(hosts.size(), {{MemNone}, {MemNone}}) {}
 
   void recv_req(const MemReq& req);
 
@@ -65,12 +65,13 @@ private:
     return latency_ + (req.bst_len - 1) * burst_latency_;
   }
 
-  uint16_t serving_id_;
+  MemReq* serving_req_;
   tint_t const latency_;
   tint_t const burst_latency_;
   tick_t busy_until_; // When current access finishes
   std::vector<Cache*> const hosts_;
-  std::vector<MemReq> reqs_;
+  using HostPort = std::pair<MemReq, MemReq>;
+  std::vector<HostPort> reqs_; // pair<Read, Write>
 };
 
 } // namespace memSim
