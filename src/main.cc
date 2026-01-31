@@ -14,7 +14,7 @@
 
 #include "base.hh"
 #include "branchSim/BranchPredictor.hh"
-#include "cacheSim/CacheSimulator.hh"
+#include "cacheSim/CacheBase.hh"
 #include "cacheSim/Prefetcher.hh"
 #include "debug.hh"
 #include "nlohmann/detail/value_t.hpp"
@@ -29,7 +29,7 @@ using namespace branchSim;
 using namespace cacheSim;
 using namespace debug;
 
-// Global tick for CacheSimulator
+// Global tick for CacheBase
 static tick_t g_tick = 0;
 
 tick_t
@@ -75,7 +75,7 @@ static size_t stq_size = 8; // Only used when dCache is NoCache
 #include "sdram.hh"
 static std::unique_ptr<SDRAM> sdram;
 
-// Dummy pmem_read for CacheSimulator
+// Dummy pmem_read for CacheBase
 // SDRAM use same wire for R/W
 // cache_id: 0=ICache, 1=DCache (LSU)
 // if (!sdram) return curr_tick();
@@ -338,14 +338,14 @@ main(int argc, char** argv) {
   sdram = std::make_unique<SDRAM>(mem_latency, mem_bstlat);
 
   auto iprefetcher = create_prefetcher(i_prefetch, "iPrefetcher");
-  auto icache = std::make_unique<CacheSimulator>(
+  auto icache = std::make_unique<cacheSim::PipeCache>(
     "iCache", l1i_size, l1i_blksize, l1i_assoc, iprefetcher,
     0); // cache_id=0 for ICache
 
   auto dprefetcher = create_prefetcher(d_prefetch, "dPrefetcher");
-  std::unique_ptr<CacheSimulator> dcache = nullptr;
+  std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
-    dcache = std::make_unique<CacheSimulator>(
+    dcache = std::make_unique<cacheSim::PipeCache>(
       "dCache", l1d_size, l1d_blksize, l1d_assoc, dprefetcher,
       1); // cache_id=1 for DCache
   } else {

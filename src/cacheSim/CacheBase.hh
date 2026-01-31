@@ -5,7 +5,7 @@
 #include "cacheSim/CacheLine.hh"
 #include "cacheSim/Prefetcher.hh"
 #include "base.hh"
-#include "stats.hh"
+#include "stats.hpp"
 #include "trace.hh"
 
 #include <cassert>
@@ -210,7 +210,7 @@ public:
       , pipe_depth_{pipe_depth}
       , r_waiting_{false}
       , w_waiting_{false}
-      , is_shifted_{false}
+      , is_shifted_{true}
       , is_replay_{false}
       , blocked_until_{0} {}
 
@@ -279,9 +279,15 @@ public:
   void write_req(addr_t addr, word_t data, uint8_t mask) override;
   void memr_resp(addr_t addr, const std::vector<word_t>& ret) override;
   void memw_resp(addr_t addr) override;
+  void flush_all() override;
 
   void
   update_impl() override {}
+  
+  tick_t
+  next_update() const override {
+    return InfTime;
+  }
 
   json
   config_json() const override {

@@ -1,7 +1,7 @@
 #pragma once
 #include "../types.hh"
 #include "base.hh"
-#include "stats.hh"
+#include "stats.hpp"
 #include <optional>
 #include <string>
 #include <unordered_map>
