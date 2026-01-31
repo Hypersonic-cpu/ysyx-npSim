@@ -1,7 +1,7 @@
 
 #include "cacheSim/CacheBase.hh"
+#include "cacheSim/RamConn.hh"
 #include "debug.hh"
-#include "sdram.hh"
 #include "trace.hh"
 #include "types.hh"
 #include <cassert>
@@ -276,6 +276,12 @@ PipeCache::update_impl() {
   is_shifted_ = true;
 }
 
+bool
+PipeCache::handle_prefetch(addr_t addr, bool is_hit) {
+  // Prefetcher is disabled in this implementation
+  return false;
+}
+
 void
 PipeCache::read_req(addr_t addr) {
   // A single CPU-side port should never issue 2 requests in the same cycle
@@ -293,6 +299,29 @@ void
 PipeCache::write_req(addr_t addr, word_t data, uint8_t mask) {
   // Instruction cache is readonly
   assert(false && "Instruction cache is readonly");
+}
+
+void
+PipeCache::flush_all() {
+  // FIXME: Wait for any existing requests to finish before flushing
+  // Currently this flushes immediately without waiting for pending requests
+  // which may cause issues if there are in-flight memory transactions
+
+  DPRINTF(Cache, "Flush All");
+  for (auto& s : setsArr_) {
+    for (auto& l : s) {
+      l.invalidate();
+    }
+  }
+  // Clear pipeline
+  for (auto& p : pipe_) {
+    p.reset();
+  }
+  is_shifted_ = true;
+  is_replay_ = false;
+  r_waiting_ = false;
+  w_waiting_ = false;
+  blocked_until_ = 0;
 }
 
 // NoCache implementation - direct memory access without caching
@@ -334,6 +363,11 @@ void NoCache::memw_resp(addr_t addr) {
   assert(w_busy_);
   std::invoke(write_resp_handler, addr);
   w_busy_ = false;
+}
+
+void NoCache::flush_all() {
+  // Should NOT do anything. Do not interrupt the ongoing
+  // memory requests
 }
 
 } // namespace cacheSim

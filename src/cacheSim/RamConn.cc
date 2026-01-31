@@ -1,5 +1,6 @@
 #include "cacheSim/CacheBase.hh"
 #include "cacheSim/RamConn.hh"
+#include "pmem.hh"
 #include "trace.hh"
 #include <algorithm>
 
@@ -34,6 +35,9 @@ RAMArbiter::update_impl() {
     }
     hosts_.at(ent.id)->memw_resp(ent.addr);
   }
+  
+  // Clear the completed request
+  ent.op = MemNone;
 
   // Find next serve target
   auto it = std::find_if(
@@ -43,9 +47,10 @@ RAMArbiter::update_impl() {
   if (it == reqs_.rend()) {
     // Empty. Do not update anymore
     busy_until_ = InfTime;
+    serving_req_ = nullptr;
   } else {
-    // Read prior controller
-    auto& nxt = it->first.op == MemNone ? it->first : it->second;
+    // Read prior controller - choose the one that's not None
+    auto& nxt = it->first.op != MemNone ? it->first : it->second;
     busy_until_ = curr_tick() + nxt.lat;
     serving_req_ = &nxt;
   }

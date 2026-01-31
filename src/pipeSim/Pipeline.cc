@@ -1,6 +1,5 @@
 #include "Pipeline.hh"
 #include "debug.hh"
-#include "sdram.hh"
 #include "trace.hh"
 #include "types.hh"
 #include <algorithm>

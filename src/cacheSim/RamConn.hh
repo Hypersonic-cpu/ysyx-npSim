@@ -2,7 +2,6 @@
 #pragma once
 
 #include "base.hh"
-#include "shared_types.hh"
 #include "trace.hh"
 #include "types.hh"
 #include <algorithm>
@@ -44,11 +43,35 @@ public:
       , serving_req_{nullptr}
       , latency_(lat)
       , burst_latency_(bst_lat)
-      , busy_until_(0)
+      , busy_until_(InfTime)
       , hosts_{hosts}
       , reqs_(hosts.size(), {{MemNone}, {MemNone}}) {}
 
   void recv_req(const MemReq& req);
+
+  // SimObject interface
+  json
+  config_json() const override {
+    json j;
+    j["type"] = "RAMArbiter";
+    j["latency"] = latency_;
+    j["burst_latency"] = burst_latency_;
+    j["num_hosts"] = hosts_.size();
+    return j;
+  }
+
+  json
+  stats_json() const override {
+    return config_json();
+  }
+
+  void
+  reset_stats() override {}
+
+  void
+  dump_stats(std::ostream& os = std::cout) const override {
+    os << name() << " (RAMArbiter)\n";
+  }
 
   // Check when the SDRAM will be free
   tick_t

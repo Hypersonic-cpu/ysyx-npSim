@@ -1,10 +1,9 @@
 #pragma once
 #include "base.hh"
 #include "branchSim/BranchPredictor.hh"
-#include "cacheSim/CacheSimulator.hh"
+#include "cacheSim/CacheBase.hh"
 #include "pipeSim/IOQueue.hh"
-#include "sdram.hh"
-#include "stats.hh"
+#include "stats.hpp"
 #include "trace.hh"
 #include "types.hh"
 #include <array>

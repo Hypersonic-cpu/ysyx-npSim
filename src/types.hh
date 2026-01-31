@@ -15,9 +15,6 @@ constexpr tick_t InfTime{std::numeric_limits<tick_t>::max()};
 
 extern tick_t curr_tick() noexcept;
 
-extern tick_t pmem_read (addr_t addr, addr_t* ret);
-extern tick_t pmem_write(addr_t addr, word_t data, unsigned char mask);
-
 inline bool
 isDevice(addr_t a) {
   return (a >= 0x10000000U && a < 0x80000000U);
