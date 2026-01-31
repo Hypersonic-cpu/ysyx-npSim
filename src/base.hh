@@ -1,9 +1,9 @@
 #pragma once
 
-#include <string>
-#include <unordered_map>
-#include <iostream>
 #include "nlohmann/json.hpp"
+#include "types.hh"
+#include <iostream>
+#include <string>
 
 using json = nlohmann::ordered_json;
 
@@ -27,4 +27,22 @@ public:
 
   virtual auto reset_stats() -> void = 0;
   virtual void dump_stats(std::ostream& os = std::cout) const = 0;
+};
+
+class ClockedObject : public SimObject {
+public:
+  ClockedObject() = delete;
+  ClockedObject(const std::string& name_in)
+      : SimObject(name_in) {}
+  virtual ~ClockedObject() = default;
+
+  virtual tick_t next_update() const = 0;
+  virtual void update_impl() = 0;
+
+  void
+  do_update() {
+    if (next_update() <= curr_tick()) {
+      update_impl();
+    }
+  }
 };

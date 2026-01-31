@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 using addr_t = uint32_t;
 using word_t = uint32_t;
@@ -10,11 +11,12 @@ using tick_t = size_t;
 using tint_t = uint32_t; // time interval
 
 constexpr addr_t WordShift{2};
+constexpr tick_t InfTime{std::numeric_limits<tick_t>::max()};
 
 extern tick_t curr_tick() noexcept;
 
-extern tick_t pmem_read (addr_t addr, addr_t* ret, bool bfirst, uint16_t cache_id);
-extern tick_t pmem_write(addr_t addr, word_t data, unsigned char mask, bool bfirst, uint16_t cache_id);
+extern tick_t pmem_read (addr_t addr, addr_t* ret);
+extern tick_t pmem_write(addr_t addr, word_t data, unsigned char mask);
 
 inline bool
 isDevice(addr_t a) {

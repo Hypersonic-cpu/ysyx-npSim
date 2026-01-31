@@ -3,6 +3,7 @@
 #include "branchSim/BranchPredictor.hh"
 #include "cacheSim/CacheSimulator.hh"
 #include "pipeSim/IOQueue.hh"
+#include "sdram.hh"
 #include "stats.hh"
 #include "trace.hh"
 #include "types.hh"
@@ -104,18 +105,17 @@ public:
     }
   } stats;
 
-  Pipeline() = delete;
-
   void update_fetch_ready(tick_t new_ready_time) {
     if (stage_valid_.at(Fetch) < new_ready_time) {
-      DPRINTF(Pipeline, "Fetch Delayed by arbiter: %lu -> %lu", 
+      DPRINTF(Pipeline, "Fetch Delayed by arbiter: %lu -> %lu",
               stage_valid_.at(Fetch), new_ready_time);
       stage_valid_.at(Fetch) = new_ready_time;
     }
   }
 
-  explicit Pipeline(size_t ifq_size, size_t ldq_size, size_t stq_size,
-                    Cache* iport, Cache* dport, BranchUnit* bpu)
+  Pipeline() = delete;
+  explicit Pipeline(size_t ifq_size, size_t stq_size,
+                    MemPort* iport, MemPort* dport, BranchUnit* bpu)
       : SimObject("Pipeline")
       , reg_ready_{}
       , stage_valid_{}
@@ -126,8 +126,8 @@ public:
       , imem{iport}
       , dmem{dport}
       , bpu{bpu}
+      , clocked_objs_{iport, dport}
       , fetch_queue_(ifq_size)
-      , memld_queue_(ldq_size)
       , memst_queue_(stq_size)
       , ongoing_insts_{0} {
     assert(bpu && "BranchUnit must not be null");
@@ -176,7 +176,6 @@ public:
   config_json() const override {
     json j;
     j["ifq_size"] = fetch_queue_.capacity();
-    j["ldq_size"] = memld_queue_.capacity();
     j["stq_size"] = memst_queue_.capacity();
     return j;
   }
@@ -205,12 +204,14 @@ protected:
     Inst trace_inst;
     branchSim::BranchResult br_pred; // Branch prediction made at IF stage
     bool br_mispred = false;         // Set at IF when misprediction detected
+    bool is_penalty_fetch = false;   // True if this is a speculative fetch after misprediction
 
     explicit Transaction() = delete;
-    explicit Transaction(const Inst& inst)
+    explicit Transaction(const Inst& inst, bool is_penalty = false)
         : trace_inst{inst}
         , br_pred{false, 0, false}
-        , br_mispred{false} {}
+        , br_mispred{false}
+        , is_penalty_fetch{is_penalty} {}
   };
   using TransPtr = std::unique_ptr<Transaction>;
 
@@ -223,7 +224,8 @@ protected:
   };
 
   static constexpr tick_t BlockedTime{std::numeric_limits<tick_t>::max()};
-  static constexpr tick_t BranchMissPenalty{7}; // Branch misprediction penalty cycles
+  static constexpr tick_t BranchMissPenalty{0}; // Branch misprediction penalty cycles
+  static constexpr size_t PenaltyFetchCount{4}; // Number of penalty fetches to issue
 
   // struct TransactionComparator {
   //   bool
@@ -270,19 +272,21 @@ protected:
   std::array<stage_t, Num_PipeStage> const stage_handler_;
 
   IOQueue<IFEntry> fetch_queue_;
-  // Currently unused. This RTL version has a 2-entry store
-  // buffer but no dCache. So load will block the LSU when buffer miss.
-  IOQueue<IOEntryBase> memld_queue_;
+  // Store queue only used when NoCache (need buffering for SDRAM)
   IOQueue<IOEntryBase> memst_queue_;
 
-  Cache* imem;
-  Cache* dmem;
-
+  // Outside ports
+  MemPort* imem;
+  MemPort* dmem;
   BranchUnit* bpu;
+  std::vector<ClockedObject*> clocked_objs_;
 
 private:
   size_t ongoing_insts_;
   word_t dummy;
+
+  // Queue of penalty fetch PCs to issue after misprediction
+  std::queue<addr_t> penalty_fetch_queue_;
 };
 
 } // namespace pipeSim

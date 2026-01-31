@@ -236,6 +236,66 @@ public:
   update(addr_t pc, bool taken) override {}
 };
 
+// GShare Predictor: Uses global history XOR'd with PC
+class GSharePredictor : public BranchPredictor {
+public:
+  explicit GSharePredictor(const std::string& name, size_t entries_pow2,
+                           size_t history_len = 10, uint8_t init_val = 1);
+  bool predict(addr_t pc, addr_t target) override;
+  void update(addr_t pc, bool taken) override;
+
+  json
+  config_json() const override {
+    json j;
+    j["entries"] = table_.size();
+    j["history_len"] = history_len_;
+    return j;
+  }
+
+private:
+  const uint8_t init_state_;
+  const size_t history_len_;
+  size_t mask_;
+  uint32_t global_history_; // Shift register for global history
+  std::vector<uint8_t> table_; // 2-bit saturating counters
+  size_t index(addr_t pc) const;
+};
+
+// Tournament Predictor: Selector chooses between local (bimodal) and global (gshare)
+class TournamentPredictor : public BranchPredictor {
+public:
+  explicit TournamentPredictor(const std::string& name, size_t entries_pow2,
+                               size_t history_len = 10);
+  bool predict(addr_t pc, addr_t target) override;
+  void update(addr_t pc, bool taken) override;
+
+  json
+  config_json() const override {
+    json j;
+    j["entries"] = selector_table_.size();
+    j["history_len"] = history_len_;
+    return j;
+  }
+
+private:
+  const size_t history_len_;
+  size_t mask_;
+  uint32_t global_history_;
+  
+  // Local predictor (bimodal)
+  std::vector<uint8_t> local_table_;
+  
+  // Global predictor (gshare)
+  std::vector<uint8_t> global_table_;
+  
+  // Selector: chooses between local (0) and global (1)
+  // 2-bit counter: 00,01=use local, 10,11=use global
+  std::vector<uint8_t> selector_table_;
+  
+  size_t local_index(addr_t pc) const;
+  size_t global_index(addr_t pc) const;
+};
+
 // Return Address Stack Wrapper
 /*
 class RASPredictorWrapper : public BranchPredictor {
