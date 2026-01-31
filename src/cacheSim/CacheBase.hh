@@ -79,6 +79,7 @@ public:
 public:
   using rresp_t = void (*)(addr_t addr, word_t ret);
   using wresp_t = void (*)(addr_t addr);
+  using avail_t = void (*)();
 
   using mrresp_t = void (*)(addr_t addr, const std::vector<word_t>& ret);
   using mwresp_t = void (*)(addr_t addr);
@@ -96,8 +97,9 @@ public:
       , cache_id_(cache_id)
       , setsArr_(sets_, std::vector<CacheLine>(assoc_, {line_bytes}))
       , prefetcher_(prefetcher)
-      , read_resp_handler(nullptr)
-      , write_resp_handler(nullptr)
+      , r_resp_handler(nullptr)
+      , w_resp_handler(nullptr)
+      , avail_handler(nullptr)
       , mem_side_(nullptr) {
     assert(size_bytes % (line_bytes * assoc) == 0);
     assert(sets_ > 1 && isPowerOf2(sets_));
@@ -124,8 +126,12 @@ public:
 
   void
   set_resp_handlers(rresp_t rhandler, wresp_t whandler) {
-    read_resp_handler = rhandler;
-    write_resp_handler = whandler;
+    r_resp_handler = rhandler;
+    w_resp_handler = whandler;
+  }
+
+  void set_avail_handler(avail_t avail) {
+    avail_handler = avail;
   }
 
   void
@@ -193,8 +199,9 @@ protected:
   std::vector<std::vector<CacheLine>> setsArr_;
   std::shared_ptr<Prefetcher> prefetcher_;
 
-  rresp_t read_resp_handler;
-  wresp_t write_resp_handler;
+  rresp_t r_resp_handler;
+  wresp_t w_resp_handler;
+  avail_t avail_handler;
 
   MemSide* mem_side_;
 }; // CacheBase
@@ -267,7 +274,7 @@ protected:
 class NoCache : public CacheBase {
 public:
   explicit NoCache(const std::string& name, uint16_t cache_id = 1)
-      : CacheBase(name, 4, 4, 1, nullptr, cache_id)
+      : CacheBase(name, 8, 4, 1, nullptr, cache_id)  // 8B total, 4B line, 1-way = 2 sets
       , r_busy_{false}
       , w_busy_{false} {} // Dummy values for base
 
@@ -283,7 +290,7 @@ public:
 
   void
   update_impl() override {}
-  
+
   tick_t
   next_update() const override {
     return InfTime;

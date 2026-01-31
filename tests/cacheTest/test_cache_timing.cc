@@ -34,11 +34,31 @@ void write_callback(addr_t addr) {
               << std::hex << addr << std::dec << std::endl;
 }
 
+// Proper event-driven simulation step
 void step(std::vector<ClockedObject*>& objects, int cycles = 1) {
     for (int i = 0; i < cycles; ++i) {
-        current_time++;
+        // (I) Find minimum next_update() time
+        tick_t next_tick = InfTime;
         for (auto* obj : objects) {
-            obj->do_update();
+            tick_t obj_next = obj->next_update();
+            if (obj_next < next_tick) {
+                next_tick = obj_next;
+            }
+        }
+        
+        // (II) Forward time to that tick
+        if (next_tick == InfTime) {
+            current_time++;  // No pending events, just advance by 1
+        } else {
+            current_time = next_tick;
+        }
+        
+        // (III) Call do_update to all clocked objects in order: mem -> cache
+        // (In test there's no CPU)
+        for (auto* obj : objects) {
+            if (obj->next_update() <= current_time) {
+                obj->do_update();
+            }
         }
     }
 }
@@ -47,7 +67,7 @@ bool wait_for_ready(cacheSim::CacheBase* cache, std::vector<ClockedObject*>& obj
     for (int i = 0; i < max_cycles; ++i) {
         auto [r_ready, w_ready] = cache->is_ready();
         if (r_ready) return true;
-        step(objects);
+        step(objects, 1);
     }
     return false;
 }
@@ -180,21 +200,22 @@ int main(int argc, char* argv[]) {
     }
     
     // Issue all requests as fast as cache can accept them
-    for (auto addr : access_pattern) {
-        // Wait for cache to be ready
-        while (true) {
+    size_t issued = 0;
+    while (issued < access_pattern.size() || response_log.size() < access_pattern.size()) {
+        // (I-III) Advance simulation
+        step(objects, 1);
+        
+        // (IV) Tester sends requests to cache (after update)
+        if (issued < access_pattern.size()) {
             auto [r_ready, w_ready] = cache->is_ready();
             if (r_ready) {
-                cache->read_req(addr);
-                break;
+                cache->read_req(access_pattern[issued]);
+                issued++;
             }
-            step(objects);
         }
-    }
-    
-    // Continue stepping to get all responses
-    while (response_log.size() < access_pattern.size() && current_time < test_start + 2000) {
-        step(objects);
+        
+        // Safety timeout
+        if (current_time > test_start + 2000) break;
     }
     
     tick_t test_end = current_time;
