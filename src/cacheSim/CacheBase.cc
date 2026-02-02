@@ -4,6 +4,7 @@
 #include "debug.hh"
 #include "trace.hh"
 #include "types.hh"
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <memory>
@@ -135,30 +136,6 @@ CacheBase::handle_fill(CacheLine* blk, addr_t addr,
   blk->setVecData(ret);
 }
 
-// tick_t
-// CacheBase::write_req(addr_t addr, word_t data, uint8_t mask) {
-//   auto blk = access(addr);
-//   auto off = offsetOf(addr);
-//   assert(blk);
-
-//   if (blk->isValid()) {
-//     // Hit
-//     // We don't actually store data in this sim unless needed, but let's
-//     do
-//     // it if (mask == 0xF) blk->atAligned(off) = data;
-//     handle_prefetch(addr, true);
-//     return hitTime_;
-//   } else {
-//     // Miss - Write Allocate?
-//     // Typically Write Allocate: fetch block, then write.
-//     DPRINTF(Cache, "Write Miss: Addr=0x%x", addr);
-//     tint_t latency = hitTime_ + handle_fill(blk, addr);
-//     // blk->atAligned(off) = data;
-//     handle_prefetch(addr, false);
-//     return latency;
-//   }
-// }
-
 bool
 CacheBase::handle_prefetch(addr_t addr, bool is_hit) {
   assert(false);
@@ -254,7 +231,6 @@ PipeCache::update_impl() {
     // NOTE: Control whether write back or not using `dirty` but not valid.
     assert(!is_replay_ || bk->line->isValid());
     is_replay_ = false;
-    // TODO: Write back
     if (bk->line->isValid()) {
       handle_hit(bk);
     } else {
@@ -265,10 +241,21 @@ PipeCache::update_impl() {
         /* addr  */ bk->addr,
         /* id */ cache_id_,
         /* bstlen */ static_cast<uint16_t>(lineBytes_ / sizeof(word_t))});
+      if (bk->line->isDirty()) {
+        // TODO: Write back if dirty
+      }
       r_waiting_ = true;
       is_replay_ = true;
       return;
     }
+  }
+  // Flush cache, next cycle available
+  if (pending_flush_ &&
+      std::all_of(pipe_.begin(), pipe_.end(), [](const PipePtr& p) {
+        return p == nullptr;
+      })) [[unlikely]] {
+    handle_flush();
+    return;
   }
 
   // Shift the pipeline
@@ -277,7 +264,9 @@ PipeCache::update_impl() {
   }
   is_shifted_ = true;
   // Notify the CPU-side that cache is available this cycle
-  std::invoke(avail_handler);
+  if (avail_handler) {
+    std::invoke(avail_handler);
+  }
 }
 
 bool
@@ -310,7 +299,11 @@ PipeCache::flush_all() {
   // FIXME: Wait for any existing requests to finish before flushing
   // Currently this flushes immediately without waiting for pending requests
   // which may cause issues if there are in-flight memory transactions
+  pending_flush_ = true;
+}
 
+void
+PipeCache::handle_flush() {
   DPRINTF(Cache, "Flush All");
   for (auto& s : setsArr_) {
     for (auto& l : s) {
@@ -325,13 +318,14 @@ PipeCache::flush_all() {
   is_replay_ = false;
   r_waiting_ = false;
   w_waiting_ = false;
-  blocked_until_ = 0;
+  pending_flush_ = false;
+  blocked_until_ = curr_tick() + 1;
 }
 
 // NoCache implementation - direct memory access without caching
 void
 NoCache::read_req(addr_t addr) {
-  assert(!r_busy_);
+  assert(is_ready().first);
   mem_side_->recv_req(memSim::MemReq{/* op */ MemLoad,
                                      /* addr */ addr,
                                      /* id */ cache_id_,
@@ -343,7 +337,7 @@ NoCache::read_req(addr_t addr) {
 
 void
 NoCache::write_req(addr_t addr, word_t data, uint8_t mask) {
-  assert(!w_busy_);
+  assert(is_ready().second);
   mem_side_->recv_req(memSim::MemReq{/* op */ MemStore,
                                      /* addr */ addr,
                                      /* id */ cache_id_,
@@ -356,20 +350,23 @@ NoCache::write_req(addr_t addr, word_t data, uint8_t mask) {
   ++stats.misses;
 }
 
-void NoCache::memr_resp(addr_t addr, const std::vector<word_t>& ret) {
+void
+NoCache::memr_resp(addr_t addr, const std::vector<word_t>& ret) {
   assert(r_busy_);
   assert(ret.size() == 1);
   std::invoke(r_resp_handler, addr, ret[0]);
   r_busy_ = false;
 }
 
-void NoCache::memw_resp(addr_t addr) {
+void
+NoCache::memw_resp(addr_t addr) {
   assert(w_busy_);
   std::invoke(w_resp_handler, addr);
   w_busy_ = false;
 }
 
-void NoCache::flush_all() {
+void
+NoCache::flush_all() {
   // Should NOT do anything. Do not interrupt the ongoing
   // memory requests
 }

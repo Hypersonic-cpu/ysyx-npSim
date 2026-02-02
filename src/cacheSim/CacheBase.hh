@@ -219,11 +219,13 @@ public:
       , w_waiting_{false}
       , is_shifted_{true}
       , is_replay_{false}
+      , pending_flush_{false}
       , blocked_until_{0} {}
 
   auto
   is_ready() const -> std::pair<bool, bool> override {
-    return {is_shifted_, is_shifted_};
+    auto c = is_shifted_ && !pending_flush_;
+    return {c, c};
   }
 
   bool handle_prefetch(addr_t addr, bool is_hit) override;
@@ -255,6 +257,7 @@ protected:
   using PipePtr = std::unique_ptr<CachePipeEntry>;
 
   void handle_hit(const PipePtr& req);
+  void handle_flush();
   // void handle_fill(CacheLine* blk, addr_t addr,
   //                  const std::vector<word_t>& ret) override;
 
@@ -264,6 +267,7 @@ protected:
   bool w_waiting_;
   bool is_shifted_;
   bool is_replay_;
+  bool pending_flush_;
   tick_t blocked_until_;
 };
 
