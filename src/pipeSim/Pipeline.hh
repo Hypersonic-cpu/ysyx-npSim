@@ -2,34 +2,67 @@
 #include "base.hh"
 #include "branchSim/BranchPredictor.hh"
 #include "cacheSim/CacheBase.hh"
-#include "pipeSim/IOQueue.hh"
+#include "interface.hh"
 #include "stats.hpp"
 #include "trace.hh"
 #include "types.hh"
+#include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <limits>
+#include <list>
 #include <memory>
 #include <queue>
+#include <ranges>
+#include <string>
 #include <utility>
-#include <vector>
-
-extern void set_global_tick(tick_t t);
 
 namespace pipeSim {
 
 using Inst = trace::TraceInst;
-using Cache = cacheSim::CacheSimulator;
-using BranchUnit = branchSim::BranchUnit;
+using Cache = cacheSim::CacheBase;
+using branchSim::BranchResult;
+using branchSim::BranchUnit;
 
-class Pipeline final : public SimObject {
+class Processor : public ClockedObject {
+public:
+  Processor(const std::string& name, StatsBase* pstats, BranchUnit* bpu)
+      : ClockedObject(name, pstats)
+      , imem{nullptr}
+      , dmem{nullptr}
+      , bpu{bpu}
+      , is_draining_{false} {}
+  virtual ~Processor() {}
+  virtual void recv_mem_resp(MemTransPtr trans) = 0;
+  virtual void ack_mem_avail(AckTrans ack) = 0;
+  virtual bool inst_avail() const = 0;
+  virtual void feed_inst(const Inst& inst) = 0;
+  virtual bool is_finished() const = 0;
 
+  void
+  set_draining() {
+    is_draining_ = true;
+  }
+
+  void
+  set_cache_ports(Cache* l1i, Cache* l1d) {
+    imem = l1i;
+    dmem = l1d;
+  }
+
+protected:
+  Cache* imem;
+  Cache* dmem;
+  BranchUnit* bpu;
+  bool is_draining_;
+};
+
+class Pipeline final : public Processor {
 public:
   struct PipelineStats : public StatsBase {
-    PipelineStats()
-        : StatsBase("Pipeline") {}
+    PipelineStats(const std::string& name)
+        : StatsBase(name) {}
     size_t insts = 0;
     size_t cycles = 0;
     size_t stalls = 0;
@@ -37,8 +70,8 @@ public:
     size_t backend_stalls = 0;     // RAW hazard stalls
     size_t branch_miss_cycles = 0; // Branch misprediction penalty
     size_t flush_count = 0;
-    size_t mem_stalls = 0;         // Memory access stalls
-    size_t branches = 0;           // Total branch instructions
+    size_t mem_stalls = 0; // Memory access stalls
+    size_t branches = 0;   // Total branch instructions
 
     double
     get_ipc() const {
@@ -76,18 +109,23 @@ public:
       os << "  IPC: " << get_ipc() << "\n";
       os << "  Stalls: " << stalls << "\n";
       os << "    Frontend: " << frontend_stalls;
-      if (cycles > 0) os << " (" << (100.0 * frontend_stalls / cycles) << "%)";
+      if (cycles > 0)
+        os << " (" << (100.0 * frontend_stalls / cycles) << "%)";
       os << "\n";
       os << "    Backend (RAW): " << backend_stalls;
-      if (cycles > 0) os << " (" << (100.0 * backend_stalls / cycles) << "%)";
+      if (cycles > 0)
+        os << " (" << (100.0 * backend_stalls / cycles) << "%)";
       os << "\n";
       os << "    Memory: " << mem_stalls;
-      if (cycles > 0) os << " (" << (100.0 * mem_stalls / cycles) << "%)";
+      if (cycles > 0)
+        os << " (" << (100.0 * mem_stalls / cycles) << "%)";
       os << "\n";
       os << "  BrMissCyc: " << branch_miss_cycles;
-      if (cycles > 0) os << " (" << (100.0 * branch_miss_cycles / cycles) << "%)";
+      if (cycles > 0)
+        os << " (" << (100.0 * branch_miss_cycles / cycles) << "%)";
       os << "\n";
-      os << "  Branches: " << branches << ", Flushes: " << flush_count << "\n";
+      os << "  Branches: " << branches << ", Flushes: " << flush_count
+         << "\n";
     }
 
     void
@@ -104,90 +142,52 @@ public:
     }
   } stats;
 
-  void update_fetch_ready(tick_t new_ready_time) {
-    if (stage_valid_.at(Fetch) < new_ready_time) {
-      DPRINTF(Pipeline, "Fetch Delayed by arbiter: %lu -> %lu",
-              stage_valid_.at(Fetch), new_ready_time);
-      stage_valid_.at(Fetch) = new_ready_time;
-    }
+public:
+  Pipeline() = delete;
+  explicit Pipeline(const std::string& name, size_t ifq_size,
+                    size_t stq_size, BranchUnit* bpu);
+
+  json
+  config_json() const override {
+    json j;
+    j["BranchPenaltyCycles"] = BranchMissPenalty;
+    j["BranchPenaltyFetches"] = PenaltyFetchCount;
+    return j;
   }
 
-  Pipeline() = delete;
-  explicit Pipeline(size_t ifq_size, size_t stq_size,
-                    MemPort* iport, MemPort* dport, BranchUnit* bpu)
-      : SimObject("Pipeline")
-      , reg_ready_{}
-      , stage_valid_{}
-      , sim_pipe_({nullptr, nullptr, nullptr, nullptr, nullptr})
-      , stage_handler_{&Pipeline::do_fetch, &Pipeline::do_decode,
-                       &Pipeline::do_execute, &Pipeline::do_memory,
-                       &Pipeline::do_writeback}
-      , imem{iport}
-      , dmem{dport}
-      , bpu{bpu}
-      , clocked_objs_{iport, dport}
-      , fetch_queue_(ifq_size)
-      , memst_queue_(stq_size)
-      , ongoing_insts_{0} {
-    assert(bpu && "BranchUnit must not be null");
+  tick_t
+  next_update() const override {
+    return calc_nxtupd_;
   }
 
   // Simulate all events before next IF time.
   // Should be called after the inst is feed, which
   // will set the next available IF tick.
-  void iota_inst(bool is_drain = false);
+  void update_impl() override;
 
   bool
-  is_finished() const {
-    return ongoing_insts_ == 0;
-  }
-
-  bool
-  fetch_avail() const {
-    return input_buffer_ == nullptr;
-    // return !fetch_queue_.is_full();
-  }
-
-  tick_t
-  next_fetch() const {
-    auto ret = stage_valid_.at(Fetch);
-    assert(!fetch_queue_.is_full() || ret == fetch_queue_.next_poptime());
-    return ret;
+  inst_avail() const override {
+    return input_buffer_ == nullptr && !is_draining_;
   }
 
   void
-  feed_inst(const Inst& inst) {
+  feed_inst(const Inst& inst) override {
     assert(input_buffer_ == nullptr);
     ongoing_insts_++;
     auto trans = std::make_unique<Transaction>(inst);
     input_buffer_ = std::move(trans);
     DPRINTF(Pipeline, "FeedInst PC=0x%08x Remain %lu", inst.pc,
             ongoing_insts_);
+    do_fetch_0();
   }
 
-  // SimObject Interface
-  json
-  stats_json() const override {
-    return stats.gen_json();
+  bool
+  is_finished() const override {
+    return ongoing_insts_ == 0;
   }
 
-  json
-  config_json() const override {
-    json j;
-    j["ifq_size"] = fetch_queue_.capacity();
-    j["stq_size"] = memst_queue_.capacity();
-    return j;
-  }
-
-  void
-  reset_stats() override {
-    stats.reset_stats();
-  }
-
-  void
-  dump_stats(std::ostream& os = std::cout) const override {
-    stats.dump_stats(os);
-  }
+  void recv_mem_resp(MemTransPtr trans) override;
+  void ack_mem_avail(AckTrans ack) override;
 
 protected:
   enum PipeStage {
@@ -199,45 +199,37 @@ protected:
     Num_PipeStage
   };
 
+  static constexpr std::array<std::string, Num_PipeStage> StageName{
+    "Fetch", "Decode", "Execute", "Memory", "WrBack"};
+
   struct Transaction {
     Inst trace_inst;
-    branchSim::BranchResult br_pred; // Branch prediction made at IF stage
-    bool br_mispred = false;         // Set at IF when misprediction detected
-    bool is_penalty_fetch = false;   // True if this is a speculative fetch after misprediction
+    // Branch prediction made at IF stage
+    BranchResult br_pred;
+    // Set at IF when misprediction detected
+    bool br_mispred = false;
+    // True if this is a speculative fetch after misprediction
+    bool is_penalty_fetch;
+    bool wait_mem;
+    // bool out_valid;
 
     explicit Transaction() = delete;
-    explicit Transaction(const Inst& inst, bool is_penalty = false)
+    explicit Transaction(const Inst& inst, bool is_penalty = false,
+                         bool is_wait_mem = false) noexcept
         : trace_inst{inst}
         , br_pred{false, 0, false}
         , br_mispred{false}
+        , wait_mem{is_wait_mem}
         , is_penalty_fetch{is_penalty} {}
   };
   using TransPtr = std::unique_ptr<Transaction>;
 
-  struct IFEntry : public IOEntryBase {
-    TransPtr trans;
-    explicit IFEntry() = delete;
-    explicit IFEntry(tick_t t, addr_t a, TransPtr trans)
-        : IOEntryBase{t, a}
-        , trans{std::move(trans)} {}
-  };
+  // static constexpr tick_t BlockedTime{std::numeric_limits<tick_t>::max()};
+  static constexpr tick_t BranchMissPenalty{
+    0}; // Branch misprediction penalty cycles
+  static constexpr size_t PenaltyFetchCount{
+    4}; // Number of penalty fetches to issue
 
-  static constexpr tick_t BlockedTime{std::numeric_limits<tick_t>::max()};
-  static constexpr tick_t BranchMissPenalty{0}; // Branch misprediction penalty cycles
-  static constexpr size_t PenaltyFetchCount{4}; // Number of penalty fetches to issue
-
-  // struct TransactionComparator {
-  //   bool
-  //   operator()(const TransPtr& lhs, const TransPtr& rhs) const {
-  //     if (lhs->finish_time != rhs->finish_time)
-  //       return lhs->finish_time > rhs->finish_time;
-  //     return lhs->next_stage < rhs->next_stage;
-  //   }
-  // };
-
-  // using SimQue = std::priority_queue<TransPtr, std::vector<TransPtr>,
-  //                                    TransactionComparator>;
-  // SimQue sim_que_;
   using SimPipe = std::array<TransPtr, Num_PipeStage>;
   TransPtr input_buffer_;
 
@@ -246,46 +238,93 @@ protected:
 
   using stage_t = void (Pipeline::*)();
 
-  void do_fetch();
-  // bool do_fetch(const Inst*);
+  void do_fetch_0(); // Issue request
+  void do_fetch_1(); // To decode
   void do_decode();
   void do_execute();
   void do_memory();
   void do_writeback();
 
-  void wakeup_pending();
-  void update_raw_time(const Inst& inst, tick_t when);
+  void handle_lsu_resp();
+  void handle_ifu_resp();
 
-  tick_t
-  stage_avail_time(PipeStage target_stage) {
-    auto future_stages =
-      stage_valid_ | std::views::drop(static_cast<int>(target_stage));
-    return std::ranges::max(future_stages);
+  void send_lsu_req(addr_t addr, word_t data, uint8_t strb, bool is_write);
+  void send_ifu_req(addr_t addr);
+
+  void wakeup_pending();
+  void update_reg_time(uint8_t rd, tick_t when);
+
+  void
+  schedule(PipeStage stage, tick_t when) {
+    assert(when >= curr_tick());
+    // if (!(when >= curr_tick())) {
+    //   std::println("ASSERTION FAIL stage {:s} curr {:d} when {:d}",
+    //                StageName.at(stage), curr_tick(), when);
+    //   assert(false);
+    // }
+    stage_update_.at(stage) = when;
+    // stage_touched_.at(stage) = true;
+  }
+
+  void async_schedule(PipeStage stage, tick_t when) {
+    schedule(stage, when);
+    calc_nxtupd_ = std::min(calc_nxtupd_, when);
+  }
+
+  void
+  calc_sched() {
+
+    if (debug::enabled_flags & debug::Event) [[unlikely]] {
+      std::cerr << "[Event]  Calc StageUpdate {";
+      for (const auto& st : stage_update_) {
+        std::cerr << std::dec << st << ", ";
+      }
+      std::cerr << "} T@ " << curr_tick() << "\n";
+    }
+    auto mins = InfTime;
+    for (auto elem : stage_update_) {
+      if (elem > curr_tick()) {
+        mins = std::min(mins, elem);
+      }
+    }
+    calc_nxtupd_ = mins;
+    // auto sel = stage_update_
+    //            | std::views::filter([](auto t) { return t > curr_tick(); });
+    // calc_nxtupd_ = std::ranges::fold_left(
+    //   sel, InfTime, [](tick_t a, tick_t b) { return std::min(a, b); });
+
+    // auto next_ticks = std::views::zip(stage_touched_, stage_update_)
+    //                   | std::views::filter(
+    //                     [](const auto& tuple) { return std::get<0>(tuple);
+    //                     })
+    //                   | std::views::transform([](const auto& tuple) {
+    //                       return std::get<1>(tuple);
+    //                     });
+    //
+    // return std::ranges::fold_left(
+    //   next_ticks, InfTime,
+    //   [](tick_t a, tick_t b) { return std::min(a, b); });
+    // for (auto i = 0U; i < Num_PipeStage; i++) {
+    //   stage_touched_.at(i) = stage_update_.at(i) > curr_tick();
+    // }
   }
 
   std::array<tick_t, 32> reg_ready_;
-  std::pair<uint8_t, uint8_t> raw_rs_;
+  // std::pair<uint8_t, uint8_t> raw_rs_;
 
   // When OUTPUT of current stage is valid
-  std::array<tick_t, Num_PipeStage> stage_valid_;
+  std::array<tick_t, Num_PipeStage> stage_update_;
+  // std::array<bool, Num_PipeStage> stage_touched_;
   std::array<stage_t, Num_PipeStage> const stage_handler_;
-
-  IOQueue<IFEntry> fetch_queue_;
-  // Store queue only used when NoCache (need buffering for SDRAM)
-  IOQueue<IOEntryBase> memst_queue_;
-
-  // Outside ports
-  MemPort* imem;
-  MemPort* dmem;
-  BranchUnit* bpu;
-  std::vector<ClockedObject*> clocked_objs_;
 
 private:
   size_t ongoing_insts_;
-  word_t dummy;
+  tick_t calc_nxtupd_;
 
   // Queue of penalty fetch PCs to issue after misprediction
-  std::queue<addr_t> penalty_fetch_queue_;
+  std::queue<addr_t> penalty_inst_queue_;
+  std::list<TransPtr> fetch_inst_queue_;
+  size_t ifq_size_;
 };
 
 } // namespace pipeSim

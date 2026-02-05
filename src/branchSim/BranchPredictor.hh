@@ -2,7 +2,7 @@
 #include "../types.hh"
 #include "base.hh"
 #include "debug.hh"
-#include "stats.hh"
+#include "stats.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -23,7 +23,7 @@ public:
   };
 
   explicit BTBBase(const std::string& name, size_t entries_pow2)
-      : SimObject(name)
+      : SimObject(name, nullptr)
       , table_(1 << entries_pow2) {}
   virtual ~BTBBase() = default;
   virtual addr_t lookup(addr_t pc) const = 0;
@@ -107,7 +107,8 @@ struct BPStatsBase : public StatsBase {
     j["miss_bad_target"] = bad_target;
     j["miss_rate"] = miss_rate();
     if (notify != accesses) {
-      std::cerr << std::format(ANSI_BG_RED "BPU Inaccuarte stats" ANSI_ALL_NONE)
+      std::cerr << std::format(ANSI_BG_RED
+                               "BPU Inaccuarte stats" ANSI_ALL_NONE)
                 << std::endl;
     }
     return j;
@@ -141,28 +142,16 @@ public:
 
 public:
   explicit BranchPredictor(const std::string& name)
-      : SimObject(name)
+      : SimObject(name, &this->stats)
       , stats(name) {}
   virtual ~BranchPredictor() = default;
   virtual bool predict(addr_t pc, addr_t target) = 0;
   virtual void update(addr_t pc, bool taken) = 0;
   virtual bool judge(bool taken_gold, bool taken_pred, addr_t tar_gold,
                      addr_t tar_pred);
-  void
-  reset_stats() override {
-    stats.reset_stats();
-  }
-  void
-  dump_stats(std::ostream& os = std::cout) const override {
-    stats.dump_stats(os);
-  }
   json
   config_json() const override {
     return json({});
-  }
-  json
-  stats_json() const override {
-    return stats.gen_json();
   }
 }; // namespace branchSim
 
@@ -256,12 +245,13 @@ private:
   const uint8_t init_state_;
   const size_t history_len_;
   size_t mask_;
-  uint32_t global_history_; // Shift register for global history
+  uint32_t global_history_;    // Shift register for global history
   std::vector<uint8_t> table_; // 2-bit saturating counters
   size_t index(addr_t pc) const;
 };
 
-// Tournament Predictor: Selector chooses between local (bimodal) and global (gshare)
+// Tournament Predictor: Selector chooses between local (bimodal) and global
+// (gshare)
 class TournamentPredictor : public BranchPredictor {
 public:
   explicit TournamentPredictor(const std::string& name, size_t entries_pow2,
@@ -281,17 +271,17 @@ private:
   const size_t history_len_;
   size_t mask_;
   uint32_t global_history_;
-  
+
   // Local predictor (bimodal)
   std::vector<uint8_t> local_table_;
-  
+
   // Global predictor (gshare)
   std::vector<uint8_t> global_table_;
-  
+
   // Selector: chooses between local (0) and global (1)
   // 2-bit counter: 00,01=use local, 10,11=use global
   std::vector<uint8_t> selector_table_;
-  
+
   size_t local_index(addr_t pc) const;
   size_t global_index(addr_t pc) const;
 };
@@ -385,7 +375,7 @@ private:
 public:
   explicit BranchUnit(std::unique_ptr<BranchPredictor> bpu,
                       std::unique_ptr<BTBBase> btb)
-      : SimObject("BranchUnit")
+      : SimObject("BranchUnit", &this->stats)
       , stats("BranchUnit")
       , bpu_(std::move(bpu))
       , btb_(std::move(btb)) {
@@ -420,8 +410,9 @@ public:
     if (taken) {
       btb_->update(pc, target);
     }
-    DPRINTF(BranchPred, "BranchUnit Update: PC=0x%08x taken=%d target=0x%08x",
-            pc, taken, target);
+    DPRINTF(BranchPred,
+            "BranchUnit Update: PC=0x%08x taken=%d target=0x%08x", pc, taken,
+            target);
   }
 
   // Judge: check if prediction was correct, update stats

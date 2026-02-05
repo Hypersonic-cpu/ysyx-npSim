@@ -16,7 +16,7 @@ enum Flag : uint64_t {
   LDQueue = 1U << 5,
   STQueue = 1U << 6,
   LSUnit = LDQueue | STQueue,
-  Sdram = 1U << 20,
+  Mem = 1U << 7,
   Clock = 1ULL << 62,
   Event = 1ULL << 63,
   All = UINT64_MAX
@@ -43,8 +43,8 @@ set_flags(const std::string& flag_str) {
       enabled_flags |= STQueue;
     else if (segment == "LSUnit")
       enabled_flags |= LSUnit;
-    else if (segment == "Sdram")
-      enabled_flags |= Sdram;
+    else if (segment == "Mem")
+      enabled_flags |= Mem;
     else if (segment == "Main")
       enabled_flags |= Main;
     else if (segment == "Clock")
@@ -56,9 +56,13 @@ set_flags(const std::string& flag_str) {
   }
 }
 
+#ifdef NDEBUG
+#define DPRINTF(flag, fmt, ...) do {} while (0)
+#define DPRINTFS(flag, fmt, ...) do {} while (0)
+#else 
 #define DPRINTF(flag, fmt, ...)                                             \
   do {                                                                      \
-    if (debug::enabled_flags & debug::flag) {                               \
+    if (debug::enabled_flags & debug::flag) [[unlikely]] {                  \
       fprintf(stderr, "%lu: [%s] " fmt "\n", curr_tick(),                   \
               this->name().c_str(), ##__VA_ARGS__);                         \
     }                                                                       \
@@ -71,6 +75,7 @@ set_flags(const std::string& flag_str) {
               ##__VA_ARGS__);                                               \
     }                                                                       \
   } while (0)
+#endif
 } // namespace debug
 
 #define ANSI_FG_BLACK "\33[1;30m"

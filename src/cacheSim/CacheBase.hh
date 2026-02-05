@@ -1,18 +1,21 @@
 // cacheSim/CacheBase.hh
 #pragma once
 
-#include "../types.hh"
-#include "cacheSim/CacheLine.hh"
-#include "cacheSim/Prefetcher.hh"
+#include "types.hh"
 #include "base.hh"
+#include "interface.hh"
 #include "stats.hpp"
 #include "trace.hh"
+#include "cacheSim/CacheLine.hh"
+#include "cacheSim/Prefetcher.hh"
+#include "cacheSim/RamConn.hh"
 
 #include <cassert>
 #include <cstddef>
 #include <memory>
 #include <utility>
 #include <vector>
+#include <functional>
 
 #if ACTIVE_MODE
 #include "debug.hh"
@@ -22,14 +25,13 @@
   } while (0)
 #endif
 
-namespace memSim {
-  class RAMArbiter;
+namespace pipeSim {
+class Processor;
 }
 
 namespace cacheSim {
 
 using MemSide = memSim::RAMArbiter;
-class CacheBase;
 
 class CacheBase : public ClockedObject {
 public:
@@ -77,18 +79,20 @@ public:
   } stats;
 
 public:
-  using rresp_t = void (*)(addr_t addr, word_t ret);
-  using wresp_t = void (*)(addr_t addr);
-  using avail_t = void (*)();
+  using CPU = pipeSim::Processor;
+  // using rresp_t = void (*)(addr_t addr, word_t ret);
+  // using wresp_t = void (*)(addr_t addr);
+  // using avail_t = void (*)();
+  // using ack_t = void (*)(addr_t addr, word_t ret, uint16_t id, bool is_read);
 
   using mrresp_t = void (*)(addr_t addr, const std::vector<word_t>& ret);
   using mwresp_t = void (*)(addr_t addr);
 
-  CacheBase(const std::string& name, size_t size_bytes, size_t line_bytes,
-            size_t assoc = 1,
+  CacheBase(const std::string& name, CPU* host, size_t size_bytes,
+            size_t line_bytes, size_t assoc = 1,
             std::shared_ptr<Prefetcher> prefetcher = nullptr,
             uint16_t cache_id = 0)
-      : ClockedObject(name)
+      : ClockedObject(name, &this->stats)
       , stats(name)
       , lineBytes_(line_bytes)
       , offsetBits_(floorLog2(line_bytes))
@@ -97,9 +101,8 @@ public:
       , cache_id_(cache_id)
       , setsArr_(sets_, std::vector<CacheLine>(assoc_, {line_bytes}))
       , prefetcher_(prefetcher)
-      , r_resp_handler(nullptr)
-      , w_resp_handler(nullptr)
-      , avail_handler(nullptr)
+      , cpu_resp_recv_(nullptr)
+      , cpu_ack_recv_(nullptr)
       , mem_side_(nullptr) {
     assert(size_bytes % (line_bytes * assoc) == 0);
     assert(sets_ > 1 && isPowerOf2(sets_));
@@ -121,38 +124,18 @@ public:
   virtual void flush_all() = 0;
   virtual void read_req(addr_t addr) = 0;
   virtual void write_req(addr_t addr, word_t data, uint8_t mask) = 0;
-  virtual void memr_resp(addr_t addr, const std::vector<word_t>& ret) = 0;
-  virtual void memw_resp(addr_t addr) = 0;
+  virtual void recv_mem_resp(MemTransPtr trans) = 0;
+  // virtual void memw_resp(addr_t addr) = 0;
 
   void
-  set_resp_handlers(rresp_t rhandler, wresp_t whandler) {
-    r_resp_handler = rhandler;
-    w_resp_handler = whandler;
-  }
-
-  void set_avail_handler(avail_t avail) {
-    avail_handler = avail;
+  set_cpu_side_handlers(CpuSideMRespReceiver recv, CpuSideAckReceiver ack) {
+    cpu_resp_recv_ = recv;
+    cpu_ack_recv_ = ack;
   }
 
   void
   set_mem_port(MemSide* sdram) {
     mem_side_ = sdram;
-  }
-
-  // SimObject
-  void
-  reset_stats() override {
-    stats.reset_stats();
-  }
-
-  void
-  dump_stats(std::ostream& os = std::cout) const override {
-    stats.dump_stats(os);
-  }
-
-  json
-  stats_json() const override {
-    return stats.gen_json();
   }
 
 protected:
@@ -199,20 +182,20 @@ protected:
   std::vector<std::vector<CacheLine>> setsArr_;
   std::shared_ptr<Prefetcher> prefetcher_;
 
-  rresp_t r_resp_handler;
-  wresp_t w_resp_handler;
-  avail_t avail_handler;
+  CpuSideMRespReceiver cpu_resp_recv_;
+  CpuSideAckReceiver cpu_ack_recv_;
 
   MemSide* mem_side_;
 }; // CacheBase
 
 class PipeCache : public CacheBase {
 public:
-  explicit PipeCache(const std::string& name, size_t pipe_depth,
+  explicit PipeCache(const std::string& name, CPU* host, size_t pipe_depth,
                      size_t size_bytes, size_t line_bytes, size_t assoc = 1,
                      std::shared_ptr<Prefetcher> prefetcher = nullptr,
                      uint16_t cache_id = 0)
-      : CacheBase(name, size_bytes, line_bytes, assoc, prefetcher, cache_id)
+      : CacheBase(name, host, size_bytes, line_bytes, assoc, prefetcher,
+                  cache_id)
       , pipe_(pipe_depth)
       , pipe_depth_{pipe_depth}
       , r_waiting_{false}
@@ -231,8 +214,8 @@ public:
   bool handle_prefetch(addr_t addr, bool is_hit) override;
   void read_req(addr_t addr) override;
   void write_req(addr_t addr, word_t data, uint8_t mask) override;
-  void memr_resp(addr_t addr, const std::vector<word_t>& ret) override;
-  void memw_resp(addr_t addr) override;
+  void recv_mem_resp(MemTransPtr trans) override;
+  // void memw_resp(addr_t addr) override;
 
   void flush_all() override;
 
@@ -278,7 +261,8 @@ protected:
 class NoCache : public CacheBase {
 public:
   explicit NoCache(const std::string& name, uint16_t cache_id = 1)
-      : CacheBase(name, 8, 4, 1, nullptr, cache_id)  // 8B total, 4B line, 1-way = 2 sets
+      : CacheBase(name, 0, 8, 4, 1, nullptr,
+                  cache_id) // 8B total, 4B line, 1-way = 2 sets
       , r_busy_{false}
       , w_busy_{false} {} // Dummy values for base
 
@@ -288,8 +272,9 @@ public:
   }
   void read_req(addr_t addr) override;
   void write_req(addr_t addr, word_t data, uint8_t mask) override;
-  void memr_resp(addr_t addr, const std::vector<word_t>& ret) override;
-  void memw_resp(addr_t addr) override;
+  void recv_mem_resp(MemTransPtr trans) override;
+  // void memr_resp(addr_t addr, const std::vector<word_t>& ret) override;
+  // void memw_resp(addr_t addr) override;
   void flush_all() override;
 
   void

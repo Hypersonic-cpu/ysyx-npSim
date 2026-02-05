@@ -2,9 +2,9 @@
 #pragma once
 
 #include "base.hh"
+#include "interface.hh"
 #include "trace.hh"
 #include "types.hh"
-#include <algorithm>
 #include <cassert>
 #include <string>
 #include <vector>
@@ -14,40 +14,31 @@ class CacheBase;
 }
 
 namespace memSim {
-struct MemReq {
-  // read/write
-  trace::MemOp op;
-  addr_t addr;
-  uint16_t id;
-  uint16_t bst_len;
-  // write
-  std::vector<word_t> data;
-  std::vector<uint8_t> strb;
-  // Set by device
-  tint_t lat;
-};
-
 using Cache = cacheSim::CacheBase;
+using enum Direction;
+using enum MemRWOpt;
 
 // SDRAM arbiter: single channel, larger-id large-priority.
 class RAMArbiter : public ClockedObject {
   using trace::MemLoad;
   using trace::MemNone;
   using trace::MemStore;
+  using MemTransPtr = std::unique_ptr<MemTrans>;
 
 public:
   // NOTE: the order in hosts_ matters. The later one has higher priority
   RAMArbiter(const std::string& name, tint_t lat, tint_t bst_lat,
              const std::vector<Cache*>& hosts)
-      : ClockedObject(name)
-      , serving_req_{nullptr}
+      : ClockedObject(name, nullptr) // TODO:
+      , serving_id_{(uint16_t)-1}
+      , serving_op_{Read}
       , latency_(lat)
       , burst_latency_(bst_lat)
       , busy_until_(InfTime)
       , hosts_{hosts}
-      , reqs_(hosts.size(), {{MemNone}, {MemNone}}) {}
+      , reqs_(hosts.size()) {}
 
-  void recv_req(const MemReq& req);
+  void recv_req(MemTransPtr req);
 
   // SimObject interface
   json
@@ -83,18 +74,21 @@ public:
 
 private:
   inline tint_t
-  lat_of(const MemReq& req) const {
-    assert(req.bst_len >= 1);
-    return latency_ + (req.bst_len - 1) * burst_latency_;
+  lat_of(MemTrans* req) const {
+    assert(req->bst_len >= 1);
+    return latency_ + (req->bst_len - 1) * burst_latency_;
   }
 
-  MemReq* serving_req_;
+  // MemTrans* serving_req_;
+  uint16_t serving_id_;
+  MemRWOpt serving_op_;
   tint_t const latency_;
   tint_t const burst_latency_;
   tick_t busy_until_; // When current access finishes
   std::vector<Cache*> const hosts_;
-  using HostPort = std::pair<MemReq, MemReq>;
-  std::vector<HostPort> reqs_; // pair<Read, Write>
+
+  using HostRWChannel = std::pair<MemTransPtr, MemTransPtr>;
+  std::vector<HostRWChannel> reqs_; // pair<Read, Write>
 };
 
 } // namespace memSim

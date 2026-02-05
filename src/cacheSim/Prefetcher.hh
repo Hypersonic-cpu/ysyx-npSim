@@ -15,7 +15,7 @@ protected:
 
 public:
   Prefetcher(const std::string& name)
-      : SimObject(name) {}
+      : SimObject(name, nullptr) {}
   virtual ~Prefetcher() = default;
 
   void

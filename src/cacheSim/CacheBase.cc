@@ -2,28 +2,26 @@
 #include "cacheSim/CacheBase.hh"
 #include "cacheSim/RamConn.hh"
 #include "debug.hh"
+#include "interface.hh"
 #include "trace.hh"
 #include "types.hh"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
-#include <string>
 #include <vector>
 
 namespace cacheSim {
 using trace::MemLoad;
 using trace::MemNone;
 using trace::MemStore;
+using enum MemRWOpt;
+using enum Direction;
 
 // =========================================================
 // Cache Base
 // =========================================================
-
-// CacheBase::CacheBase(const std::string& name, size_t size_bytes,
-//                                size_t line_bytes, size_t assoc,
-//                                std::shared_ptr<Prefetcher> prefetcher,
-//                                uint16_t cache_id)
 
 addr_t
 CacheBase::tagOf(addr_t addr) const {
@@ -58,41 +56,6 @@ CacheBase::blksize() const {
   return lineBytes_;
 }
 
-// tick_t
-// CacheBase::read_req(addr_t addr) {
-//   auto blk = access(addr);
-//   auto off = offsetOf(addr);
-//   assert(blk);
-//   if (blk->isValid()) {
-//     // hit
-//     auto blk_ready = std::max(curr_tick(), blk->ready);
-//     *ret = blk->atAligned(off);
-//     handle_prefetch(addr, true);
-//     DPRINTF(Cache, "Hit: Addr=0x%x Tag=0x%x Set=%lu Ready @ %lu", addr,
-//             tagOf(addr), setIndexOf(addr), blk->ready);
-//     blk->ready++; // At most serve one per cycle
-//     return blk_ready + hitTime_;
-//   } else {
-//     // TODO: if dirty, write back;
-//     DPRINTF(Cache, "Miss: Addr=0x%x Tag=0x%x Set=%lu", addr, tagOf(addr),
-//             setIndexOf(addr));
-//     tick_t fill_done = handle_fill(blk, addr);
-//     *ret = blk->atAligned(off);
-//     handle_prefetch(addr, false);
-//     return judgeTime_ + fill_done;
-//   }
-// }
-
-// void
-// CacheBase::flush_all() {
-//   DPRINTF(Cache, "Flush All");
-//   for (auto& s : setsArr_) {
-//     for (auto& l : s) {
-//       l.invalidate();
-//     }
-//   }
-// }
-
 /** == Protected == */
 
 CacheLine*
@@ -107,7 +70,7 @@ CacheBase::access(addr_t addr) {
     auto& l = set.at(i);
     if (l.isValid() && l.getTag() == tag) {
       l.stamp = curr_tick();
-      ++stats.hits;
+      ++this->stats.hits;
       if (l.is_prefetched && prefetcher_) {
         l.is_prefetched = false;
         prefetcher_->prefetch_useful++;
@@ -168,7 +131,6 @@ CacheBase::handle_prefetch(addr_t addr, bool is_hit) {
                                return a.stamp < b.stamp;
                              });
   it->invalidate();
-  // handle_fill(&(*it), paddr);
   it->is_prefetched = true;
   return true;
 }
@@ -194,12 +156,16 @@ PipeCache::handle_hit(const PipePtr& bk) {
     is_read ? bk->line->atAligned(offsetOf(bk->addr)) : bk->wrdata;
   blocked_until_ = curr_tick() + 1;
   if (is_read) {
-    std::invoke(r_resp_handler, bk->addr, dt);
+    cpu_resp_recv_(std::make_unique<MemTrans>(
+      Resp, Read, bk->addr, cache_id_, static_cast<uint16_t>(1),
+      std::vector<word_t>({dt})));
   } else {
     auto mask = CacheBase::strbExtend(bk->wrstrb);
     dt = (~mask & dt) | (mask & bk->wrdata);
     bk->line->setDirty();
-    std::invoke(w_resp_handler, bk->addr);
+    cpu_resp_recv_(std::make_unique<MemTrans>(
+      Resp, Write, bk->addr, cache_id_, static_cast<uint16_t>(1),
+      std::vector<word_t>({dt})));
   }
   DPRINTF(Cache, "Cache Resp (%s) @ addr %08x data %08x",
           bk->op == MemLoad ? "Rd" : "Wr", bk->addr, dt);
@@ -207,19 +173,29 @@ PipeCache::handle_hit(const PipePtr& bk) {
 
 // MUST be called by memory do_update, before cache->do_update
 // Triggering next-cycle response to CPU
-void
-PipeCache::memr_resp(addr_t addr, const std::vector<word_t>& ret) {
-  assert(r_waiting_);
-  handle_fill(pipe_.back()->line, addr, ret);
-  blocked_until_ = curr_tick() + 1;
-  r_waiting_ = false;
-}
+// void
+// PipeCache::memr_resp(addr_t addr, const std::vector<word_t>& ret) {
+//   assert(r_waiting_);
+//   handle_fill(pipe_.back()->line, addr, ret);
+//   blocked_until_ = curr_tick() + 1;
+//   r_waiting_ = false;
+// }
 
+// void
+// PipeCache::memw_resp(addr_t addr) {
 void
-PipeCache::memw_resp(addr_t addr) {
-  assert(w_waiting_);
-  w_waiting_ = false;
+PipeCache::recv_mem_resp(MemTransPtr trans) {
+  auto is_read = trans->mop == Read;
+  DPRINTF(Cache, "Recv Mem[%s] Resp : length %lu",
+          is_read ? "Read " : "Write", trans->data.size());
+  auto& wait = is_read ? r_waiting_ : w_waiting_;
+  assert(wait);
+  wait = false;
+  if (is_read) {
+    handle_fill(pipe_.back()->line, trans->addr, trans->data);
+  }
   blocked_until_ = curr_tick() + 1;
+  // w_waiting_ = false;
 }
 
 void
@@ -229,18 +205,16 @@ PipeCache::update_impl() {
   // Serve target
   if (const auto& bk = pipe_.back()) {
     // NOTE: Control whether write back or not using `dirty` but not valid.
+    // Is replay -> valid
     assert(!is_replay_ || bk->line->isValid());
     is_replay_ = false;
     if (bk->line->isValid()) {
       handle_hit(bk);
     } else {
-      // Cache miss. Always load
-      // TODO: Prevent multiple req before response
-      mem_side_->recv_req(memSim::MemReq{
-        /* op */ MemLoad,
-        /* addr  */ bk->addr,
-        /* id */ cache_id_,
-        /* bstlen */ static_cast<uint16_t>(lineBytes_ / sizeof(word_t))});
+      mem_side_->recv_req(std::make_unique<MemTrans>(
+        Req, Read, bk->addr, cache_id_,
+        static_cast<uint16_t>(lineBytes_ / sizeof(word_t))));
+
       if (bk->line->isDirty()) {
         // TODO: Write back if dirty
       }
@@ -264,9 +238,8 @@ PipeCache::update_impl() {
   }
   is_shifted_ = true;
   // Notify the CPU-side that cache is available this cycle
-  if (avail_handler) {
-    std::invoke(avail_handler);
-  }
+  cpu_ack_recv_({cache_id_, Read});
+  cpu_ack_recv_({cache_id_, Write});
 }
 
 bool
@@ -279,12 +252,14 @@ void
 PipeCache::read_req(addr_t addr) {
   // A single CPU-side port should never issue 2 requests in the same cycle
   // Also not allowed when pipe is not shifted
+  DPRINTF(Cache, "Recv READ Req @ %u", addr);
   assert(is_shifted_);
   assert(pipe_.front() == nullptr);
   auto blk = access(addr);
   auto req =
     std::make_unique<CachePipeEntry>(addr, blk, trace::MemOp::MemLoad);
   pipe_.front() = std::move(req);
+  blocked_until_ = curr_tick() + 1;
   is_shifted_ = false;
 }
 
@@ -296,9 +271,6 @@ PipeCache::write_req(addr_t addr, word_t data, uint8_t mask) {
 
 void
 PipeCache::flush_all() {
-  // FIXME: Wait for any existing requests to finish before flushing
-  // Currently this flushes immediately without waiting for pending requests
-  // which may cause issues if there are in-flight memory transactions
   pending_flush_ = true;
 }
 
@@ -326,10 +298,8 @@ PipeCache::handle_flush() {
 void
 NoCache::read_req(addr_t addr) {
   assert(is_ready().first);
-  mem_side_->recv_req(memSim::MemReq{/* op */ MemLoad,
-                                     /* addr */ addr,
-                                     /* id */ cache_id_,
-                                     /* bstlen*/ 1});
+  mem_side_->recv_req(
+    std::make_unique<MemTrans>(Req, Read, addr, cache_id_, 1));
   r_busy_ = true;
   ++stats.accesses;
   ++stats.misses;
@@ -338,32 +308,48 @@ NoCache::read_req(addr_t addr) {
 void
 NoCache::write_req(addr_t addr, word_t data, uint8_t mask) {
   assert(is_ready().second);
-  mem_side_->recv_req(memSim::MemReq{/* op */ MemStore,
-                                     /* addr */ addr,
-                                     /* id */ cache_id_,
-                                     /* bstlen*/ 1,
-                                     /* data */ {data},
-                                     /* strb */ {mask}});
+  mem_side_->recv_req(std::make_unique<MemTrans>(
+    Req, Write, addr, cache_id_, 1, std::vector<word_t>({data}),
+    std::vector<uint8_t>({mask})));
   w_busy_ = true;
 
   ++stats.accesses;
   ++stats.misses;
 }
 
+// void
+// NoCache::memr_resp(addr_t addr, const std::vector<word_t>& ret) {
 void
-NoCache::memr_resp(addr_t addr, const std::vector<word_t>& ret) {
-  assert(r_busy_);
-  assert(ret.size() == 1);
-  std::invoke(r_resp_handler, addr, ret[0]);
-  r_busy_ = false;
+NoCache::recv_mem_resp(MemTransPtr trans) {
+  auto mop = trans->mop;
+  auto& busy = mop == Read ? r_busy_ : w_busy_;
+  assert(busy);
+  if (mop == Read) {
+#if ACTIVE_MODE
+    assert(trans->data.size() == 0);
+#else
+    assert(trans->data.size() == 1);
+#endif
+    cpu_resp_recv_(std::move(trans));
+  } else {
+    cpu_resp_recv_(std::move(trans));
+  }
+  cpu_ack_recv_({cache_id_, mop});
+  busy = false;
+  // cpu_side_->memport_resp(addr, ret[0], cache_id_, false);
+  // cpu_side_->memport_avail(is_ready(), cache_id_);
 }
 
-void
-NoCache::memw_resp(addr_t addr) {
-  assert(w_busy_);
-  std::invoke(w_resp_handler, addr);
-  w_busy_ = false;
-}
+// void
+// NoCache::memw_resp(addr_t addr) {
+//   assert(w_busy_);
+//   cpu_resp_recv_(addr, 0xbad, cache_id_, true);
+//   w_busy_ = false;
+//   cpu_ack_recv_(cache_id_, true);
+// cpu_side_->memport_resp(addr, 0, cache_id_, true);
+// w_busy_ = false;
+// cpu_side_->memport_avail(is_ready(), cache_id_);
+// }
 
 void
 NoCache::flush_all() {

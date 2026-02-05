@@ -8,3 +8,6 @@
 simout/
 .zed/
 build/
+tags
+**/tags
+perf.data*
