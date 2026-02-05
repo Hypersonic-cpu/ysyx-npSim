@@ -14,7 +14,6 @@
 #include <list>
 #include <memory>
 #include <queue>
-#include <ranges>
 #include <string>
 #include <utility>
 
@@ -266,7 +265,8 @@ protected:
     // stage_touched_.at(stage) = true;
   }
 
-  void async_schedule(PipeStage stage, tick_t when) {
+  void
+  async_schedule(PipeStage stage, tick_t when) {
     schedule(stage, when);
     calc_nxtupd_ = std::min(calc_nxtupd_, when);
   }
@@ -289,7 +289,8 @@ protected:
     }
     calc_nxtupd_ = mins;
     // auto sel = stage_update_
-    //            | std::views::filter([](auto t) { return t > curr_tick(); });
+    //            | std::views::filter([](auto t) { return t > curr_tick();
+    //            });
     // calc_nxtupd_ = std::ranges::fold_left(
     //   sel, InfTime, [](tick_t a, tick_t b) { return std::min(a, b); });
 

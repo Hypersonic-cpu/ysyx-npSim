@@ -336,20 +336,7 @@ NoCache::recv_mem_resp(MemTransPtr trans) {
   }
   cpu_ack_recv_({cache_id_, mop});
   busy = false;
-  // cpu_side_->memport_resp(addr, ret[0], cache_id_, false);
-  // cpu_side_->memport_avail(is_ready(), cache_id_);
 }
-
-// void
-// NoCache::memw_resp(addr_t addr) {
-//   assert(w_busy_);
-//   cpu_resp_recv_(addr, 0xbad, cache_id_, true);
-//   w_busy_ = false;
-//   cpu_ack_recv_(cache_id_, true);
-// cpu_side_->memport_resp(addr, 0, cache_id_, true);
-// w_busy_ = false;
-// cpu_side_->memport_avail(is_ready(), cache_id_);
-// }
 
 void
 NoCache::flush_all() {
