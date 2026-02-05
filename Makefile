@@ -1,9 +1,16 @@
+DEBUG_MODE?=0
+ifeq ($(DEBUG_MODE),1)
+	DBG_FLAGS = 
+else
+	DBG_FLAGS = -DNDEBUG
+endif
+
 CXX := clang++-22
 # Build runnable simulator (do not compile libapi)
-CXXFLAGS ?= -std=c++23 -stdlib=libc++ -O3 -fPIC -I./src
+CXXFLAGS ?= -std=c++23 -stdlib=libc++ -O3 -flto -g -fPIC -I./src -Wall -Wno-reorder-ctor
 CXXFLAGS += -I $(NPC_HOME)/libs/json/include
 CXXFLAGS += -I $(NPC_HOME)/rvproc/sim-cxx/include
-CXXFLAGS += -D ACTIVE_MODE=1
+CXXFLAGS += -D ACTIVE_MODE=1 $(DBG_FLAGS)
 SRCS_BRANCH := $(shell find "./src/branchSim" -name '*.cc' -type f)
 SRCS_CACHE  := $(shell find "./src/cacheSim" -name '*.cc' -type f)
 SRCS_PIPE   := $(shell find "./src/pipeSim" -name '*.cc' -type f)

@@ -33,9 +33,3 @@ floorLog2(size_t x) {
 
 // #define CACHE true
 #define CACHE false
-#define SIMPRINTFN(Cat, Fmt, ...) \
-  do { \
-    if (Cat) \
-      printf("[ @ %08lx ] " Fmt "\n", \
-        curr_tick(), ##__VA_ARGS__); \
-  } while (0)

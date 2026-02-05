@@ -11,6 +11,7 @@ private:
   addr_t tag;
   bool valid;
   bool dirty;
+  [[maybe_unused]]
   const size_t lineSize_;
   std::vector<word_t> data;
 
@@ -33,7 +34,8 @@ public:
     this->valid = false;
   }
 
-  void activate() {
+  void
+  activate() {
     this->valid = true;
     this->dirty = false;
     this->stamp = curr_tick();
@@ -81,8 +83,12 @@ public:
 
   void
   setVecData(const std::vector<word_t>& in) {
+#if ACTIVE_MODE
+    // Do not do anyting for timing-only trace sim.
+#else
     assert(in.size() == this->data.size());
     std::copy(in.begin(), in.end(), data.begin());
+#endif
   }
 
   word_t

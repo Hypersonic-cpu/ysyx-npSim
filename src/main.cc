@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdlib>
@@ -5,29 +6,37 @@
 #include <fstream>
 #include <getopt.h>
 #include <iostream>
+#include <limits>
 #include <memory>
+#include <ostream>
 #include <print>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <vector>
 
 #include "base.hh"
 #include "branchSim/BranchPredictor.hh"
 #include "cacheSim/CacheBase.hh"
 #include "cacheSim/Prefetcher.hh"
+#include "cacheSim/RamConn.hh"
+
 #include "debug.hh"
-#include "nlohmann/detail/value_t.hpp"
+#include "interface.hh"
 #include "pipeSim/Pipeline.hh"
-#include "stats.hh"
+#include "stats.hpp"
 #include "trace.hh"
 #include "types.hh"
 
+#include "nlohmann/json.hpp"
+
 using namespace trace;
-using namespace pipeSim;
-using namespace branchSim;
-using namespace cacheSim;
 using namespace debug;
+using branchSim::BranchPredictor;
+using branchSim::BranchUnit;
+using branchSim::BTBBase;
+using cacheSim::CacheBase;
+using cacheSim::Prefetcher;
+using memSim::RAMArbiter;
 
 // Global tick for CacheBase
 static tick_t g_tick = 0;
@@ -45,8 +54,8 @@ set_global_tick(tick_t t) {
 }
 
 // Configuration parameters
-static tint_t mem_latency = 30;
-static tint_t mem_bstlat = 5;
+static tint_t mem_latency = 40;
+static tint_t mem_bstlat = 8;
 static std::string trace_file;
 // Tiny defaults
 static size_t l1i_size = 512;
@@ -57,9 +66,8 @@ static size_t l1d_blksize = 16;
 static size_t l1d_assoc = 1;
 static std::string i_prefetch = "none";
 static std::string d_prefetch = "none";
-static size_t max_insts = 0;
+static size_t max_insts = std::numeric_limits<tick_t>::max();
 static std::string out_file;
-static std::vector<SimObject*> simlist{};
 
 // BPU Config
 static std::string bpu_type = "";
@@ -71,9 +79,6 @@ static uint8_t print_mode = 2;
 // Pipeline Queue sizes
 static size_t ifq_size = 8;
 static size_t stq_size = 8; // Only used when dCache is NoCache
-
-#include "sdram.hh"
-static std::unique_ptr<SDRAM> sdram;
 
 // Dummy pmem_read for CacheBase
 // SDRAM use same wire for R/W
@@ -218,28 +223,30 @@ parse_args(int argc, char* argv[]) {
 std::shared_ptr<Prefetcher>
 create_prefetcher(const std::string& type, const std::string& name) {
   if (type == "nextline")
-    return std::make_shared<NextLinePrefetcher>(name);
+    return std::make_shared<cacheSim::NextLinePrefetcher>(name);
   if (type == "stride")
-    return std::make_shared<StridePrefetcher>(name);
+    return std::make_shared<cacheSim::StridePrefetcher>(name);
   return nullptr;
 }
 
 std::unique_ptr<BranchPredictor>
 create_bpu_core() {
   if (bpu_type == "bimodal") {
-    return std::make_unique<BimodalPredictor>("BimodalBP", bpu_entries_pow2);
+    return std::make_unique<branchSim::BimodalPredictor>("BimodalBP",
+                                                         bpu_entries_pow2);
   } else if (bpu_type == "gshare") {
-    return std::make_unique<GSharePredictor>("GShareBP", bpu_entries_pow2,
-                                             12); // 12-bit history
+    return std::make_unique<branchSim::GSharePredictor>(
+      "GShareBP", bpu_entries_pow2,
+      12); // 12-bit history
   } else if (bpu_type == "tournament") {
-    return std::make_unique<TournamentPredictor>(
+    return std::make_unique<branchSim::TournamentPredictor>(
       "TournamentBP", bpu_entries_pow2, 12); // 12-bit history
   } else if (bpu_type == "alwaystaken") {
-    return std::make_unique<AlwaysTakenPredictor>();
+    return std::make_unique<branchSim::AlwaysTakenPredictor>();
   } else if (bpu_type == "btfnt") {
-    return std::make_unique<BTFNTPredictor>();
+    return std::make_unique<branchSim::BTFNTPredictor>();
   } else if (bpu_type == "none" || bpu_type.empty()) {
-    return std::make_unique<NoBPU>();
+    return std::make_unique<branchSim::NoBPU>();
   } else {
     assert(false && "No such branch predictor");
     return nullptr;
@@ -249,9 +256,9 @@ create_bpu_core() {
 std::unique_ptr<BTBBase>
 create_btb() {
   if (btb_entries_pow2 == 0) {
-    return std::make_unique<NoBTB>();
+    return std::make_unique<branchSim::NoBTB>();
   }
-  return std::make_unique<CompressedBTB>("BTB", btb_entries_pow2);
+  return std::make_unique<branchSim::CompressedBTB>("BTB", btb_entries_pow2);
 }
 
 std::unique_ptr<BranchUnit>
@@ -260,8 +267,6 @@ create_branch_unit() {
   auto btb = create_btb();
   return std::make_unique<BranchUnit>(std::move(bpu), std::move(btb));
 }
-
-#include "nlohmann/json.hpp"
 
 using json = nlohmann::ordered_json;
 
@@ -284,7 +289,8 @@ collect_config_json(const std::vector<SimObject*>& simlist) {
 }
 
 inline void
-append_stats_json(json& root, size_t curr_cnt) {
+append_stats_json(json& root, size_t curr_cnt,
+                  const std::vector<SimObject*>& simlist) {
   // Generate and store stats
   std::string key = "stats" + std::to_string(curr_cnt);
   root[key] = collect_stats_json(simlist);
@@ -335,126 +341,120 @@ main(int argc, char** argv) {
   /** Component Configuration */
   auto branch_unit = create_branch_unit();
 
-  sdram = std::make_unique<SDRAM>(mem_latency, mem_bstlat);
+  // When dCache exists, no need for store queue (write-through)
+  // Only use store queue when NoCache (need buffering for SDRAM)
+  size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
+  auto core = std::make_unique<pipeSim::Pipeline>(
+    "Core", ifq_size, actual_stq_size, branch_unit.get());
 
   auto iprefetcher = create_prefetcher(i_prefetch, "iPrefetcher");
   auto icache = std::make_unique<cacheSim::PipeCache>(
-    "iCache", l1i_size, l1i_blksize, l1i_assoc, iprefetcher,
-    0); // cache_id=0 for ICache
-
+    "iCache",
+    /* host */ core.get(),
+    /* pipe depth */ 3, l1i_size, l1i_blksize, l1i_assoc, iprefetcher,
+    /* cache ID */ 0);
   auto dprefetcher = create_prefetcher(d_prefetch, "dPrefetcher");
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
     dcache = std::make_unique<cacheSim::PipeCache>(
-      "dCache", l1d_size, l1d_blksize, l1d_assoc, dprefetcher,
-      1); // cache_id=1 for DCache
+      "dCache",
+      /* host */ core.get(),
+      /* pipe depth */ 3, l1d_size, l1d_blksize, l1d_assoc, dprefetcher,
+      /* cache ID */ 1);
   } else {
-    dcache = std::make_unique<NoCache>("dCache", 1); // cache_id=1
+    dcache = std::make_unique<cacheSim::NoCache>("dCache", 1); // cache_id=1
   }
+  core->set_cache_ports(icache.get(), dcache.get());
+  pipeSim::Processor* proc = &(*core);
 
-  // When dCache exists, no need for store queue (write-through)
-  // Only use store queue when NoCache (need buffering for SDRAM)
-  size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
+  auto sdram = std::make_unique<memSim::RAMArbiter>(
+    "SDRAM", mem_latency, mem_bstlat,
+    std::vector<CacheBase*>({icache.get(), dcache.get()}));
+  icache->set_mem_port(sdram.get());
+  dcache->set_mem_port(sdram.get());
+  CpuSideAckReceiver cpu_ack = [proc](AckTrans t) {
+    proc->ack_mem_avail(t);
+  };
+  CpuSideMRespReceiver cpu_rsp = [proc](MemTransPtr p) {
+    proc->recv_mem_resp(std::move(p));
+  };
+  icache->set_cpu_side_handlers(cpu_rsp, cpu_ack);
+  dcache->set_cpu_side_handlers(cpu_rsp, cpu_ack);
 
-  Pipeline pipe(ifq_size, actual_stq_size, icache.get(), dcache.get(),
-                branch_unit.get());
-
-  simlist.push_back(std::addressof(pipe));
-  simlist.push_back(icache.get());
-  simlist.push_back(dcache.get());
-  simlist.push_back(branch_unit.get());
-  if (iprefetcher)
-    simlist.push_back(iprefetcher.get());
-  if (dprefetcher)
-    simlist.push_back(dprefetcher.get());
-  /** End of Configuration */
+  const std::vector<SimObject*> simlist{sdram.get(), dcache.get(),
+                                        icache.get(),
+                                        core.get()}; // TODO: BPU prefetcher
+  // NOTE: Bottom-up order. Mem -> Cache -> CPU
+  const std::vector<ClockedObject*> devlist{sdram.get(), dcache.get(),
+                                            icache.get(), core.get()};
 
   TraceInst inst;
-  word_t dummy_word;
 
   // Root JSON object
   json root;
   // Add config once at the beginning
   root["config"] = collect_config_json(simlist);
 
-  int dump_cnt = 0;
-  int inst_cnt = 0;
+  size_t dump_cnt = 0;
+  size_t inst_cnt = 0;
+
   // Main SimLoop
-  while (reader.next(inst)) {
-    if (max_insts > 0 && inst_cnt >= max_insts)
-      break;
-    inst_cnt++;
+  do {
+    // if (curr_tick() > 1000)
+    //   exit(1);
+    // Handle response, core processes inst
+    for (auto dev : devlist) {
+      dev->do_update();
+    }
 
-    DPRINTFS(Main, "INST FEED: PC %8x rs%2d:%2d rd%2d mem%1d:%8x br%1d:%1d",
-            inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg,
-            inst.mem_op, inst.mem_addr, inst.is_branch, inst.br_taken);
-    // Branch Predict
-    // auto mispred = false;
-    // if (inst.is_branch) {
-    //   auto btb_tar = btb->lookup(inst.pc);
-    //   // When BTB miss, predict as not taken
-    //   bool bpu_result = bpu ? bpu->predict(inst.pc, btb_tar) : false;
-    //   bool pred_taken = bpu_result && btb_tar != 0;
+    // Feed instruction
+    if (core->inst_avail()) {
+      if (reader.next(inst) && inst_cnt < max_insts) {
+        core->feed_inst(inst);
+        inst_cnt++;
+        DPRINTFS(Main,
+                 "Inst feed: PC %8x rs%2d:%2d rd%2d mem%1d:%8x br%1d:%1d",
+                 inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg,
+                 inst.mem_op, inst.mem_addr, inst.is_branch, inst.br_taken);
 
-    //   bool real_taken = (inst.br_taken != 0);
+      } else {
+        core->set_draining();
+      }
+    }
 
-    //   if (real_taken) {
-    //     btb->update(inst.pc, inst.mem_addr);
-    //   }
-    //   if (bpu) {
-    //     mispred =
-    //       !bpu->judge(real_taken, pred_taken, inst.mem_addr, btb_tar);
-    //     bpu->update(inst.pc, real_taken);
-    //   } else {
-    //     mispred = real_taken;
-    //   }
+    // std::flush(std::cerr);
+    // std::flush(std::cout);
+    // std::print("Next Update: ");
+    // for (auto ptr : devlist) {
+    //   std::print("{:s}:{:d} ", ptr->name(), (int64_t)ptr->next_update());
     // }
+    // std::println(" CoreNxtUpd {:d}", core->next_update());
 
-    // std::println("===FEED INST {:d} ===", curr_tick());
-    // First feed
-    pipe.feed_inst(inst);
+    auto it =
+      std::ranges::min_element(devlist, std::less<>{}, [](const auto& p) {
+        return p->next_update();
+      });
+    assert(it != devlist.end());
+    auto closest_upd = std::max(curr_tick() + 1, (*it)->next_update());
+    set_global_tick(closest_upd);
+
     // Then process until next IF is available;
     // std::println("===IOTA INST {:d} ===", curr_tick());
-    pipe.iota_inst();
-
-    /** In event-driven simulator we use curr_tick(),
-     * but in trace-driven, g_tick should be set back and forth
-     * for different stage of a single instruction
-     */
-    // g_tick = pipe.icache_access_time();
-    // tint_t fetch_lat = icache.read_req(inst.pc, &dummy_word);
-
-    // g_tick = pipe.load_store_time();
-    // tint_t load_lat = 0;
-    // tint_t store_lat = 0;
-    // // TODO: Set dcache size = 0 to disable
-    // if (inst.mem_op == MemOp::MemLoad) {
-    //   if (l1d_size > 0)
-    //     load_lat = dcache->read_req(inst.mem_addr, &dummy_word);
-    //   else
-    //     load_lat = pmem_read(inst.mem_addr, &dummy_word, true);
-    // } else if (inst.mem_op == MemOp::MemStore) {
-    //   if (l1d_size > 0)
-    //     store_lat = dcache->write_req(inst.mem_addr, 0, 0xF);
-    //   else
-    //     store_lat = pmem_write(inst.mem_addr, 0, 0xF, true);
-    // }
-    // std::println("g_tick {:d} ld/st lat {:d} {:d}", g_tick, load_lat,
-    // store_lat);
-
-    // pipe.iota_inst(inst, fetch_lat, load_lat, store_lat, mispred);
+    // pipe.iota_inst();
 
     if (inst.sys_op == SysOp::SysResetStats) [[unlikely]] {
+      inst.sys_op = SysOp::SysNone;
       std::println(ANSI_FG_YELLOW
                    "Reset Stats @ PC 0x{:8x} Cyc #{:d}" ANSI_ALL_NONE,
-                   inst.pc, pipe.stats.cycles);
+                   inst.pc, core->stats.cycles);
       for (auto* obj : simlist) {
         obj->reset_stats();
       }
     } else if (inst.sys_op == SysOp::SysDumpStats) [[unlikely]] {
+      inst.sys_op = SysOp::SysNone;
       std::println(ANSI_FG_YELLOW
                    "Dump Stats @ PC 0x{:8x} Cyc #{:d}" ANSI_ALL_NONE,
-                   inst.pc, pipe.stats.cycles);
+                   inst.pc, core->stats.cycles);
       if (print_mode == 2) {
         for (const auto* obj : simlist) {
           obj->dump_stats();
@@ -462,21 +462,16 @@ main(int argc, char** argv) {
       } else if (print_mode == 1) {
         std::println(
           "#Cyc {:d} IPC {:.6f} BPMR {:.6f} i$MR {:.6f} d$MR {:.6f}",
-          pipe.stats.cycles, pipe.stats.get_ipc(),
+          core->stats.cycles, core->stats.get_ipc(),
           branch_unit->stats.miss_rate(), icache->stats.miss_rate(),
           dcache ? dcache->stats.miss_rate() : -1);
       }
-      append_stats_json(root, dump_cnt++);
+      append_stats_json(root, dump_cnt++, simlist);
     }
-  }
-
-  // Drain the pipeline - process remaining in-flight instructions
-  while (!pipe.is_finished()) {
-    pipe.iota_inst(true);
-  }
+  } while (!core->is_finished());
 
   // Dump final stats
-  append_stats_json(root, dump_cnt++);
+  append_stats_json(root, dump_cnt++, simlist);
   outfile_write(out_file, root);
   return 0;
 }
