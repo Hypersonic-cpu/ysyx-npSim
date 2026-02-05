@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -137,8 +138,8 @@ parse_args(int argc, char* argv[]) {
 
   int opt;
   int option_index = 0;
-  while ((opt = getopt_long(argc, argv, "O:", long_options,
-                            &option_index)) != -1) {
+  while ((opt = getopt_long(argc, argv, "O:", long_options, &option_index))
+         != -1) {
     switch (opt) {
     case 's':
       l1i_size = parse_size(optarg);
@@ -398,6 +399,7 @@ main(int argc, char** argv) {
   size_t dump_cnt = 0;
   size_t inst_cnt = 0;
 
+  auto loop_start = std::chrono::high_resolution_clock::now();
   // Main SimLoop
   do {
     // if (curr_tick() > 1000)
@@ -409,7 +411,7 @@ main(int argc, char** argv) {
 
     // Feed instruction
     if (core->inst_avail()) {
-      if (reader.next(inst) && inst_cnt < max_insts) {
+      if (reader.next(inst) && inst_cnt < max_insts) [[likely]] {
         core->feed_inst(inst);
         inst_cnt++;
         DPRINTFS(Main,
@@ -429,7 +431,6 @@ main(int argc, char** argv) {
     //   std::print("{:s}:{:d} ", ptr->name(), (int64_t)ptr->next_update());
     // }
     // std::println(" CoreNxtUpd {:d}", core->next_update());
-
     auto it =
       std::ranges::min_element(devlist, std::less<>{}, [](const auto& p) {
         return p->next_update();
@@ -437,10 +438,6 @@ main(int argc, char** argv) {
     assert(it != devlist.end());
     auto closest_upd = std::max(curr_tick() + 1, (*it)->next_update());
     set_global_tick(closest_upd);
-
-    // Then process until next IF is available;
-    // std::println("===IOTA INST {:d} ===", curr_tick());
-    // pipe.iota_inst();
 
     if (inst.sys_op == SysOp::SysResetStats) [[unlikely]] {
       inst.sys_op = SysOp::SysNone;
@@ -469,6 +466,14 @@ main(int argc, char** argv) {
       append_stats_json(root, dump_cnt++, simlist);
     }
   } while (!core->is_finished());
+
+  auto loop_end = std::chrono::high_resolution_clock::now();
+  auto loop_us = std::chrono::duration_cast<std::chrono::milliseconds>(
+                   loop_end - loop_start)
+                   .count();
+  std::println(ANSI_FG_YELLOW
+               "> Time Usage: {:d} ms IPC: {:.6f} <" ANSI_ALL_NONE,
+               loop_us, core->stats.get_ipc());
 
   // Dump final stats
   append_stats_json(root, dump_cnt++, simlist);

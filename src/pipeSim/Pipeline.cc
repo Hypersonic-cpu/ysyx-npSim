@@ -137,7 +137,7 @@ Pipeline::do_fetch_0() {
 
   TransPtr candidate = nullptr;
   // Process pending penalty fetches first
-  if (is_draining_) {
+  if (is_draining_) [[unlikely]] {
     Inst drain_inst{/* pc        */ 0,
                     /* mem_addr  */ 0,
                     /* mem_op    */ 0,
