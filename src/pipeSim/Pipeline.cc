@@ -178,38 +178,42 @@ Pipeline::do_fetch_0() {
   const auto& inst = candidate->trace_inst;
 
   // Branch prediction at IF stage (before knowing if it's actually a
-  // branch)
-  auto pred = bpu->predict(inst.pc);
-  auto real_taken = inst.is_branch && inst.br_taken;
-  addr_t real_target = real_taken ? inst.mem_addr : 0;
-  // Use BranchUnit::judge to check accuracy and update stats
-  auto accurate = bpu->judge(real_taken, real_target, pred);
-  candidate->br_pred = pred;
-  candidate->br_mispred = !accurate;
+  // branch). Only predict on non-penalty insts to avoid repetitive
+  // punishment.
+  if (!candidate->is_penalty_fetch) {
+    auto pred = bpu->predict(inst.pc);
+    auto real_taken = inst.is_branch && inst.br_taken;
+    addr_t real_target = real_taken ? inst.mem_addr : 0;
+    // Use BranchUnit::judge to check accuracy and update stats
+    auto accurate = bpu->judge(real_taken, real_target, pred);
+    candidate->br_pred = pred;
+    candidate->br_mispred = !accurate;
 
-  if (!accurate) {
-    // Generate penalty fetches for the wrong path
-    addr_t wrong_path_pc;
-    if (real_taken && !pred.will_redirect) {
-      // Predicted not-taken, but should take: wrong path is pc+4, pc+8...
-      wrong_path_pc = inst.pc + 4;
-    } else if (!real_taken && pred.will_redirect) {
-      // Predicted taken to 'a', but should not: wrong path is a+4, a+8...
-      wrong_path_pc = pred.pred_target + 4;
-    } else {
-      // Bad target: predicted to wrong address
-      // This happens when both predict taken but target differs
-      wrong_path_pc = pred.pred_target + 4;
+    if (!accurate) {
+      // Generate penalty fetches for the wrong path
+      addr_t wrong_path_pc;
+      if (real_taken && !pred.will_redirect) {
+        // Predicted not-taken, but should take: wrong path is pc+4, pc+8...
+        wrong_path_pc = inst.pc + 4;
+      } else if (!real_taken && pred.will_redirect) {
+        // Predicted taken to 'a', but should not: wrong path is a+4, a+8...
+        wrong_path_pc = pred.pred_target + 4;
+      } else {
+        // Bad target: predicted to wrong address
+        // This happens when both predict taken but target differs
+        wrong_path_pc = pred.pred_target + 4;
+      }
+
+      auto penalty_seq = std::views::iota(0U, PenaltyFetchCount - 1U)
+                         | std::views::transform(
+                           [=](int i) { return i * 4 + wrong_path_pc; });
+      DPRINTF(
+        Pipeline,
+        " IF BrPred Wrong -> Enqueue %lu penalty fetchs @PC=0x%08x ...",
+        PenaltyFetchCount, wrong_path_pc);
+
+      penalty_inst_queue_.push_range(penalty_seq);
     }
-
-    auto penalty_seq =
-      std::views::iota(0U, PenaltyFetchCount - 1U)
-      | std::views::transform([=](int i) { return i * 4 + wrong_path_pc; });
-    DPRINTF(Pipeline,
-            " IF BrPred Wrong -> Enqueue %lu penalty fetchs @PC=0x%08x ...",
-            PenaltyFetchCount, wrong_path_pc);
-
-    penalty_inst_queue_.push_range(penalty_seq);
   }
 
   send_ifu_req(candidate->trace_inst.pc);
@@ -401,10 +405,10 @@ Pipeline::do_writeback() {
 }
 
 void
-Pipeline::recv_mem_resp(MemTransPtr trans) {
-  auto id = trans->id;
-  auto addr = trans->addr;
-  auto is_write = trans->mop == MemRWOpt::Write;
+Pipeline::recv_mem_resp(CpuTrans trans) {
+  auto id = trans.id;
+  auto addr = trans.addr;
+  auto is_write = trans.mop == MemRWOpt::Write;
   DPRINTF(Pipeline, "Recv Mem [%s] Resp, ID = %d @ addr %08x",
           is_write ? "Write" : "Read ", id, addr);
   if (id == 0) {

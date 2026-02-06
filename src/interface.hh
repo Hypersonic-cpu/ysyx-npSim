@@ -22,12 +22,19 @@ struct MemTrans {
 };
 using MemTransPtr = std::unique_ptr<MemTrans>;
 
+struct CpuTrans {
+  addr_t addr;
+  word_t data;
+  uint16_t id;
+  MemRWOpt mop;
+};
+
 struct AckTrans {
   uint16_t id;
   MemRWOpt mop;
 };
 
-using CpuSideMRespReceiver = std::function<void(MemTransPtr)>;
+using CpuSideMRespReceiver = std::function<void(CpuTrans)>;
 using CpuSideAckReceiver = std::function<void(AckTrans)>;
 
 using CacheMRespHandler =

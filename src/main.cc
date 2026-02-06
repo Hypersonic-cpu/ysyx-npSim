@@ -9,7 +9,6 @@
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <ostream>
 #include <print>
 #include <string>
 #include <sys/stat.h>
@@ -48,7 +47,7 @@ curr_tick() noexcept {
 }
 
 void
-set_global_tick(tick_t t) {
+set_global_tick(tick_t t) noexcept {
   DPRINTFS(Clock, " == Global Tick Fwd @ %lu -> %lu ==", g_tick, t);
   assert(t >= g_tick);
   g_tick = t;
@@ -373,12 +372,8 @@ main(int argc, char** argv) {
     std::vector<CacheBase*>({icache.get(), dcache.get()}));
   icache->set_mem_port(sdram.get());
   dcache->set_mem_port(sdram.get());
-  CpuSideAckReceiver cpu_ack = [proc](AckTrans t) {
-    proc->ack_mem_avail(t);
-  };
-  CpuSideMRespReceiver cpu_rsp = [proc](MemTransPtr p) {
-    proc->recv_mem_resp(std::move(p));
-  };
+  CpuSideAckReceiver cpu_ack = [proc](auto t) { proc->ack_mem_avail(t); };
+  CpuSideMRespReceiver cpu_rsp = [proc](auto p) { proc->recv_mem_resp(p); };
   icache->set_cpu_side_handlers(cpu_rsp, cpu_ack);
   dcache->set_cpu_side_handlers(cpu_rsp, cpu_ack);
 
@@ -402,8 +397,6 @@ main(int argc, char** argv) {
   auto loop_start = std::chrono::high_resolution_clock::now();
   // Main SimLoop
   do {
-    // if (curr_tick() > 1000)
-    //   exit(1);
     // Handle response, core processes inst
     for (auto dev : devlist) {
       dev->do_update();
@@ -424,20 +417,18 @@ main(int argc, char** argv) {
       }
     }
 
-    // std::flush(std::cerr);
-    // std::flush(std::cout);
-    // std::print("Next Update: ");
-    // for (auto ptr : devlist) {
-    //   std::print("{:s}:{:d} ", ptr->name(), (int64_t)ptr->next_update());
+    // if (inst_cnt % 10 == 0) {
+    //   auto it =
+    //     std::ranges::min_element(devlist, std::less<>{}, [](const auto& p)
+    //     {
+    //       return p->next_update();
+    //     });
+    //   assert(it != devlist.end());
+    //   auto closest_upd = std::max(curr_tick() + 1, (*it)->next_update());
+    //   set_global_tick(closest_upd);
+    // } else {
+    set_global_tick(curr_tick() + 1);
     // }
-    // std::println(" CoreNxtUpd {:d}", core->next_update());
-    auto it =
-      std::ranges::min_element(devlist, std::less<>{}, [](const auto& p) {
-        return p->next_update();
-      });
-    assert(it != devlist.end());
-    auto closest_upd = std::max(curr_tick() + 1, (*it)->next_update());
-    set_global_tick(closest_upd);
 
     if (inst.sys_op == SysOp::SysResetStats) [[unlikely]] {
       inst.sys_op = SysOp::SysNone;
