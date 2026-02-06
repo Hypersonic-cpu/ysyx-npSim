@@ -1,6 +1,5 @@
 #pragma once
 #include <cstdint>
-#include <cstdio>
 #include <sstream>
 #include <string>
 
@@ -57,9 +56,13 @@ set_flags(const std::string& flag_str) {
 }
 
 #ifdef NDEBUG
-#define DPRINTF(flag, fmt, ...) do {} while (0)
-#define DPRINTFS(flag, fmt, ...) do {} while (0)
-#else 
+#define DPRINTF(flag, fmt, ...)                                             \
+  do {                                                                      \
+  } while (0)
+#define DPRINTFS(flag, fmt, ...)                                            \
+  do {                                                                      \
+  } while (0)
+#else
 #define DPRINTF(flag, fmt, ...)                                             \
   do {                                                                      \
     if (debug::enabled_flags & debug::flag) [[unlikely]] {                  \
@@ -70,11 +73,12 @@ set_flags(const std::string& flag_str) {
 
 #define DPRINTFS(flag, fmt, ...)                                            \
   do {                                                                      \
-    if (debug::enabled_flags & debug::flag) {                               \
+    if (debug::enabled_flags & debug::flag) [[unlikely]]                    \
       fprintf(stderr, "%lu: [%s] " fmt "\n", curr_tick(), #flag,            \
               ##__VA_ARGS__);                                               \
-    }                                                                       \
-  } while (0)
+  }                                                                         \
+  }                                                                         \
+  while (0)
 #endif
 } // namespace debug
 

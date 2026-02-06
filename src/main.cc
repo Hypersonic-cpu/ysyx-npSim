@@ -1,4 +1,3 @@
-#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstddef>
@@ -14,20 +13,20 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include "base.hh"
 #include "branchSim/BranchPredictor.hh"
 #include "cacheSim/CacheBase.hh"
 #include "cacheSim/Prefetcher.hh"
 #include "cacheSim/RamConn.hh"
+#include "defines/base.hh"
 
-#include "debug.hh"
-#include "interface.hh"
+#include "defines/debug.hh"
+#include "defines/interface.hh"
+#include "defines/types.hh"
 #include "pipeSim/Pipeline.hh"
-#include "stats.hpp"
 #include "trace.hh"
-#include "types.hh"
 
 #include "nlohmann/json.hpp"
+#include "stats.hpp"
 
 using namespace trace;
 using namespace debug;

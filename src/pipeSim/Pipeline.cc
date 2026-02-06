@@ -1,8 +1,8 @@
 #include "pipeSim/Pipeline.hh"
-#include "debug.hh"
-#include "interface.hh"
+#include "defines/debug.hh"
+#include "defines/interface.hh"
+#include "defines/types.hh"
 #include "trace.hh"
-#include "types.hh"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -21,7 +21,7 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}
-    , stage_update_{} // , stage_touched_{}
+    , stage_update_{}
     , sim_pipe_{}
     , stage_handler_{&Pipeline::do_fetch_1, &Pipeline::do_decode,
                      &Pipeline::do_execute, &Pipeline::do_memory,
@@ -39,28 +39,15 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
  */
 void
 Pipeline::update_impl() {
-  // Process pipeline until we can accept the next instruction
-  // In drain mode, keep going until all instructions complete
-  // while (!(is_draining_ ? is_finished() : input_buffer_ == nullptr)) {
-  // Clear blocked before shifting pipeline
-  // for (auto ptr : clocked_objs_) {
-  //   if (curr_tick() <= ptr->next_update())
-  //     ptr->do_update();
-  // }
-
   DPRINTF(Event, "Update Pipeline: ");
   for (int i = Num_PipeStage - 1; i >= 0; i--) {
-    // For Fetch (i==0): check stage_update_.at(Fetch) for mispred stall
-    // bool stage_ready = (i == 0) ? (stage_update_.at(Fetch) <= curr_tick())
-    //                             : (stage_update_.at(i - 1) <=
-    //                             curr_tick());
-
     DPRINTF(Event, " %s : ptr %p, ptr-1 %p, upd %lu",
             StageName.at(i).c_str(), sim_pipe_.at(i).get(),
             (i ? sim_pipe_.at(i - 1) : input_buffer_).get(),
             (int64_t)stage_update_.at(i));
     if (i == static_cast<int>(Decode)) {
       if (sim_pipe_.at(Fetch)) {
+        [[maybe_unused]]
         const auto& ifp = sim_pipe_.at(Fetch)->trace_inst;
         DPRINTF(Event, " IDU rs %d, %d time %ld, %ld", ifp.src_reg[0],
                 ifp.src_reg[1], reg_ready_.at(ifp.src_reg[0]),
@@ -85,46 +72,7 @@ Pipeline::update_impl() {
   //   std::print("{:d}, ", (int64_t)elem);
   // }
   // std::println(")");
-
-  // Find next event time (minimum of all pending stage times)
-  // tick_t next_event = InfTime;
-  // for (int i = 0; i < Num_PipeStage; i++) {
-  //   if (i == 0) {
-  //     // Fetch: consider IFQ poptime or stage_valid
-  //     if (!fetch_queue_.is_empty()) {
-  //       next_event = std::min(next_event, fetch_queue_.next_poptime());
-  //     }
-  //     next_event = std::min(next_event, stage_update_.at(Fetch));
-  //   } else if (sim_pipe_.at(i - 1) != nullptr) {
-  //     // Stage has input ready
-  //     next_event = std::min(next_evelsent, stage_update_.at(i - 1));
-  //   }
-  // }
-
-  // // Also consider memory store queue
-  // if (!memst_queue_.is_empty()) {
-  //   next_event = std::min(next_event, memst_queue_.next_poptime());
-  // }
-
-  // // Advance time: skip to next event or advance by 1
-  // if (next_event > curr_tick() && next_event != InfTime) {
-  //   set_global_tick(next_event);
-  // } else {
-  //   set_global_tick(curr_tick() + 1);
-  // }
-  // }
-  // if (is_draining_ && !input_buffer_) {
-  //   next
-  // }
 }
-
-/**
- * NOTE: In each do_stage handler,
- * - Push unique ptr into sim queue
- * - Update ready time (No such case that do_stage is called but
- *   this stage is blocked due to IO buffer or else)
- * - Mem buffer enqueue
- */
 
 void
 Pipeline::do_fetch_0() {
@@ -241,16 +189,13 @@ Pipeline::do_fetch_1() {
 
 void
 Pipeline::send_ifu_req(addr_t addr) {
-  auto const [rready, wready] = imem->is_ready();
+  [[maybe_unused]] auto const [rready, wready] = imem->is_ready();
   assert(rready);
   imem->read_req(addr);
 }
 
 void
 Pipeline::handle_ifu_resp() {
-  // assert(sim_pipe_.at(Fetch) == nullptr);
-  // auto ptr = std::move(fetch_inst_queue_.front());
-  // fetch_inst_queue_.pop_front();
   auto it = std::ranges::find_if(
     fetch_inst_queue_, [](const auto& item) { return item->wait_mem; });
   assert(it != fetch_inst_queue_.end());
@@ -266,15 +211,11 @@ void
 Pipeline::do_decode() {
   const auto& trans = sim_pipe_.at(Fetch);
   const auto& inst = trans->trace_inst;
-  // assert(trans->out_valid);
-  // trans->out_valid = false;
 
   auto ready_time =
     std::max(reg_ready_.at(inst.src_reg[0]), reg_ready_.at(inst.src_reg[1]));
   auto rd = inst.dst_reg;
   if (ready_time == InfTime) {
-    // raw_rs_ = std::make_pair(inst.src_reg[0], inst.src_reg[1]);
-    // stage_update_.at(Decode) = InfTime;
     DPRINTF(Pipeline, " ID -> Blocked : PC=0x%08x src[%d,%d] dst=%d",
             inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg);
     schedule(Decode, InfTime);
@@ -324,7 +265,6 @@ Pipeline::do_execute() {
   }
 
   sim_pipe_.at(Execute) = std::move(sim_pipe_.at(Decode));
-  // stage_update_.at(Execute) = curr_tick() + 1;
   schedule(Execute, curr_tick() + 1);
 }
 
@@ -347,7 +287,6 @@ Pipeline::do_memory() {
     return;
   } else {
     // No memory op
-    // stage_update_.at(Memory) =
     schedule(Memory, curr_tick() + 1);
     sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
   }
@@ -386,7 +325,6 @@ Pipeline::handle_lsu_resp() {
   if (inst.mem_op != MemNone) {
     update_reg_time(inst.dst_reg, curr_tick() + 1);
   }
-  // stage_update_.at(Memory) =
   async_schedule(Memory, curr_tick() + 1);
   sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
 }
@@ -399,16 +337,14 @@ Pipeline::do_writeback() {
   stats.insts++;
   stats.cycles = curr_tick();
   sim_pipe_.at(Memory) = nullptr;
-  // stage_update_.at(WriteBack) = curr_tick() + 1;
   schedule(WriteBack, curr_tick() + 1);
-  // ready time === 0
 }
 
 void
 Pipeline::recv_mem_resp(CpuTrans trans) {
   auto id = trans.id;
-  auto addr = trans.addr;
-  auto is_write = trans.mop == MemRWOpt::Write;
+  [[maybe_unused]] auto addr = trans.addr;
+  [[maybe_unused]] auto is_write = trans.mop == MemRWOpt::Write;
   DPRINTF(Pipeline, "Recv Mem [%s] Resp, ID = %d @ addr %08x",
           is_write ? "Write" : "Read ", id, addr);
   if (id == 0) {
@@ -417,6 +353,7 @@ Pipeline::recv_mem_resp(CpuTrans trans) {
     handle_ifu_resp();
     return;
   } else if (id == 1) {
+    [[maybe_unused]]
     const auto& op = sim_pipe_.at(Execute)->trace_inst.mem_op;
     assert(!is_write && op == MemLoad || is_write && op == MemStore);
     handle_lsu_resp();
@@ -428,15 +365,10 @@ Pipeline::recv_mem_resp(CpuTrans trans) {
 void
 Pipeline::ack_mem_avail(AckTrans ack) {
   auto id = ack.id;
-  // auto is_write = ack.mop == MemRWOpt::Write;
   if (id == 0) {
-    // auto& nxtupd = stage_update_.at(Fetch);
-    // nxtupd = std::min(nxtupd, curr_tick());
     schedule(Fetch, curr_tick());
     return;
   } else if (id == 1) {
-    // auto& nxtupd = stage_update_.at(Memory);
-    // nxtupd = std::min(nxtupd, curr_tick());
     schedule(Memory, curr_tick());
     return;
   } else {
@@ -460,10 +392,6 @@ Pipeline::update_reg_time(uint8_t rd, tick_t when) {
       if (idi.src_reg[0] || idi.src_reg[1]) {
         auto ready_time = std::max(reg_ready_.at(idi.src_reg[0]),
                                    reg_ready_.at(idi.src_reg[1]));
-        // auto ready_comp = std::min(ready_time, stage_update_.at(Decode));
-        // auto ready_real = std::max(curr_tick(), ready_time);
-        // stage_update_.at(Decode) = std::min(when,
-        // stage_update_.at(Decode));
         schedule(Decode, ready_time);
       }
     }

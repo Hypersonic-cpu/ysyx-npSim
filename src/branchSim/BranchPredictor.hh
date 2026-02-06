@@ -1,13 +1,12 @@
 #pragma once
-#include "../types.hh"
-#include "base.hh"
-#include "debug.hh"
+#include "defines/types.hh"
+#include "defines/base.hh"
+#include "defines/debug.hh"
 #include "stats.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <format>
 #include <memory>
-#include <print>
 #include <string>
 #include <vector>
 

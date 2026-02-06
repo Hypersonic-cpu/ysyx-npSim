@@ -1,5 +1,5 @@
-#include "BranchPredictor.hh"
-#include "types.hh"
+#include "branchSim/BranchPredictor.hh"
+#include "defines/types.hh"
 #include <cstdint>
 #include <string>
 

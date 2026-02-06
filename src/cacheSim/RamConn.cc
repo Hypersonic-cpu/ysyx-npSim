@@ -1,7 +1,7 @@
 #include "cacheSim/RamConn.hh"
 #include "cacheSim/CacheBase.hh"
-#include "debug.hh"
-#include "interface.hh"
+#include "defines/debug.hh"
+#include "defines/interface.hh"
 #include "pmem.hh"
 #include <algorithm>
 #include <cstdint>
@@ -41,9 +41,9 @@ RAMArbiter::update_impl() {
     //   pmem_read(ent->addr + i * sizeof(word_t), &elem);
     // }
   } else {
-    // for (auto i = 0; i < ent->bst_len; i++) {
-    //   pmem_write(ent->addr + i * 4, ent->data.at(i), ent->strb.at(i));
-    // }
+    for (auto i = 0; i < ent->bst_len; i++) {
+      pmem_write(ent->addr + i * 4, ent->data.at(i), ent->strb.at(i));
+    }
   }
   ent->dir = Resp;
   hosts_.at(serving_id_)->recv_mem_resp(std::move(ent));

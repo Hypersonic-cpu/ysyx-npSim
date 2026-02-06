@@ -1,11 +1,10 @@
 // cacheSim/CacheBase.hh
 #pragma once
 
-#include "types.hh"
-#include "base.hh"
-#include "interface.hh"
+#include "defines/types.hh"
+#include "defines/base.hh"
+#include "defines/interface.hh"
 #include "stats.hpp"
-#include "trace.hh"
 #include "cacheSim/CacheLine.hh"
 #include "cacheSim/Prefetcher.hh"
 #include "cacheSim/RamConn.hh"
@@ -15,15 +14,6 @@
 #include <memory>
 #include <utility>
 #include <vector>
-#include <functional>
-
-#if ACTIVE_MODE
-#include "debug.hh"
-#else
-#define DPRINTF(...)                                                        \
-  do {                                                                      \
-  } while (0)
-#endif
 
 namespace pipeSim {
 class Processor;
@@ -233,7 +223,7 @@ protected:
   struct CachePipeEntry {
     addr_t addr;
     CacheLine* line;
-    trace::MemOp op;
+    MemRWOpt mop;
     uint8_t wrstrb;
     word_t wrdata;
   };
