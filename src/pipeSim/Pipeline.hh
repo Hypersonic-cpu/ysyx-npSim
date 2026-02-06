@@ -33,7 +33,7 @@ public:
       , bpu{bpu}
       , is_draining_{false} {}
   virtual ~Processor() {}
-  virtual void recv_mem_resp(MemTransPtr trans) = 0;
+  virtual void recv_mem_resp(CpuTrans trans) = 0;
   virtual void ack_mem_avail(AckTrans ack) = 0;
   virtual bool inst_avail() const = 0;
   virtual void feed_inst(const Inst& inst) = 0;
@@ -185,7 +185,7 @@ public:
     return ongoing_insts_ == 0;
   }
 
-  void recv_mem_resp(MemTransPtr trans) override;
+  void recv_mem_resp(CpuTrans trans) override;
   void ack_mem_avail(AckTrans ack) override;
 
 protected:

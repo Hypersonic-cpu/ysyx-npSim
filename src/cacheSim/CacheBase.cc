@@ -156,16 +156,18 @@ PipeCache::handle_hit(const PipePtr& bk) {
     is_read ? bk->line->atAligned(offsetOf(bk->addr)) : bk->wrdata;
   blocked_until_ = curr_tick() + 1;
   if (is_read) {
-    cpu_resp_recv_(std::make_unique<MemTrans>(
-      Resp, Read, bk->addr, cache_id_, static_cast<uint16_t>(1),
-      std::vector<word_t>({dt})));
+    cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
+    //   std::make_unique<MemTrans>(
+    // Resp, Read, bk->addr, cache_id_, static_cast<uint16_t>(1),
+    // std::vector<word_t>({dt})));
   } else {
     auto mask = CacheBase::strbExtend(bk->wrstrb);
     dt = (~mask & dt) | (mask & bk->wrdata);
     bk->line->setDirty();
-    cpu_resp_recv_(std::make_unique<MemTrans>(
-      Resp, Write, bk->addr, cache_id_, static_cast<uint16_t>(1),
-      std::vector<word_t>({dt})));
+    cpu_resp_recv_({bk->addr, dt, cache_id_, Write});
+    // cpu_resp_recv_(std::make_unique<MemTrans>(
+    //   Resp, Write, bk->addr, cache_id_, static_cast<uint16_t>(1),
+    //   std::vector<word_t>({dt})));
   }
   DPRINTF(Cache, "Cache Resp (%s) @ addr %08x data %08x",
           bk->op == MemLoad ? "Rd" : "Wr", bk->addr, dt);
@@ -224,10 +226,10 @@ PipeCache::update_impl() {
     }
   }
   // Flush cache, next cycle available
-  if (pending_flush_ &&
-      std::all_of(pipe_.begin(), pipe_.end(), [](const PipePtr& p) {
-        return p == nullptr;
-      })) [[unlikely]] {
+  if (pending_flush_
+      && std::all_of(pipe_.begin(), pipe_.end(), [](const PipePtr& p) {
+           return p == nullptr;
+         })) [[unlikely]] {
     handle_flush();
     return;
   }
@@ -327,12 +329,13 @@ NoCache::recv_mem_resp(MemTransPtr trans) {
   if (mop == Read) {
 #if ACTIVE_MODE
     assert(trans->data.size() == 0);
+    cpu_resp_recv_({trans->addr, 0xdeadbeef, cache_id_, Read});
 #else
     assert(trans->data.size() == 1);
+    cpu_resp_recv_({trans->addr, trans->data.at(0), cache_id_, Read});
 #endif
-    cpu_resp_recv_(std::move(trans));
   } else {
-    cpu_resp_recv_(std::move(trans));
+    cpu_resp_recv_({trans->addr, 0xbadc0de, cache_id_, Write});
   }
   cpu_ack_recv_({cache_id_, mop});
   busy = false;

@@ -26,7 +26,7 @@ class RAMArbiter : public ClockedObject {
   using MemTransPtr = std::unique_ptr<MemTrans>;
 
 public:
-  // NOTE: the order in hosts_ matters. The later one has higher priority
+  // The order in hosts_ matters. The later one has higher priority
   RAMArbiter(const std::string& name, tint_t lat, tint_t bst_lat,
              const std::vector<Cache*>& hosts)
       : ClockedObject(name, nullptr) // TODO:
