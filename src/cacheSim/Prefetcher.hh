@@ -1,11 +1,9 @@
 #pragma once
-#include "../types.hh"
-#include "base.hh"
+#include "defines/types.hh"
+#include "defines/base.hh"
 #include "stats.hpp"
 #include <optional>
 #include <string>
-#include <unordered_map>
-#include <vector>
 
 namespace cacheSim {
 

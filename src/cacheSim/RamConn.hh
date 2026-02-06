@@ -1,10 +1,9 @@
 // cacheSim/RamConn.hh
 #pragma once
 
-#include "base.hh"
-#include "interface.hh"
-#include "trace.hh"
-#include "types.hh"
+#include "defines/base.hh"
+#include "defines/interface.hh"
+#include "defines/types.hh"
 #include <cassert>
 #include <string>
 #include <vector>
@@ -20,9 +19,6 @@ using enum MemRWOpt;
 
 // SDRAM arbiter: single channel, larger-id large-priority.
 class RAMArbiter : public ClockedObject {
-  using trace::MemLoad;
-  using trace::MemNone;
-  using trace::MemStore;
   using MemTransPtr = std::unique_ptr<MemTrans>;
 
 public:

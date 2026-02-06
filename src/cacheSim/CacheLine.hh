@@ -1,7 +1,6 @@
 #pragma once
-#include "../types.hh"
+#include "defines/types.hh"
 #include <cassert>
-#include <iostream>
 #include <vector>
 
 namespace cacheSim {

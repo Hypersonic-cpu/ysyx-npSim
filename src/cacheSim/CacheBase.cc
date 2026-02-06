@@ -1,10 +1,9 @@
 
 #include "cacheSim/CacheBase.hh"
 #include "cacheSim/RamConn.hh"
-#include "debug.hh"
-#include "interface.hh"
-#include "trace.hh"
-#include "types.hh"
+#include "defines/debug.hh"
+#include "defines/interface.hh"
+#include "defines/types.hh"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -13,9 +12,6 @@
 #include <vector>
 
 namespace cacheSim {
-using trace::MemLoad;
-using trace::MemNone;
-using trace::MemStore;
 using enum MemRWOpt;
 using enum Direction;
 
@@ -151,7 +147,7 @@ PipeCache::config_json() const {
 
 void
 PipeCache::handle_hit(const PipePtr& bk) {
-  auto is_read = bk->op == trace::MemLoad;
+  auto is_read = bk->mop == Read;
   word_t& dt =
     is_read ? bk->line->atAligned(offsetOf(bk->addr)) : bk->wrdata;
   blocked_until_ = curr_tick() + 1;
@@ -170,7 +166,7 @@ PipeCache::handle_hit(const PipePtr& bk) {
     //   std::vector<word_t>({dt})));
   }
   DPRINTF(Cache, "Cache Resp (%s) @ addr %08x data %08x",
-          bk->op == MemLoad ? "Rd" : "Wr", bk->addr, dt);
+          bk->mop == Read ? "Read " : "Write", bk->addr, dt);
 }
 
 // MUST be called by memory do_update, before cache->do_update
@@ -259,7 +255,7 @@ PipeCache::read_req(addr_t addr) {
   assert(pipe_.front() == nullptr);
   auto blk = access(addr);
   auto req =
-    std::make_unique<CachePipeEntry>(addr, blk, trace::MemOp::MemLoad);
+    std::make_unique<CachePipeEntry>(addr, blk, Read);
   pipe_.front() = std::move(req);
   blocked_until_ = curr_tick() + 1;
   is_shifted_ = false;
@@ -319,8 +315,6 @@ NoCache::write_req(addr_t addr, word_t data, uint8_t mask) {
   ++stats.misses;
 }
 
-// void
-// NoCache::memr_resp(addr_t addr, const std::vector<word_t>& ret) {
 void
 NoCache::recv_mem_resp(MemTransPtr trans) {
   auto mop = trans->mop;

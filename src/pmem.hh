@@ -1,6 +1,6 @@
 #pragma once
 
-#include "types.hh"
+#include "defines/types.hh"
 
 // Read from physical memory (4 bytes)
 tick_t pmem_read(addr_t addr, word_t* data);

@@ -1,11 +1,12 @@
 #pragma once
-#include "base.hh"
 #include "branchSim/BranchPredictor.hh"
 #include "cacheSim/CacheBase.hh"
-#include "interface.hh"
+#include "defines/base.hh"
+#include "defines/interface.hh"
+#include "defines/types.hh"
 #include "stats.hpp"
 #include "trace.hh"
-#include "types.hh"
+
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -210,7 +211,6 @@ protected:
     // True if this is a speculative fetch after misprediction
     bool is_penalty_fetch;
     bool wait_mem;
-    // bool out_valid;
 
     explicit Transaction() = delete;
     explicit Transaction(const Inst& inst, bool is_penalty = false,
@@ -223,7 +223,6 @@ protected:
   };
   using TransPtr = std::unique_ptr<Transaction>;
 
-  // static constexpr tick_t BlockedTime{std::numeric_limits<tick_t>::max()};
   static constexpr tick_t BranchMissPenalty{
     0}; // Branch misprediction penalty cycles
   static constexpr size_t PenaltyFetchCount{
@@ -256,13 +255,7 @@ protected:
   void
   schedule(PipeStage stage, tick_t when) {
     assert(when >= curr_tick());
-    // if (!(when >= curr_tick())) {
-    //   std::println("ASSERTION FAIL stage {:s} curr {:d} when {:d}",
-    //                StageName.at(stage), curr_tick(), when);
-    //   assert(false);
-    // }
     stage_update_.at(stage) = when;
-    // stage_touched_.at(stage) = true;
   }
 
   void
@@ -288,34 +281,12 @@ protected:
       }
     }
     calc_nxtupd_ = mins;
-    // auto sel = stage_update_
-    //            | std::views::filter([](auto t) { return t > curr_tick();
-    //            });
-    // calc_nxtupd_ = std::ranges::fold_left(
-    //   sel, InfTime, [](tick_t a, tick_t b) { return std::min(a, b); });
-
-    // auto next_ticks = std::views::zip(stage_touched_, stage_update_)
-    //                   | std::views::filter(
-    //                     [](const auto& tuple) { return std::get<0>(tuple);
-    //                     })
-    //                   | std::views::transform([](const auto& tuple) {
-    //                       return std::get<1>(tuple);
-    //                     });
-    //
-    // return std::ranges::fold_left(
-    //   next_ticks, InfTime,
-    //   [](tick_t a, tick_t b) { return std::min(a, b); });
-    // for (auto i = 0U; i < Num_PipeStage; i++) {
-    //   stage_touched_.at(i) = stage_update_.at(i) > curr_tick();
-    // }
   }
 
   std::array<tick_t, 32> reg_ready_;
-  // std::pair<uint8_t, uint8_t> raw_rs_;
 
   // When OUTPUT of current stage is valid
   std::array<tick_t, Num_PipeStage> stage_update_;
-  // std::array<bool, Num_PipeStage> stage_touched_;
   std::array<stage_t, Num_PipeStage> const stage_handler_;
 
 private:
