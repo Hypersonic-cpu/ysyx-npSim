@@ -3,6 +3,7 @@
 #include "defines/interface.hh"
 #include "defines/types.hh"
 #include "trace.hh"
+
 #include <algorithm>
 #include <cassert>
 #include <cstddef>

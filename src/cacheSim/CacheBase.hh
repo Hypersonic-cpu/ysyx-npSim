@@ -1,13 +1,13 @@
 // cacheSim/CacheBase.hh
 #pragma once
 
-#include "defines/types.hh"
-#include "defines/base.hh"
-#include "defines/interface.hh"
-#include "stats.hpp"
 #include "cacheSim/CacheLine.hh"
 #include "cacheSim/Prefetcher.hh"
 #include "cacheSim/RamConn.hh"
+#include "defines/base.hh"
+#include "defines/interface.hh"
+#include "defines/types.hh"
+#include "stats.hpp"
 
 #include <cassert>
 #include <cstddef>
@@ -69,19 +69,12 @@ public:
   } stats;
 
 public:
-  using CPU = pipeSim::Processor;
-  // using rresp_t = void (*)(addr_t addr, word_t ret);
-  // using wresp_t = void (*)(addr_t addr);
-  // using avail_t = void (*)();
-  // using ack_t = void (*)(addr_t addr, word_t ret, uint16_t id, bool is_read);
-
   using mrresp_t = void (*)(addr_t addr, const std::vector<word_t>& ret);
   using mwresp_t = void (*)(addr_t addr);
 
-  CacheBase(const std::string& name, CPU* host, size_t size_bytes,
-            size_t line_bytes, size_t assoc = 1,
-            std::shared_ptr<Prefetcher> prefetcher = nullptr,
-            uint16_t cache_id = 0)
+  CacheBase(const std::string& name, size_t size_bytes, size_t line_bytes,
+            size_t assoc, uint16_t cache_id,
+            std::shared_ptr<Prefetcher> prefetcher = nullptr)
       : ClockedObject(name, &this->stats)
       , stats(name)
       , lineBytes_(line_bytes)
@@ -180,12 +173,11 @@ protected:
 
 class PipeCache : public CacheBase {
 public:
-  explicit PipeCache(const std::string& name, CPU* host, size_t pipe_depth,
-                     size_t size_bytes, size_t line_bytes, size_t assoc = 1,
-                     std::shared_ptr<Prefetcher> prefetcher = nullptr,
-                     uint16_t cache_id = 0)
-      : CacheBase(name, host, size_bytes, line_bytes, assoc, prefetcher,
-                  cache_id)
+  explicit PipeCache(const std::string& name, size_t pipe_depth,
+                     size_t size_bytes, size_t line_bytes, size_t assoc,
+                     uint16_t cache_id,
+                     std::shared_ptr<Prefetcher> prefetcher = nullptr)
+      : CacheBase(name, size_bytes, line_bytes, assoc, cache_id, prefetcher)
       , pipe_(pipe_depth)
       , pipe_depth_{pipe_depth}
       , r_waiting_{false}
@@ -197,7 +189,9 @@ public:
 
   auto
   is_ready() const -> std::pair<bool, bool> override {
-    auto c = is_shifted_ && !pending_flush_;
+    const auto& slot = pipe_.back();
+    auto avail = slot == nullptr || slot->line->isValid();
+    auto c = avail && !pending_flush_;
     return {c, c};
   }
 
@@ -250,11 +244,12 @@ protected:
  */
 class NoCache : public CacheBase {
 public:
-  explicit NoCache(const std::string& name, uint16_t cache_id = 1)
-      : CacheBase(name, 0, 8, 4, 1, nullptr,
-                  cache_id) // 8B total, 4B line, 1-way = 2 sets
+  explicit NoCache(const std::string& name, uint16_t cache_id)
+      : CacheBase(name, 8, 4, 1, cache_id,
+                  nullptr) // 8B total, 4B line, 1-way = 2 sets
       , r_busy_{false}
-      , w_busy_{false} {} // Dummy values for base
+      , w_busy_{false} {
+  }
 
   auto
   is_ready() const -> std::pair<bool, bool> override {

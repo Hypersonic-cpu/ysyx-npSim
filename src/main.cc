@@ -349,7 +349,6 @@ main(int argc, char** argv) {
   auto iprefetcher = create_prefetcher(i_prefetch, "iPrefetcher");
   auto icache = std::make_unique<cacheSim::PipeCache>(
     "iCache",
-    /* host */ core.get(),
     /* pipe depth */ 3, l1i_size, l1i_blksize, l1i_assoc, iprefetcher,
     /* cache ID */ 0);
   auto dprefetcher = create_prefetcher(d_prefetch, "dPrefetcher");
@@ -357,7 +356,6 @@ main(int argc, char** argv) {
   if (l1d_size > 0) {
     dcache = std::make_unique<cacheSim::PipeCache>(
       "dCache",
-      /* host */ core.get(),
       /* pipe depth */ 3, l1d_size, l1d_blksize, l1d_assoc, dprefetcher,
       /* cache ID */ 1);
   } else {

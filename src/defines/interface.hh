@@ -7,6 +7,7 @@
 
 enum class Direction { Req, Resp };
 enum class MemRWOpt { Read, Write };
+enum class RspStatus { Okay, ExOkay, SlvErr, DcdErr };
 
 struct MemTrans {
   Direction dir;

@@ -8,8 +8,13 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <format>
 #include <memory>
 #include <vector>
+
+using handler_t = void (*)();
+extern handler_t abortHandler;
 
 namespace cacheSim {
 using enum MemRWOpt;
@@ -91,7 +96,15 @@ CacheBase::handle_fill(CacheLine* blk, addr_t addr,
                        const std::vector<word_t>& ret) {
   blk->activate();
   blk->setTag(tagOf(addr));
-  DPRINTF(Cache, "ReFill @ addr %08x", blk->getTag());
+#ifndef NDEBUG
+  DPRINTFI(Cache, "ReFill @ addr %08x {", blk->getTag());
+  if (debug::enabled_flags | debug::Flag::Cache) {
+    for (auto i = 0U; i < this->blksize() / sizeof(word_t); i++) {
+      fprintf(stderr, "%08x, ", ret.at(i));
+    }
+    fprintf(stderr, "}\n");
+  }
+#endif
   blk->setVecData(ret);
 }
 
@@ -192,6 +205,7 @@ PipeCache::recv_mem_resp(MemTransPtr trans) {
   if (is_read) {
     handle_fill(pipe_.back()->line, trans->addr, trans->data);
   }
+  // Should shift this cycle. Or `ready` should also be updated next cycle.
   blocked_until_ = curr_tick() + 1;
   // w_waiting_ = false;
 }
@@ -210,7 +224,7 @@ PipeCache::update_impl() {
       handle_hit(bk);
     } else {
       mem_side_->recv_req(std::make_unique<MemTrans>(
-        Req, Read, bk->addr, cache_id_,
+        Req, Read, blockAddrOf(bk->addr), cache_id_,
         static_cast<uint16_t>(lineBytes_ / sizeof(word_t))));
 
       if (bk->line->isDirty()) {
@@ -235,6 +249,7 @@ PipeCache::update_impl() {
     pipe_[i] = std::move(pipe_[i - 1]);
   }
   is_shifted_ = true;
+  DPRINTF(Cache, "Pipeline shifted, new tail = %p", pipe_.back().get());
   // Notify the CPU-side that cache is available this cycle
   cpu_ack_recv_({cache_id_, Read});
   cpu_ack_recv_({cache_id_, Write});
@@ -250,12 +265,11 @@ void
 PipeCache::read_req(addr_t addr) {
   // A single CPU-side port should never issue 2 requests in the same cycle
   // Also not allowed when pipe is not shifted
-  DPRINTF(Cache, "Recv READ Req @ %u", addr);
+  DPRINTF(Cache, "Recv READ Req @ %08x", addr);
   assert(is_shifted_);
   assert(pipe_.front() == nullptr);
   auto blk = access(addr);
-  auto req =
-    std::make_unique<CachePipeEntry>(addr, blk, Read);
+  auto req = std::make_unique<CachePipeEntry>(addr, blk, Read);
   pipe_.front() = std::move(req);
   blocked_until_ = curr_tick() + 1;
   is_shifted_ = false;
