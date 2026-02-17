@@ -1,5 +1,10 @@
 #pragma once
-#include <bit>
+
+/**
+ * npc/ should re-define these classes and SHOULD NOT
+ * include this header.
+ */
+
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -14,22 +19,3 @@ constexpr addr_t WordShift{2};
 constexpr tick_t InfTime{std::numeric_limits<tick_t>::max()};
 
 extern tick_t curr_tick() noexcept;
-
-inline bool
-isDevice(addr_t a) {
-  return (a >= 0x10000000U && a < 0x80000000U);
-}
-
-inline bool
-isPowerOf2(addr_t x) {
-  return (x != 0) && ((x & (x - 1)) == 0);
-}
-
-inline size_t
-floorLog2(size_t x) {
-  assert(x > 0);
-  return static_cast<size_t>(std::bit_width(x) - 1);
-}
-
-// #define CACHE true
-#define CACHE false
