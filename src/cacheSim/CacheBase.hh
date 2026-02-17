@@ -14,6 +14,7 @@
 #include <memory>
 #include <utility>
 #include <vector>
+#include <bit>
 
 namespace pipeSim {
 class Processor;
@@ -24,6 +25,18 @@ namespace cacheSim {
 using MemSide = memSim::RAMArbiter;
 
 class CacheBase : public ClockedObject {
+
+  inline static bool
+  isPowerOf2(addr_t x) {
+    return (x != 0) && ((x & (x - 1)) == 0);
+  }
+  
+  inline static size_t
+  floorLog2(size_t x) {
+    assert(x > 0);
+    return static_cast<size_t>(std::bit_width(x) - 1);
+  }
+
 public:
   struct CacheStats : public StatsBase {
     CacheStats(const std::string& parent_name)

@@ -5,21 +5,24 @@ else
 	DBG_FLAGS = -DNDEBUG
 endif
 
+NPSIM_ACTIVE?=1
+SRCS_BRANCH := $(shell find "$(NPSIM_HOME)/src/branchSim" -name '*.cc' -type f)
+SRCS_CACHE  := $(shell find "$(NPSIM_HOME)/src/cacheSim" -name '*.cc' -type f)
+SRCS_PIPE   := $(shell find "$(NPSIM_HOME)/src/pipeSim" -name '*.cc' -type f)
+SRCS_DEFINE := $(shell find "$(NPSIM_HOME)/src/defines" -name '*.cc' -type f)
+SRCS_TRACE  := $(shell find "$(NPSIM_HOME)/src" -maxdepth 1 -name 'trace.cc' -type f)
+SRCS_PMEM   := $(shell find "$(NPSIM_HOME)/src" -maxdepth 1 -name 'pmem.cc' -type f)
+
+ifeq ($(NPSIM_ACTIVE),1)
+# ACTIVE mode, run `make` in this folder
 CXX := clang++-22
-# Build runnable simulator (do not compile libapi)
 CXXFLAGS ?= -std=c++23 -stdlib=libc++ -O3 -flto -g -fPIC -I./src -Wall -Wno-reorder-ctor
 CXXFLAGS += -I $(NPC_HOME)/libs/json/include
-CXXFLAGS += -I $(NPC_HOME)/rvproc/sim-cxx/include
+CXXFLAGS += -I $(NPC_HOME)/rvproc/sim-cxx/stats_template
 CXXFLAGS += -D ACTIVE_MODE=1 $(DBG_FLAGS)
-SRCS_BRANCH := $(shell find "./src/branchSim" -name '*.cc' -type f)
-SRCS_CACHE  := $(shell find "./src/cacheSim" -name '*.cc' -type f)
-SRCS_PIPE   := $(shell find "./src/pipeSim" -name '*.cc' -type f)
-SRCS_DEFINE := $(shell find "./src/defines" -name '*.cc' -type f)
-SRCS_TRACE  := $(shell find "./src" -maxdepth 1 -name 'trace.cc' -type f)
-SRCS_PMEM   := $(shell find "./src" -maxdepth 1 -name 'pmem.cc' -type f)
 
 SRCS := $(SRCS_CACHE) $(SRCS_BRANCH) $(SRCS_PIPE) $(SRCS_TRACE) $(SRCS_DEFINE) $(SRCS_SDRAM) src/main.cc
-# OBJS := $(SRCS:.cc=.o)
+
 OBJS := $(patsubst ./src/%, build/%, $(patsubst src/%, build/%, $(SRCS:.cc=.o)))
 OBJS_CACHE  := $(patsubst ./src/%, build/%, $(patsubst src/%, build/%, $(SRCS_CACHE:.cc=.o)))
 OBJS_DEFINE := $(patsubst ./src/%, build/%, $(patsubst src/%, build/%, $(SRCS_DEFINE:.cc=.o)))
@@ -27,6 +30,7 @@ OBJS_TRACE  := $(patsubst ./src/%, build/%, $(patsubst src/%, build/%, $(SRCS_TR
 OBJS_PMEM   := $(patsubst ./src/%, build/%, $(patsubst src/%, build/%, $(SRCS_PMEM:.cc=.o)))
 
 OBJS_CTEST := $(OBJS_TRACE) $(OBJS_DEFINE) $(OBJS_CACHE) $(OBJS_PMEM)
+
 
 .PHONY: default clean all
 
@@ -53,12 +57,12 @@ build/tests/cacheTest/%: $(OBJS_TRACE) $(OBJS_DEFINE) $(OBJS_CACHE) $(OBJS_PMEM)
 
 .PHONY: cachetest test-cache test-all
 
-cachetest: build/tests/cacheTest/test_cache build/tests/cacheTest/test_cache_advanced build/tests/cacheTest/test_cache_timing build/tests/cacheTest/test_cache_multiple
-	@mkdir -p build
-	@mv build/tests/cacheTest/test_cache build/cachetest
-	@mv build/tests/cacheTest/test_cache_advanced build/cachetest-advanced
-	@mv build/tests/cacheTest/test_cache_timing build/cachetest-timing
-	@mv build/tests/cacheTest/test_cache_multiple build/cachetest-multiple
+# cachetest: build/tests/cacheTest/test_cache build/tests/cacheTest/test_cache_advanced build/tests/cacheTest/test_cache_timing build/tests/cacheTest/test_cache_multiple
+	# @mkdir -p build
+	# @mv build/tests/cacheTest/test_cache build/cachetest
+	# @mv build/tests/cacheTest/test_cache_advanced build/cachetest-advanced
+	# @mv build/tests/cacheTest/test_cache_timing build/cachetest-timing
+	# @mv build/tests/cacheTest/test_cache_multiple build/cachetest-multiple
 
 build/%.o: ./src/%.cc
 	@mkdir -p $(dir $@)
@@ -67,3 +71,10 @@ build/%.o: ./src/%.cc
 clean:
 	@echo $(OBJS)
 	rm -rf build/*
+
+else
+# PASSIVE mode, called by npc/
+# TODO: Branch
+CSRCS +=
+INC_PATH += $(NPSIM_HOME)
+endif
