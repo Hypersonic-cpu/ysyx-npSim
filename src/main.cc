@@ -1,6 +1,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -53,8 +54,8 @@ set_global_tick(tick_t t) noexcept {
 }
 
 // Configuration parameters
-static tint_t mem_latency = 40;
-static tint_t mem_bstlat = 8;
+static tint_t mem_latency = 42;
+static tint_t mem_bstlat = 10;
 static std::string trace_file;
 // Tiny defaults
 static size_t l1i_size = 512;
@@ -65,7 +66,8 @@ static size_t l1d_blksize = 16;
 static size_t l1d_assoc = 1;
 static std::string i_prefetch = "none";
 static std::string d_prefetch = "none";
-static size_t max_insts = std::numeric_limits<tick_t>::max();
+static size_t max_insts = std::numeric_limits<size_t>::max();
+static size_t max_ticks = std::numeric_limits<tick_t>::max();
 static std::string out_file;
 
 // BPU Config
@@ -120,6 +122,7 @@ parse_args(int argc, char* argv[]) {
     {"l1i-pf", required_argument, 0, 'P'},
     {"l1d-pf", required_argument, 0, 'p'},
     {"max-insts", required_argument, 0, 'n'},
+    {"max-ticks", required_argument, 0, 'N'},
     {"debug-flags", required_argument, 0, 'd'},
     {"mem-lat", required_argument, 0, 'M'},
     {"mem-bstlat", required_argument, 0, 'm'},
@@ -165,6 +168,9 @@ parse_args(int argc, char* argv[]) {
       break;
     case 'n':
       max_insts = std::stoul(optarg);
+      break;
+    case 'N':
+      max_ticks = std::stoul(optarg);
       break;
     case 'd':
       debug::set_flags(optarg);
@@ -355,13 +361,17 @@ main(int argc, char** argv) {
   auto dprefetcher = create_prefetcher(d_prefetch, "dPrefetcher");
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
+    assert(false);
     dcache = std::make_unique<cacheSim::PipeCache>(
       "dCache",
       /* host */ core.get(),
       /* pipe depth */ 3, l1d_size, l1d_blksize, l1d_assoc, dprefetcher,
       /* cache ID */ 1);
   } else {
-    dcache = std::make_unique<cacheSim::NoCache>("dCache", 1); // cache_id=1
+    // dcache = std::make_unique<cacheSim::NoCache>("dCache",
+    //                                              static_cast<uint16_t>(1));
+    dcache = std::make_unique<cacheSim::StoreBuffer>(
+      "stBuf", 2, static_cast<uint16_t>(1));
   }
   core->set_cache_ports(icache.get(), dcache.get());
   pipeSim::Processor* proc = &(*core);
@@ -455,14 +465,14 @@ main(int argc, char** argv) {
       }
       append_stats_json(root, dump_cnt++, simlist);
     }
-  } while (!core->is_finished());
+  } while (!core->is_finished() && curr_tick() < max_ticks);
 
   auto loop_end = std::chrono::high_resolution_clock::now();
   auto loop_us = std::chrono::duration_cast<std::chrono::milliseconds>(
                    loop_end - loop_start)
                    .count();
   std::println(ANSI_FG_YELLOW
-               "> Time Usage: {:d} ms IPC: {:.6f} <" ANSI_ALL_NONE,
+               "> Host Time: {:d} ms IPC: {:.6f} <" ANSI_ALL_NONE,
                loop_us, core->stats.get_ipc());
 
   // Dump final stats

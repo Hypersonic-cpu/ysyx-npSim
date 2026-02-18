@@ -73,12 +73,11 @@ set_flags(const std::string& flag_str) {
 
 #define DPRINTFS(flag, fmt, ...)                                            \
   do {                                                                      \
-    if (debug::enabled_flags & debug::flag) [[unlikely]]                    \
-      fprintf(stderr, "%lu: [%s] " fmt "\n", curr_tick(), #flag,            \
-              ##__VA_ARGS__);                                               \
-  }                                                                         \
-  }                                                                         \
-  while (0)
+    if (debug::enabled_flags & debug::flag) {                               \
+      [[unlikely]] fprintf(stderr, "%lu: [%s] " fmt "\n", curr_tick(),      \
+                           #flag, ##__VA_ARGS__);                           \
+    }                                                                       \
+  } while (0)
 #endif
 } // namespace debug
 

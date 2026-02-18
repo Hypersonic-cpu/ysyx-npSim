@@ -1,20 +1,23 @@
 // cacheSim/CacheBase.hh
 #pragma once
 
-#include "defines/types.hh"
-#include "defines/base.hh"
-#include "defines/interface.hh"
-#include "stats.hpp"
 #include "cacheSim/CacheLine.hh"
 #include "cacheSim/Prefetcher.hh"
 #include "cacheSim/RamConn.hh"
+#include "defines/base.hh"
+#include "defines/interface.hh"
+#include "defines/types.hh"
+#include "stats.hpp"
 
+#include <bit>
 #include <cassert>
 #include <cstddef>
+#include <filesystem>
+#include <list>
 #include <memory>
+#include <queue>
 #include <utility>
 #include <vector>
-#include <bit>
 
 namespace pipeSim {
 class Processor;
@@ -30,7 +33,7 @@ class CacheBase : public ClockedObject {
   isPowerOf2(addr_t x) {
     return (x != 0) && ((x & (x - 1)) == 0);
   }
-  
+
   inline static size_t
   floorLog2(size_t x) {
     assert(x > 0);
@@ -86,7 +89,8 @@ public:
   // using rresp_t = void (*)(addr_t addr, word_t ret);
   // using wresp_t = void (*)(addr_t addr);
   // using avail_t = void (*)();
-  // using ack_t = void (*)(addr_t addr, word_t ret, uint16_t id, bool is_read);
+  // using ack_t = void (*)(addr_t addr, word_t ret, uint16_t id, bool
+  // is_read);
 
   using mrresp_t = void (*)(addr_t addr, const std::vector<word_t>& ret);
   using mwresp_t = void (*)(addr_t addr);
@@ -124,6 +128,7 @@ public:
 
   // Read / write channel ready
   virtual auto is_ready() const -> std::pair<bool, bool> = 0;
+  // TODO: Remove this ?
   virtual void flush_all() = 0;
   virtual void read_req(addr_t addr) = 0;
   virtual void write_req(addr_t addr, word_t data, uint8_t mask) = 0;
@@ -301,4 +306,74 @@ protected:
   bool w_busy_;
 };
 
+class StoreBuffer : public CacheBase {
+public:
+  explicit StoreBuffer(const std::string& name, size_t entries,
+                       uint16_t cache_id = 1)
+      : CacheBase(name, 0, 8, 4, 1, nullptr,
+                  cache_id) // 8B total, 4B line, 1-way = 2 sets
+      , r_busy_{false}
+      , w_busy_{false}
+      , pending_flush_{false}
+      , entries{entries}
+      , sched_r_time_{InfTime}
+      , sched_w_time_{InfTime}
+      , sched_r_resp_{}
+      , sched_w_resp_{}
+      , fifo_{} {}
+
+  auto
+  is_ready() const -> std::pair<bool, bool> override {
+    if (pending_flush_) [[unlikely]] {
+      return {false, false};
+    }
+    return {!r_busy_, fifo_.size() < entries};
+  }
+  void read_req(addr_t addr) override;
+  void write_req(addr_t addr, word_t data, uint8_t mask) override;
+  void recv_mem_resp(MemTransPtr trans) override;
+
+  void
+  flush_all() override {
+    pending_flush_ = true;
+  }
+
+  void update_impl() override;
+
+  tick_t
+  next_update() const override {
+    return std::min(sched_r_time_, sched_w_time_);
+  }
+
+  json
+  config_json() const override {
+    json j;
+    j["type"] = "NoCache";
+    j["size"] = 0;
+    return j;
+  }
+
+  struct StBufEnt {
+    // bool valid = false;
+    addr_t addr;
+    word_t data;
+    uint8_t mask;
+  };
+
+protected:
+  bool r_busy_;
+  bool w_busy_;
+  bool pending_flush_;
+  size_t write_remain_;
+
+  std::list<StBufEnt> fifo_;
+  // size_t busy_ent;
+  const size_t entries;
+
+private:
+  tick_t sched_w_time_;
+  tick_t sched_r_time_;
+  CpuTrans sched_r_resp_;
+  CpuTrans sched_w_resp_;
+};
 } // namespace cacheSim

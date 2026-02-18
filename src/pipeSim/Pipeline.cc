@@ -366,10 +366,10 @@ void
 Pipeline::ack_mem_avail(AckTrans ack) {
   auto id = ack.id;
   if (id == 0) {
-    schedule(Fetch, curr_tick());
+    async_schedule(Fetch, curr_tick());
     return;
   } else if (id == 1) {
-    schedule(Memory, curr_tick());
+    async_schedule(Memory, curr_tick());
     return;
   } else {
     assert(false && "No such ID");

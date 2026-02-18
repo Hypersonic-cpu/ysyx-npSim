@@ -1,4 +1,4 @@
-DEBUG_MODE?=0
+DEBUG_MODE?=1
 ifeq ($(DEBUG_MODE),1)
 	DBG_FLAGS = 
 else
@@ -6,12 +6,18 @@ else
 endif
 
 NPSIM_ACTIVE?=1
-SRCS_BRANCH := $(shell find "$(NPSIM_HOME)/src/branchSim" -name '*.cc' -type f)
-SRCS_CACHE  := $(shell find "$(NPSIM_HOME)/src/cacheSim" -name '*.cc' -type f)
-SRCS_PIPE   := $(shell find "$(NPSIM_HOME)/src/pipeSim" -name '*.cc' -type f)
-SRCS_DEFINE := $(shell find "$(NPSIM_HOME)/src/defines" -name '*.cc' -type f)
-SRCS_TRACE  := $(shell find "$(NPSIM_HOME)/src" -maxdepth 1 -name 'trace.cc' -type f)
-SRCS_PMEM   := $(shell find "$(NPSIM_HOME)/src" -maxdepth 1 -name 'pmem.cc' -type f)
+ifeq ($(NPSIM_ACTIVE),1)
+	SRC_PATH = ./src
+else
+	SRC_PATH = $(NPSIM_HOME)/src
+endif
+
+SRCS_BRANCH := $(shell find "$(SRC_PATH)/branchSim" -name '*.cc' -type f)
+SRCS_CACHE  := $(shell find "$(SRC_PATH)/cacheSim" -name '*.cc' -type f)
+SRCS_PIPE   := $(shell find "$(SRC_PATH)/pipeSim" -name '*.cc' -type f)
+SRCS_DEFINE := $(shell find "$(SRC_PATH)/defines" -name '*.cc' -type f)
+SRCS_TRACE  := $(shell find "$(SRC_PATH)" -maxdepth 1 -name 'trace.cc' -type f)
+SRCS_PMEM   := $(shell find "$(SRC_PATH)" -maxdepth 1 -name 'pmem.cc' -type f)
 
 ifeq ($(NPSIM_ACTIVE),1)
 # ACTIVE mode, run `make` in this folder

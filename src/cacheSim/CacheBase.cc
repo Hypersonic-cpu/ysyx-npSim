@@ -254,8 +254,7 @@ PipeCache::read_req(addr_t addr) {
   assert(is_shifted_);
   assert(pipe_.front() == nullptr);
   auto blk = access(addr);
-  auto req =
-    std::make_unique<CachePipeEntry>(addr, blk, Read);
+  auto req = std::make_unique<CachePipeEntry>(addr, blk, Read);
   pipe_.front() = std::move(req);
   blocked_until_ = curr_tick() + 1;
   is_shifted_ = false;
@@ -341,4 +340,107 @@ NoCache::flush_all() {
   // memory requests
 }
 
+void
+StoreBuffer::update_impl() {
+  if (sched_r_time_ < InfTime) {
+    // Scheduled read response
+    DPRINTF(Cache, "Send Cpu[%s] Resp @ %08x", "Read ", sched_r_resp_.addr);
+    cpu_resp_recv_(sched_r_resp_);
+    sched_r_time_ = InfTime;
+  }
+
+  if (sched_w_time_ < InfTime) {
+    // Invoked before CPU-Req at T+1, so sched_w_time_ will
+    // not be overwritten
+    DPRINTF(Cache, "Send Cpu[%s] Resp @ %08x", "Write", sched_w_resp_.addr);
+    cpu_resp_recv_(sched_w_resp_);
+    sched_w_time_ = InfTime;
+    if (!fifo_.empty() && !w_busy_) {
+      auto& front = fifo_.front();
+      mem_side_->recv_req(
+        std::make_unique<MemTrans>(Req, Write, front.addr, cache_id_, 1,
+                                   std::vector<word_t>({front.data}),
+                                   std::vector<uint8_t>({front.mask})));
+      w_busy_ = true;
+    }
+  }
+}
+
+void
+StoreBuffer::read_req(addr_t addr) {
+  auto it =
+    std::find_if(fifo_.begin(), fifo_.end(), [addr](StBufEnt s) -> bool {
+      return s.addr == addr && s.mask == 0xf;
+    });
+  DPRINTF(Cache, "Recv Cpu[%s] Req @ %08x : Buffer [%s]", "Read ", addr,
+          it == fifo_.end() ? "Miss" : "Hit ");
+  if (it == fifo_.end()) {
+    // Buffer miss
+    mem_side_->recv_req(
+      std::make_unique<MemTrans>(Req, Read, addr, cache_id_, 1));
+    r_busy_ = true;
+  } else {
+    // Buffer hit
+    // Delay the resp for 1 cycle since we are not sure whether
+    // CPU side can handle same-cyc resp or not.
+    sched_r_time_ = curr_tick() + 1;
+    sched_r_resp_ = {.addr = addr,
+                     .data = it->data,
+                     .id = cache_id_,
+                     .mop = MemRWOpt::Read};
+  }
+}
+
+void
+StoreBuffer::write_req(addr_t addr, word_t data, uint8_t mask) {
+  DPRINTF(Cache, "Recv Cpu[%s] Req @ %08x", "Write", addr);
+  assert(fifo_.size() < entries);
+  fifo_.emplace_back(StBufEnt{addr, data, mask});
+  sched_w_time_ = curr_tick() + 1;
+  sched_w_resp_ = {
+    .addr = addr, .data = 0xbadc0de, .id = cache_id_, .mop = Write};
+}
+
+void
+StoreBuffer::recv_mem_resp(MemTransPtr trans) {
+  DPRINTF(Cache, "Recv Mem[%s] Resp : length %lu",
+          (trans->mop == Read) ? "Read " : "Write", trans->data.size());
+  if (trans->mop == Read) {
+    CpuTrans temp_resp{};
+#ifdef ACTIVE_MODE
+    assert(trans->data.size() == 0);
+    temp_resp = {.addr = trans->addr,
+                 .data = 0xbeef'c0de,
+                 .id = cache_id_,
+                 .mop = MemRWOpt::Read};
+#else
+    assert(trans->data.size() == 1);
+    temp_resp = {.addr = trans->addr,
+                 .data = trans->data.at(0),
+                 .id = cache_id_,
+                 .mop = MemRWOpt::Read};
+#endif
+    DPRINTF(Cache, "Send Cpu[%s] Resp @ %08x", "Read ", temp_resp.addr);
+    cpu_resp_recv_(temp_resp);
+    r_busy_ = false;
+  } else {
+    auto& front = fifo_.front();
+    assert(front.addr == trans->addr);
+    if (fifo_.size() == entries) {
+      cpu_ack_recv_(AckTrans{.id = cache_id_, .mop = Write});
+      DPRINTF(Cache, "StBuf slot available");
+    }
+    fifo_.pop_front();
+    w_busy_ = false;
+    // Drain next buffered write to memory if available
+    if (!fifo_.empty()) {
+      auto& next = fifo_.front();
+      mem_side_->recv_req(std::make_unique<MemTrans>(
+        Req, Write, next.addr, cache_id_, 1,
+        std::vector<word_t>({next.data}),
+        std::vector<uint8_t>({next.mask})));
+      w_busy_ = true;
+    }
+  }
+}
 } // namespace cacheSim
