@@ -35,15 +35,21 @@ RAMArbiter::update_impl() {
   auto& [rd, wr] = reqs_.at(serving_id_);
   auto& ent = serving_op_ == Read ? rd : wr;
   if (ent->mop == Read) {
-    // ent->data.resize(ent->bst_len);
-    // auto i = 0U;
-    // for (auto& elem : ent->data) {
-    //   pmem_read(ent->addr + i * sizeof(word_t), &elem);
-    // }
+#if ACTIVE_MODE
+#else
+    ent->data.resize(ent->bst_len);
+    auto i = 0U;
+    for (auto& elem : ent->data) {
+      pmem_read(ent->addr + i * sizeof(word_t), &elem);
+    }
+#endif
   } else {
+#if ACTIVE_MODE
+#else
     for (auto i = 0; i < ent->bst_len; i++) {
       pmem_write(ent->addr + i * 4, ent->data.at(i), ent->strb.at(i));
     }
+#endif
   }
   ent->dir = Resp;
   hosts_.at(serving_id_)->recv_mem_resp(std::move(ent));
