@@ -38,6 +38,13 @@ public:
 
   void recv_req(MemTransPtr req);
 
+  // Inject a ghost read reservation to model wrong-path SDRAM contention.
+  // Delays new read requests that arrive before the ghost expires.
+  void
+  inject_ghost_read(tick_t dur) {
+    ghost_r_until_ = std::max(ghost_r_until_, curr_tick() + dur);
+  }
+
   // SimObject interface
   json
   config_json() const override {
@@ -85,6 +92,7 @@ private:
   tint_t const burst_latency_;
   tick_t r_busy_until_;
   tick_t w_busy_until_;
+  tick_t ghost_r_until_{0};
   std::vector<Cache*> const hosts_;
 
   using HostRWChannel = std::pair<MemTransPtr, MemTransPtr>;

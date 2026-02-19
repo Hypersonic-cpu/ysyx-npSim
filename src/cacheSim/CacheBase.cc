@@ -342,14 +342,23 @@ NoCache::flush_all() {
 
 void
 StoreBuffer::update_impl() {
-  if (sched_r_time_ < InfTime) {
+  // Issue deferred read miss to SDRAM (RTL blocked->ar.fire, 1 cycle)
+  if (pending_rmiss_time_ <= curr_tick()) {
+    mem_side_->recv_req(
+      std::make_unique<MemTrans>(Req, Read, pending_rmiss_addr_, cache_id_,
+                                 1));
+    pending_rmiss_time_ = InfTime;
+  }
+
+  if (sched_r_time_ <= curr_tick()) {
     // Scheduled read response
     DPRINTF(Cache, "Send Cpu[%s] Resp @ %08x", "Read ", sched_r_resp_.addr);
     cpu_resp_recv_(sched_r_resp_);
     sched_r_time_ = InfTime;
+    r_busy_ = false;
   }
 
-  if (sched_w_time_ < InfTime) {
+  if (sched_w_time_ <= curr_tick()) {
     // Invoked before CPU-Req at T+1, so sched_w_time_ will
     // not be overwritten
     DPRINTF(Cache, "Send Cpu[%s] Resp @ %08x", "Write", sched_w_resp_.addr);
@@ -374,12 +383,15 @@ StoreBuffer::read_req(addr_t addr) {
     });
   DPRINTF(Cache, "Recv Cpu[%s] Req @ %08x : Buffer [%s]", "Read ", addr,
           it == fifo_.end() ? "Miss" : "Hit ");
+  stats.accesses++;
   if (it == fifo_.end()) {
-    // Buffer miss
-    mem_side_->recv_req(
-      std::make_unique<MemTrans>(Req, Read, addr, cache_id_, 1));
+    // Buffer miss — defer SDRAM request by 1 cycle (RTL blocked state)
+    stats.misses++;
+    pending_rmiss_time_ = curr_tick() + 1;
+    pending_rmiss_addr_ = addr;
     r_busy_ = true;
   } else {
+    stats.hits++;
     // Buffer hit
     // Delay the resp for 1 cycle since we are not sure whether
     // CPU side can handle same-cyc resp or not.
@@ -420,9 +432,9 @@ StoreBuffer::recv_mem_resp(MemTransPtr trans) {
                  .id = cache_id_,
                  .mop = MemRWOpt::Read};
 #endif
-    DPRINTF(Cache, "Send Cpu[%s] Resp @ %08x", "Read ", temp_resp.addr);
-    cpu_resp_recv_(temp_resp);
-    r_busy_ = false;
+    // Defer CPU response by 1 cycle (RTL rValid register delay)
+    sched_r_time_ = curr_tick() + 1;
+    sched_r_resp_ = temp_resp;
   } else {
     auto& front = fifo_.front();
     assert(front.addr == trans->addr);

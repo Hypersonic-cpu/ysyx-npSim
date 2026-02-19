@@ -1,6 +1,7 @@
 #pragma once
 #include "branchSim/BranchPredictor.hh"
 #include "cacheSim/CacheBase.hh"
+#include "cacheSim/RamConn.hh"
 #include "defines/base.hh"
 #include "defines/interface.hh"
 #include "defines/types.hh"
@@ -51,11 +52,17 @@ public:
     dmem = l1d;
   }
 
+  void
+  set_sdram(memSim::RAMArbiter* s) {
+    sdram_ = s;
+  }
+
 protected:
   Cache* imem;
   Cache* dmem;
   BranchUnit* bpu;
   bool is_draining_;
+  memSim::RAMArbiter* sdram_{nullptr};
 };
 
 class Pipeline final : public Processor {
@@ -147,13 +154,16 @@ public:
 public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
-                    size_t stq_size, BranchUnit* bpu);
+                    size_t stq_size, BranchUnit* bpu,
+                    tick_t br_mis_pen = 10, size_t pf_count = 4,
+                    tick_t ghost_rdur = 0);
 
   json
   config_json() const override {
     json j;
     j["BranchPenaltyCycles"] = BranchMissPenalty;
     j["BranchPenaltyFetches"] = PenaltyFetchCount;
+    j["GhostReadDur"] = ghost_read_dur_;
     return j;
   }
 
@@ -232,10 +242,9 @@ protected:
   };
   using TransPtr = std::unique_ptr<Transaction>;
 
-  static constexpr tick_t BranchMissPenalty{
-    11}; // Branch misprediction stall cycles before penalty fetches
-  static constexpr size_t PenaltyFetchCount{
-    5}; // Number of penalty fetches to issue (N-1 wrong-path + correct)
+  tick_t BranchMissPenalty;
+  size_t PenaltyFetchCount;
+  tick_t ghost_read_dur_;
 
   using SimPipe = std::array<TransPtr, Num_PipeStage>;
   TransPtr input_buffer_;
@@ -323,6 +332,7 @@ private:
   // Queue of penalty fetch PCs to issue after misprediction
   std::queue<addr_t> penalty_inst_queue_;
   tick_t penalty_stall_until_{0};
+  tick_t last_mispred_tick_{0}; // For dynamic BrMisPen
   std::list<TransPtr> fetch_inst_queue_;
   size_t ifq_size_;
 };
