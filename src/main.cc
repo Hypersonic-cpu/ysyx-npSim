@@ -53,12 +53,13 @@ set_global_tick(tick_t t) noexcept {
   g_tick = t;
 }
 
-// Configuration parameters
+// Configuration parameters — match RTL defaults
+// RTL PMemBox adds 2-cycle state machine overhead per beat
 static tint_t mem_latency = 42;
 static tint_t mem_bstlat = 10;
 static std::string trace_file;
-// Tiny defaults
-static size_t l1i_size = 512;
+// RTL: iCacheConf(32, 1024, 16, 1) → 1KB, 16B line, direct-mapped
+static size_t l1i_size = 1024;
 static size_t l1i_blksize = 16;
 static size_t l1i_assoc = 1;
 static size_t l1d_size = 0;
@@ -78,7 +79,7 @@ static bool use_ras = false;
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
-static size_t ifq_size = 8;
+static size_t ifq_size = 4;
 static size_t stq_size = 8; // Only used when dCache is NoCache
 
 // Dummy pmem_read for CacheBase
@@ -356,7 +357,7 @@ main(int argc, char** argv) {
   auto icache = std::make_unique<cacheSim::PipeCache>(
     "iCache",
     /* host */ core.get(),
-    /* pipe depth */ 3, l1i_size, l1i_blksize, l1i_assoc, iprefetcher,
+    /* pipe depth */ 2, l1i_size, l1i_blksize, l1i_assoc, iprefetcher,
     /* cache ID */ 0);
   auto dprefetcher = create_prefetcher(d_prefetch, "dPrefetcher");
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
