@@ -60,18 +60,26 @@ protected:
 
 class Pipeline final : public Processor {
 public:
+  // Matches RTL CycBreakdown categories (exclusive, sum = cycles)
+  enum StallCause {
+    NoStall = 0,
+    NoInst,    // IFU stall (iCache miss, no fetch ready)
+    LsuStall,  // LSU blocked (load/store in flight)
+    BrMispred, // Branch misprediction recovery
+    RAW,       // Read-after-write hazard
+    NumCauses
+  };
+
   struct PipelineStats : public StatsBase {
     PipelineStats(const std::string& name)
         : StatsBase(name) {}
     size_t insts = 0;
     size_t cycles = 0;
-    size_t stalls = 0;
-    size_t frontend_stalls = 0;    // ICache miss stalls
-    size_t backend_stalls = 0;     // RAW hazard stalls
-    size_t branch_miss_cycles = 0; // Branch misprediction penalty
-    size_t flush_count = 0;
-    size_t mem_stalls = 0; // Memory access stalls
-    size_t branches = 0;   // Total branch instructions
+    size_t nostall = 0;
+    size_t noinst = 0;
+    size_t lsu_stall = 0;
+    size_t brmiss_stall = 0;
+    size_t raw_stall = 0;
 
     double
     get_ipc() const {
@@ -84,19 +92,16 @@ public:
       j["insts"] = insts;
       j["cycles"] = cycles;
       j["ipc"] = get_ipc();
-      j["stalls"] = stalls;
-      j["frontend_stalls"] = frontend_stalls;
-      j["backend_stalls"] = backend_stalls;
-      j["mem_stalls"] = mem_stalls;
-      j["branch_miss_cycles"] = branch_miss_cycles;
-      j["flush_count"] = flush_count;
-      j["branches"] = branches;
-      // Bottleneck analysis
+      j["NoStall"] = nostall;
+      j["NoInst"] = noinst;
+      j["LsuStall"] = lsu_stall;
+      j["BranchMispred"] = brmiss_stall;
+      j["RAW"] = raw_stall;
       if (cycles > 0) {
-        j["frontend_stall_pct"] = 100.0 * frontend_stalls / cycles;
-        j["backend_stall_pct"] = 100.0 * backend_stalls / cycles;
-        j["mem_stall_pct"] = 100.0 * mem_stalls / cycles;
-        j["branch_miss_pct"] = 100.0 * branch_miss_cycles / cycles;
+        j["NoInst_pct"] = 100.0 * noinst / cycles;
+        j["LsuStall_pct"] = 100.0 * lsu_stall / cycles;
+        j["BranchMispred_pct"] = 100.0 * brmiss_stall / cycles;
+        j["RAW_pct"] = 100.0 * raw_stall / cycles;
       }
       return j;
     }
@@ -107,38 +112,35 @@ public:
       os << "  Insts: " << insts << "\n";
       os << "  Cycles: " << cycles << "\n";
       os << "  IPC: " << get_ipc() << "\n";
-      os << "  Stalls: " << stalls << "\n";
-      os << "    Frontend: " << frontend_stalls;
+      os << "  BlockedCause:\n";
+      os << "    NoStall: " << nostall << "\n";
+      os << "    NoInst: " << noinst;
       if (cycles > 0)
-        os << " (" << (100.0 * frontend_stalls / cycles) << "%)";
+        os << " (" << (100.0 * noinst / cycles) << "%)";
       os << "\n";
-      os << "    Backend (RAW): " << backend_stalls;
+      os << "    LsuStall: " << lsu_stall;
       if (cycles > 0)
-        os << " (" << (100.0 * backend_stalls / cycles) << "%)";
+        os << " (" << (100.0 * lsu_stall / cycles) << "%)";
       os << "\n";
-      os << "    Memory: " << mem_stalls;
+      os << "    BrMispred: " << brmiss_stall;
       if (cycles > 0)
-        os << " (" << (100.0 * mem_stalls / cycles) << "%)";
+        os << " (" << (100.0 * brmiss_stall / cycles) << "%)";
       os << "\n";
-      os << "  BrMissCyc: " << branch_miss_cycles;
+      os << "    RAW: " << raw_stall;
       if (cycles > 0)
-        os << " (" << (100.0 * branch_miss_cycles / cycles) << "%)";
+        os << " (" << (100.0 * raw_stall / cycles) << "%)";
       os << "\n";
-      os << "  Branches: " << branches << ", Flushes: " << flush_count
-         << "\n";
     }
 
     void
     reset_stats() override {
       insts = 0;
       cycles = 0;
-      stalls = 0;
-      frontend_stalls = 0;
-      backend_stalls = 0;
-      branch_miss_cycles = 0;
-      flush_count = 0;
-      mem_stalls = 0;
-      branches = 0;
+      nostall = 0;
+      noinst = 0;
+      lsu_stall = 0;
+      brmiss_stall = 0;
+      raw_stall = 0;
     }
   } stats;
 
@@ -158,6 +160,13 @@ public:
   tick_t
   next_update() const override {
     return calc_nxtupd_;
+  }
+
+  void
+  reset_stats() override {
+    SimObject::reset_stats();
+    last_commit_tick_ = curr_tick();
+    stall_cause_ = NoInst;
   }
 
   // Simulate all events before next IF time.
@@ -224,9 +233,9 @@ protected:
   using TransPtr = std::unique_ptr<Transaction>;
 
   static constexpr tick_t BranchMissPenalty{
-    0}; // Branch misprediction penalty cycles
+    11}; // Branch misprediction stall cycles before penalty fetches
   static constexpr size_t PenaltyFetchCount{
-    4}; // Number of penalty fetches to issue
+    5}; // Number of penalty fetches to issue (N-1 wrong-path + correct)
 
   using SimPipe = std::array<TransPtr, Num_PipeStage>;
   TransPtr input_buffer_;
@@ -293,8 +302,27 @@ private:
   size_t ongoing_insts_;
   tick_t calc_nxtupd_;
 
+  // Stall tracking: last committed tick & current dominant stall cause
+  tick_t last_commit_tick_{0};
+  StallCause stall_cause_{NoInst};
+
+  void
+  flush_stall_cycles(tick_t until) {
+    if (until <= last_commit_tick_)
+      return;
+    auto gap = until - last_commit_tick_;
+    switch (stall_cause_) {
+    case LsuStall: stats.lsu_stall += gap; break;
+    case BrMispred: stats.brmiss_stall += gap; break;
+    case RAW: stats.raw_stall += gap; break;
+    default: stats.noinst += gap; break;
+    }
+    last_commit_tick_ = until;
+  }
+
   // Queue of penalty fetch PCs to issue after misprediction
   std::queue<addr_t> penalty_inst_queue_;
+  tick_t penalty_stall_until_{0};
   std::list<TransPtr> fetch_inst_queue_;
   size_t ifq_size_;
 };

@@ -97,6 +97,12 @@ Pipeline::do_fetch_0() {
                     /* dummy     */ 0};
     candidate = std::make_unique<Transaction>(drain_inst, false, true);
   } else if (!penalty_inst_queue_.empty()) {
+    if (curr_tick() < penalty_stall_until_) {
+      DPRINTF(Pipeline, " IF Penalty Stall (until %lu, now %lu, qsz %lu)",
+              penalty_stall_until_, curr_tick(),
+              penalty_inst_queue_.size());
+      return;
+    }
     addr_t penalty_pc = penalty_inst_queue_.front();
     penalty_inst_queue_.pop();
 
@@ -138,6 +144,7 @@ Pipeline::do_fetch_0() {
     candidate->br_mispred = !accurate;
 
     if (!accurate) {
+      stall_cause_ = BrMispred;
       // Generate penalty fetches for the wrong path
       addr_t wrong_path_pc;
       if (real_taken && !pred.will_redirect) {
@@ -152,15 +159,16 @@ Pipeline::do_fetch_0() {
         wrong_path_pc = pred.pred_target + 4;
       }
 
-      auto penalty_seq = std::views::iota(0U, PenaltyFetchCount - 1U)
-                         | std::views::transform(
-                           [=](int i) { return i * 4 + wrong_path_pc; });
       DPRINTF(
         Pipeline,
         " IF BrPred Wrong -> Enqueue %lu penalty fetchs @PC=0x%08x ...",
         PenaltyFetchCount, wrong_path_pc);
 
-      penalty_inst_queue_.push_range(penalty_seq);
+      for (size_t i = 0; i < PenaltyFetchCount - 1; ++i) {
+        penalty_inst_queue_.push(
+          static_cast<addr_t>(i * 4 + wrong_path_pc));
+      }
+      penalty_stall_until_ = curr_tick() + BranchMissPenalty;
     }
   }
 
@@ -218,12 +226,11 @@ Pipeline::do_decode() {
   if (ready_time == InfTime) {
     DPRINTF(Pipeline, " ID -> Blocked : PC=0x%08x src[%d,%d] dst=%d",
             inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg);
+    stall_cause_ = RAW;
     schedule(Decode, InfTime);
     return;
   } else if (ready_time > curr_tick()) {
-    // Track RAW stalls
-    // stats.backend_stalls += ready_time - curr_tick();
-    // stage_update_.at(Decode) = ready_time;
+    stall_cause_ = RAW;
     DPRINTF(Pipeline, " ID -> Until T@ %lu: PC=0x%08x src[%d,%d] dst=%d",
             ready_time, inst.pc, inst.src_reg[0], inst.src_reg[1],
             inst.dst_reg);
@@ -276,11 +283,13 @@ Pipeline::do_memory() {
   if (inst.mem_op == MemLoad) {
     DPRINTF(Pipeline, "LS -> Req [Load] PC=0x%08x addr=0x%08x", inst.pc,
             inst.mem_addr);
+    stall_cause_ = LsuStall;
     send_lsu_req(inst.mem_addr, 0xbadU, 0xf, false);
     return;
   } else if (inst.mem_op == MemStore) {
     DPRINTF(Pipeline, "LS -> Req [Store] PC=0x%08x addr=0x%08x", inst.pc,
             inst.mem_addr);
+    stall_cause_ = LsuStall;
     send_lsu_req(inst.mem_addr, 0xbadU, 0xf, true);
     // stage_update_.at(Memory) = InfTime;
     schedule(Memory, InfTime);
@@ -334,6 +343,11 @@ Pipeline::do_writeback() {
   ongoing_insts_--;
   DPRINTF(Pipeline, " WB -> PC=0x%08x Remain %lu",
           sim_pipe_.at(Memory)->trace_inst.pc, ongoing_insts_);
+  // Flush stall cycles accumulated since last commit
+  flush_stall_cycles(curr_tick());
+  stats.nostall++;
+  last_commit_tick_ = curr_tick() + 1;
+  stall_cause_ = NoInst; // default until something else sets it
   stats.insts++;
   stats.cycles = curr_tick();
   sim_pipe_.at(Memory) = nullptr;

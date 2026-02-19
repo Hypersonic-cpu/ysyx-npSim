@@ -17,7 +17,8 @@ using Cache = cacheSim::CacheBase;
 using enum Direction;
 using enum MemRWOpt;
 
-// SDRAM arbiter: single channel, larger-id large-priority.
+// SDRAM arbiter: separate R/W channels, larger-id higher-priority.
+// Matches RTL AXIArbiter with independent read and write arbiters.
 class RAMArbiter : public ClockedObject {
   using MemTransPtr = std::unique_ptr<MemTrans>;
 
@@ -25,12 +26,13 @@ public:
   // The order in hosts_ matters. The later one has higher priority
   RAMArbiter(const std::string& name, tint_t lat, tint_t bst_lat,
              const std::vector<Cache*>& hosts)
-      : ClockedObject(name, nullptr) // TODO:
-      , serving_id_{(uint16_t)-1}
-      , serving_op_{Read}
+      : ClockedObject(name, nullptr)
+      , r_serving_id_{(uint16_t)-1}
+      , w_serving_id_{(uint16_t)-1}
       , latency_(lat)
       , burst_latency_(bst_lat)
-      , busy_until_(InfTime)
+      , r_busy_until_(InfTime)
+      , w_busy_until_(InfTime)
       , hosts_{hosts}
       , reqs_(hosts.size()) {}
 
@@ -60,10 +62,9 @@ public:
     os << name() << " (RAMArbiter)\n";
   }
 
-  // Check when the SDRAM will be free
   tick_t
   next_update() const override {
-    return busy_until_;
+    return std::min(r_busy_until_, w_busy_until_);
   }
 
   void update_impl() override;
@@ -75,12 +76,15 @@ private:
     return latency_ + (req->bst_len - 1) * burst_latency_;
   }
 
-  // MemTrans* serving_req_;
-  uint16_t serving_id_;
-  MemRWOpt serving_op_;
+  // Read channel state
+  uint16_t r_serving_id_;
+  // Write channel state
+  uint16_t w_serving_id_;
+
   tint_t const latency_;
   tint_t const burst_latency_;
-  tick_t busy_until_; // When current access finishes
+  tick_t r_busy_until_;
+  tick_t w_busy_until_;
   std::vector<Cache*> const hosts_;
 
   using HostRWChannel = std::pair<MemTransPtr, MemTransPtr>;
