@@ -22,7 +22,8 @@ RAMArbiter::recv_req(MemTransPtr req) {
   ent = std::move(req);
   if (is_read) {
     if (r_busy_until_ == InfTime) {
-      r_busy_until_ = curr_tick() + ent->lat;
+      auto start = std::max(curr_tick(), ghost_r_until_);
+      r_busy_until_ = start + ent->lat;
       r_serving_id_ = id;
       DPRINTF(Mem, "R-ch scheduled T@ %lu", r_busy_until_);
     }
@@ -58,7 +59,8 @@ RAMArbiter::update_impl() {
     for (auto it = reqs_.rbegin(); it != reqs_.rend(); ++it) {
       if (it->first != nullptr) {
         r_serving_id_ = it->first->id;
-        r_busy_until_ = curr_tick() + it->first->lat;
+        auto start = std::max(curr_tick(), ghost_r_until_);
+        r_busy_until_ = start + it->first->lat;
         DPRINTF(Mem, "R-ch picking [Read] @ %08x until T@ %lu",
                 it->first->addr, r_busy_until_);
         break;

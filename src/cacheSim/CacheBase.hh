@@ -342,7 +342,7 @@ public:
 
   tick_t
   next_update() const override {
-    return std::min(sched_r_time_, sched_w_time_);
+    return std::min({sched_r_time_, sched_w_time_, pending_rmiss_time_});
   }
 
   json
@@ -373,6 +373,9 @@ protected:
 private:
   tick_t sched_w_time_;
   tick_t sched_r_time_;
+  // Deferred SDRAM read request (models RTL blocked→ar transition)
+  tick_t pending_rmiss_time_{InfTime};
+  addr_t pending_rmiss_addr_{0};
   CpuTrans sched_r_resp_;
   CpuTrans sched_w_resp_;
 };

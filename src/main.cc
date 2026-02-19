@@ -81,6 +81,9 @@ static uint8_t print_mode = 2;
 // Pipeline Queue sizes
 static size_t ifq_size = 4;
 static size_t stq_size = 8; // Only used when dCache is NoCache
+static tick_t br_mis_pen = 10;
+static size_t pf_count = 4;
+static tick_t ghost_rdur = 0;
 
 // Dummy pmem_read for CacheBase
 // SDRAM use same wire for R/W
@@ -134,6 +137,9 @@ parse_args(int argc, char* argv[]) {
     {"use-ras", no_argument, 0, 'R'},
     {"ifq-size", required_argument, 0, 'q'},
     {"stq-size", required_argument, 0, 'w'},
+    {"br-pen", required_argument, 0, 'X'},
+    {"pf-count", required_argument, 0, 'Y'},
+    {"ghost-rdur", required_argument, 0, 'G'},
     {"print-brief", no_argument, 0, 201U},
     {"print-none", no_argument, 0, 200U},
     {0, 0, 0, 0}};
@@ -204,6 +210,15 @@ parse_args(int argc, char* argv[]) {
       break;
     case 'w':
       stq_size = std::stoul(optarg);
+      break;
+    case 'X':
+      br_mis_pen = std::stoul(optarg);
+      break;
+    case 'Y':
+      pf_count = std::stoul(optarg);
+      break;
+    case 'G':
+      ghost_rdur = std::stoul(optarg);
       break;
     case 201:
       print_mode = 1;
@@ -351,7 +366,8 @@ main(int argc, char** argv) {
   // Only use store queue when NoCache (need buffering for SDRAM)
   size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
-    "Core", ifq_size, actual_stq_size, branch_unit.get());
+    "Core", ifq_size, actual_stq_size, branch_unit.get(),
+    br_mis_pen, pf_count, ghost_rdur);
 
   auto iprefetcher = create_prefetcher(i_prefetch, "iPrefetcher");
   auto icache = std::make_unique<cacheSim::PipeCache>(
@@ -382,6 +398,7 @@ main(int argc, char** argv) {
     std::vector<CacheBase*>({icache.get(), dcache.get()}));
   icache->set_mem_port(sdram.get());
   dcache->set_mem_port(sdram.get());
+  core->set_sdram(sdram.get());
   CpuSideAckReceiver cpu_ack = [proc](auto t) { proc->ack_mem_avail(t); };
   CpuSideMRespReceiver cpu_rsp = [proc](auto p) { proc->recv_mem_resp(p); };
   icache->set_cpu_side_handlers(cpu_rsp, cpu_ack);

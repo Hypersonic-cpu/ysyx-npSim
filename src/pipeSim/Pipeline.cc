@@ -17,7 +17,8 @@ using trace::MemNone;
 using trace::MemStore;
 
 Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
-                   BranchUnit* bpu)
+                   BranchUnit* bpu, tick_t br_mis_pen, size_t pf_count,
+                   tick_t ghost_rdur)
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}
@@ -29,7 +30,10 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
     , ifq_size_{ifq_size}
     , fetch_inst_queue_{}
     , penalty_inst_queue_{}
-    , ongoing_insts_{0} {
+    , ongoing_insts_{0}
+    , BranchMissPenalty{br_mis_pen}
+    , PenaltyFetchCount{pf_count}
+    , ghost_read_dur_{ghost_rdur} {
   assert(bpu && "BranchUnit must not be null");
 }
 
@@ -168,7 +172,13 @@ Pipeline::do_fetch_0() {
         penalty_inst_queue_.push(
           static_cast<addr_t>(i * 4 + wrong_path_pc));
       }
+      // Fixed penalty stall before penalty fetches begin.
       penalty_stall_until_ = curr_tick() + BranchMissPenalty;
+      last_mispred_tick_ = curr_tick();
+      // Model wrong-path SDRAM read channel contention
+      if (ghost_read_dur_ > 0 && sdram_) {
+        sdram_->inject_ghost_read(ghost_read_dur_);
+      }
     }
   }
 
