@@ -17,8 +17,7 @@ using trace::MemNone;
 using trace::MemStore;
 
 Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
-                   BranchUnit* bpu, tick_t br_mis_pen, size_t pf_count,
-                   tick_t ghost_rdur)
+                   BranchUnit* bpu, tick_t br_mis_pen, size_t pf_count)
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}
@@ -32,8 +31,7 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
     , penalty_inst_queue_{}
     , ongoing_insts_{0}
     , BranchMissPenalty{br_mis_pen}
-    , PenaltyFetchCount{pf_count}
-    , ghost_read_dur_{ghost_rdur} {
+    , PenaltyFetchCount{pf_count} {
   assert(bpu && "BranchUnit must not be null");
 }
 
@@ -101,12 +99,8 @@ Pipeline::do_fetch_0() {
                     /* dummy     */ 0};
     candidate = std::make_unique<Transaction>(drain_inst, false, true);
   } else if (!penalty_inst_queue_.empty()) {
-    if (curr_tick() < penalty_stall_until_) {
-      DPRINTF(Pipeline, " IF Penalty Stall (until %lu, now %lu, qsz %lu)",
-              penalty_stall_until_, curr_tick(),
-              penalty_inst_queue_.size());
-      return;
-    }
+    // Issue penalty fetches immediately — they model wrong-path iCache
+    // accesses that overlap with pipeline drain in RTL (no pre-stall).
     addr_t penalty_pc = penalty_inst_queue_.front();
     penalty_inst_queue_.pop();
 
@@ -121,12 +115,16 @@ Pipeline::do_fetch_0() {
                       /* sys_op    */ 0,
                       /* dummy     */ 0};
 
-    // Don't call BPU predict/judge for penalty fetches for convenience.
-    // They're just consuming cache/memory bandwidth.
     auto penalty_trans = std::make_unique<Transaction>(
       penalty_inst, /* is_penalty */ true, /* wait_mem */ true);
     candidate = std::move(penalty_trans);
   } else if (input_buffer_ != nullptr) {
+    // Normal fetch blocked until penalty stall expires (pipeline redirect)
+    if (curr_tick() < penalty_stall_until_ || deferred_br_penalty_ > 0) {
+      DPRINTF(Pipeline, " IF Penalty Stall (until %lu, now %lu)",
+              penalty_stall_until_, curr_tick());
+      return;
+    }
     candidate = std::move(input_buffer_);
     candidate->wait_mem = true;
   } else {
@@ -148,7 +146,8 @@ Pipeline::do_fetch_0() {
     candidate->br_mispred = !accurate;
 
     if (!accurate) {
-      stall_cause_ = BrMispred;
+      flush_stall_cycles(curr_tick());
+      br_mispred_pending_ += 2; // RTL: exactly 2 BrMispred cycles/mispredict
       // Generate penalty fetches for the wrong path
       addr_t wrong_path_pc;
       if (real_taken && !pred.will_redirect) {
@@ -173,12 +172,14 @@ Pipeline::do_fetch_0() {
           static_cast<addr_t>(i * 4 + wrong_path_pc));
       }
       // Fixed penalty stall before penalty fetches begin.
-      penalty_stall_until_ = curr_tick() + BranchMissPenalty;
-      last_mispred_tick_ = curr_tick();
-      // Model wrong-path SDRAM read channel contention
-      if (ghost_read_dur_ > 0 && sdram_) {
-        sdram_->inject_ghost_read(ghost_read_dur_);
+      // In RTL, branch can't reach EX until any pending load clears LS.
+      // When a load is in progress, defer penalty start until load completes.
+      if (sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem) {
+        deferred_br_penalty_ = BranchMissPenalty;
+      } else {
+        penalty_stall_until_ = curr_tick() + BranchMissPenalty;
       }
+      last_mispred_tick_ = curr_tick();
     }
   }
 
@@ -230,17 +231,22 @@ Pipeline::do_decode() {
   const auto& trans = sim_pipe_.at(Fetch);
   const auto& inst = trans->trace_inst;
 
+  // When a memory op is in progress at Execute, maintain LsuStall
+  // attribution (RTL: oldest blocked instr determines BlockedCause)
+  bool lsu_active = sim_pipe_.at(Execute)
+                    && sim_pipe_.at(Execute)->wait_mem;
+
   auto ready_time =
     std::max(reg_ready_.at(inst.src_reg[0]), reg_ready_.at(inst.src_reg[1]));
   auto rd = inst.dst_reg;
   if (ready_time == InfTime) {
     DPRINTF(Pipeline, " ID -> Blocked : PC=0x%08x src[%d,%d] dst=%d",
             inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg);
-    stall_cause_ = RAW;
+    if (!lsu_active) set_stall(RAW);
     schedule(Decode, InfTime);
     return;
   } else if (ready_time > curr_tick()) {
-    stall_cause_ = RAW;
+    if (!lsu_active) set_stall(RAW);
     DPRINTF(Pipeline, " ID -> Until T@ %lu: PC=0x%08x src[%d,%d] dst=%d",
             ready_time, inst.pc, inst.src_reg[0], inst.src_reg[1],
             inst.dst_reg);
@@ -250,6 +256,7 @@ Pipeline::do_decode() {
   // Known time
   auto finish_time = std::max(curr_tick(), ready_time) + 1;
   // stage_update_.at(Decode) = finish_time;
+  if (!lsu_active) set_stall(NoInst); // RAW resolved, pipeline refilling
   schedule(Decode, finish_time);
   if (rd) {
     reg_ready_.at(rd) = InfTime;
@@ -278,7 +285,15 @@ Pipeline::do_execute() {
   DPRINTF(Pipeline, " EX -> PC=0x%08x", inst.pc);
 
   if (inst.mem_op == MemNone) {
-    update_reg_time(inst.dst_reg, curr_tick() + 1);
+    if (inst.is_branch && inst.dst_reg != 0) {
+      // Jal/Jalr: wbSel!=fromAlu → LS gprFw=false, WB gprFw=true
+      // Forwarding available at WB, 2 cycles after EX
+      update_reg_time(inst.dst_reg, curr_tick() + 2);
+    } else {
+      // ALU: wbSel=fromAlu → LS gprFw=true
+      // Forwarding available at LS, 1 cycle after EX
+      update_reg_time(inst.dst_reg, curr_tick() + 1);
+    }
   }
 
   sim_pipe_.at(Execute) = std::move(sim_pipe_.at(Decode));
@@ -293,13 +308,13 @@ Pipeline::do_memory() {
   if (inst.mem_op == MemLoad) {
     DPRINTF(Pipeline, "LS -> Req [Load] PC=0x%08x addr=0x%08x", inst.pc,
             inst.mem_addr);
-    stall_cause_ = LsuStall;
+    set_stall(LsuStall);
     send_lsu_req(inst.mem_addr, 0xbadU, 0xf, false);
     return;
   } else if (inst.mem_op == MemStore) {
     DPRINTF(Pipeline, "LS -> Req [Store] PC=0x%08x addr=0x%08x", inst.pc,
             inst.mem_addr);
-    stall_cause_ = LsuStall;
+    set_stall(LsuStall);
     send_lsu_req(inst.mem_addr, 0xbadU, 0xf, true);
     // stage_update_.at(Memory) = InfTime;
     schedule(Memory, InfTime);
@@ -341,6 +356,13 @@ Pipeline::handle_lsu_resp() {
   DPRINTF(Pipeline, " LS -> [%s] Mem Resp : PC=0x%08x addr=0x%08x",
           inst.mem_op == MemLoad ? "Load" : "Store", inst.pc, inst.mem_addr);
 
+  set_stall(NoInst); // LsuStall resolved
+  // Apply deferred branch penalty (RTL: branch reaches EX after load clears)
+  if (deferred_br_penalty_ > 0) {
+    penalty_stall_until_ = std::max(
+      penalty_stall_until_, curr_tick() + deferred_br_penalty_);
+    deferred_br_penalty_ = 0;
+  }
   if (inst.mem_op != MemNone) {
     update_reg_time(inst.dst_reg, curr_tick() + 1);
   }
@@ -353,11 +375,16 @@ Pipeline::do_writeback() {
   ongoing_insts_--;
   DPRINTF(Pipeline, " WB -> PC=0x%08x Remain %lu",
           sim_pipe_.at(Memory)->trace_inst.pc, ongoing_insts_);
-  // Flush stall cycles accumulated since last commit
+  // Flush stall cycles accumulated since last attribution
   flush_stall_cycles(curr_tick());
   stats.nostall++;
-  last_commit_tick_ = curr_tick() + 1;
-  stall_cause_ = NoInst; // default until something else sets it
+  last_attr_tick_ = curr_tick() + 1;
+  // Determine stall cause for next cycle
+  if (sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem) {
+    stall_cause_ = LsuStall;
+  } else {
+    stall_cause_ = NoInst;
+  }
   stats.insts++;
   stats.cycles = curr_tick();
   sim_pipe_.at(Memory) = nullptr;

@@ -16,7 +16,6 @@
 
 #include "branchSim/BranchPredictor.hh"
 #include "cacheSim/CacheBase.hh"
-#include "cacheSim/Prefetcher.hh"
 #include "cacheSim/RamConn.hh"
 #include "defines/base.hh"
 
@@ -35,7 +34,6 @@ using branchSim::BranchPredictor;
 using branchSim::BranchUnit;
 using branchSim::BTBBase;
 using cacheSim::CacheBase;
-using cacheSim::Prefetcher;
 using memSim::RAMArbiter;
 
 // Global tick for CacheBase
@@ -54,9 +52,10 @@ set_global_tick(tick_t t) noexcept {
 }
 
 // Configuration parameters — match RTL defaults
-// RTL PMemBox adds 2-cycle state machine overhead per beat
-static tint_t mem_latency = 42;
-static tint_t mem_bstlat = 10;
+// RTL PMemBox FSM adds 2 cycles per beat (RECV + HOLD states)
+// DPI-C returns 42/10, effective latency per beat = DPI + 2
+static tint_t mem_latency = 44;
+static tint_t mem_bstlat = 12;
 static std::string trace_file;
 // RTL: iCacheConf(32, 1024, 16, 1) → 1KB, 16B line, direct-mapped
 static size_t l1i_size = 1024;
@@ -65,8 +64,6 @@ static size_t l1i_assoc = 1;
 static size_t l1d_size = 0;
 static size_t l1d_blksize = 16;
 static size_t l1d_assoc = 1;
-static std::string i_prefetch = "none";
-static std::string d_prefetch = "none";
 static size_t max_insts = std::numeric_limits<size_t>::max();
 static size_t max_ticks = std::numeric_limits<tick_t>::max();
 static std::string out_file;
@@ -81,9 +78,9 @@ static uint8_t print_mode = 2;
 // Pipeline Queue sizes
 static size_t ifq_size = 4;
 static size_t stq_size = 8; // Only used when dCache is NoCache
-static tick_t br_mis_pen = 10;
-static size_t pf_count = 4;
-static tick_t ghost_rdur = 0;
+static size_t stbuf_entries = 2;
+static tick_t br_mis_pen = 9;
+static size_t pf_count = 5;
 
 // Dummy pmem_read for CacheBase
 // SDRAM use same wire for R/W
@@ -123,8 +120,6 @@ parse_args(int argc, char* argv[]) {
     {"l1d-size", required_argument, 0, 'S'},
     {"l1d-blksize", required_argument, 0, 'B'},
     {"l1d-assoc", required_argument, 0, 'A'},
-    {"l1i-pf", required_argument, 0, 'P'},
-    {"l1d-pf", required_argument, 0, 'p'},
     {"max-insts", required_argument, 0, 'n'},
     {"max-ticks", required_argument, 0, 'N'},
     {"debug-flags", required_argument, 0, 'd'},
@@ -137,9 +132,9 @@ parse_args(int argc, char* argv[]) {
     {"use-ras", no_argument, 0, 'R'},
     {"ifq-size", required_argument, 0, 'q'},
     {"stq-size", required_argument, 0, 'w'},
+    {"stbuf-entries", required_argument, 0, 'Z'},
     {"br-pen", required_argument, 0, 'X'},
     {"pf-count", required_argument, 0, 'Y'},
-    {"ghost-rdur", required_argument, 0, 'G'},
     {"print-brief", no_argument, 0, 201U},
     {"print-none", no_argument, 0, 200U},
     {0, 0, 0, 0}};
@@ -166,12 +161,6 @@ parse_args(int argc, char* argv[]) {
       break;
     case 'A':
       l1d_assoc = parse_size(optarg);
-      break;
-    case 'P':
-      i_prefetch = optarg;
-      break;
-    case 'p':
-      d_prefetch = optarg;
       break;
     case 'n':
       max_insts = std::stoul(optarg);
@@ -211,14 +200,14 @@ parse_args(int argc, char* argv[]) {
     case 'w':
       stq_size = std::stoul(optarg);
       break;
+    case 'Z':
+      stbuf_entries = std::stoul(optarg);
+      break;
     case 'X':
       br_mis_pen = std::stoul(optarg);
       break;
     case 'Y':
       pf_count = std::stoul(optarg);
-      break;
-    case 'G':
-      ghost_rdur = std::stoul(optarg);
       break;
     case 201:
       print_mode = 1;
@@ -239,15 +228,6 @@ parse_args(int argc, char* argv[]) {
     return 1;
   }
   return 0;
-}
-
-std::shared_ptr<Prefetcher>
-create_prefetcher(const std::string& type, const std::string& name) {
-  if (type == "nextline")
-    return std::make_shared<cacheSim::NextLinePrefetcher>(name);
-  if (type == "stride")
-    return std::make_shared<cacheSim::StridePrefetcher>(name);
-  return nullptr;
 }
 
 std::unique_ptr<BranchPredictor>
@@ -367,28 +347,24 @@ main(int argc, char** argv) {
   size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
     "Core", ifq_size, actual_stq_size, branch_unit.get(),
-    br_mis_pen, pf_count, ghost_rdur);
+    br_mis_pen, pf_count);
 
-  auto iprefetcher = create_prefetcher(i_prefetch, "iPrefetcher");
   auto icache = std::make_unique<cacheSim::PipeCache>(
     "iCache",
     /* host */ core.get(),
-    /* pipe depth */ 2, l1i_size, l1i_blksize, l1i_assoc, iprefetcher,
+    /* pipe depth */ 2, l1i_size, l1i_blksize, l1i_assoc, nullptr,
     /* cache ID */ 0);
-  auto dprefetcher = create_prefetcher(d_prefetch, "dPrefetcher");
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
     assert(false);
     dcache = std::make_unique<cacheSim::PipeCache>(
       "dCache",
       /* host */ core.get(),
-      /* pipe depth */ 3, l1d_size, l1d_blksize, l1d_assoc, dprefetcher,
+      /* pipe depth */ 3, l1d_size, l1d_blksize, l1d_assoc, nullptr,
       /* cache ID */ 1);
   } else {
-    // dcache = std::make_unique<cacheSim::NoCache>("dCache",
-    //                                              static_cast<uint16_t>(1));
     dcache = std::make_unique<cacheSim::StoreBuffer>(
-      "stBuf", 2, static_cast<uint16_t>(1));
+      "stBuf", stbuf_entries, static_cast<uint16_t>(1));
   }
   core->set_cache_ports(icache.get(), dcache.get());
   pipeSim::Processor* proc = &(*core);
@@ -398,7 +374,6 @@ main(int argc, char** argv) {
     std::vector<CacheBase*>({icache.get(), dcache.get()}));
   icache->set_mem_port(sdram.get());
   dcache->set_mem_port(sdram.get());
-  core->set_sdram(sdram.get());
   CpuSideAckReceiver cpu_ack = [proc](auto t) { proc->ack_mem_avail(t); };
   CpuSideMRespReceiver cpu_rsp = [proc](auto p) { proc->recv_mem_resp(p); };
   icache->set_cpu_side_handlers(cpu_rsp, cpu_ack);

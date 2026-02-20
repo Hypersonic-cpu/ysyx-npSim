@@ -151,6 +151,10 @@ protected:
    * @return Pointer to CacheLine on hit, nullptr on miss
    */
   CacheLine* access(addr_t addr);
+
+  /// Tag lookup without stats side effects. Returns true if addr is
+  /// present in the cache.
+  bool probe(addr_t addr) const;
   /** Fill the cache line, should be called on mem side
    * response.
    */

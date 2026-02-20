@@ -1,7 +1,6 @@
 #pragma once
 #include "branchSim/BranchPredictor.hh"
 #include "cacheSim/CacheBase.hh"
-#include "cacheSim/RamConn.hh"
 #include "defines/base.hh"
 #include "defines/interface.hh"
 #include "defines/types.hh"
@@ -52,17 +51,11 @@ public:
     dmem = l1d;
   }
 
-  void
-  set_sdram(memSim::RAMArbiter* s) {
-    sdram_ = s;
-  }
-
 protected:
   Cache* imem;
   Cache* dmem;
   BranchUnit* bpu;
   bool is_draining_;
-  memSim::RAMArbiter* sdram_{nullptr};
 };
 
 class Pipeline final : public Processor {
@@ -155,15 +148,13 @@ public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
                     size_t stq_size, BranchUnit* bpu,
-                    tick_t br_mis_pen = 10, size_t pf_count = 4,
-                    tick_t ghost_rdur = 0);
+                    tick_t br_mis_pen = 10, size_t pf_count = 4);
 
   json
   config_json() const override {
     json j;
     j["BranchPenaltyCycles"] = BranchMissPenalty;
     j["BranchPenaltyFetches"] = PenaltyFetchCount;
-    j["GhostReadDur"] = ghost_read_dur_;
     return j;
   }
 
@@ -175,8 +166,10 @@ public:
   void
   reset_stats() override {
     SimObject::reset_stats();
-    last_commit_tick_ = curr_tick();
+    last_attr_tick_ = curr_tick();
     stall_cause_ = NoInst;
+    br_mispred_pending_ = 0;
+    deferred_br_penalty_ = 0;
   }
 
   // Simulate all events before next IF time.
@@ -244,7 +237,6 @@ protected:
 
   tick_t BranchMissPenalty;
   size_t PenaltyFetchCount;
-  tick_t ghost_read_dur_;
 
   using SimPipe = std::array<TransPtr, Num_PipeStage>;
   TransPtr input_buffer_;
@@ -311,22 +303,43 @@ private:
   size_t ongoing_insts_;
   tick_t calc_nxtupd_;
 
-  // Stall tracking: last committed tick & current dominant stall cause
-  tick_t last_commit_tick_{0};
+  // Per-cycle stall tracking (matches RTL BlockedCause attribution)
+  tick_t last_attr_tick_{0};
   StallCause stall_cause_{NoInst};
+  tick_t br_mispred_pending_{0}; // RTL: 2 BrMispred cycles per misprediction
+  tick_t deferred_br_penalty_{0}; // Deferred penalty when load blocks EX
 
+  // Flush accumulated stall cycles from last_attr_tick_ to `until`.
+  // BrMispred is attributed from a pending counter (2 per misprediction,
+  // matching RTL PMU) and consumed from NoInst budget.
   void
   flush_stall_cycles(tick_t until) {
-    if (until <= last_commit_tick_)
+    if (until <= last_attr_tick_)
       return;
-    auto gap = until - last_commit_tick_;
+    auto gap = until - last_attr_tick_;
     switch (stall_cause_) {
     case LsuStall: stats.lsu_stall += gap; break;
-    case BrMispred: stats.brmiss_stall += gap; break;
     case RAW: stats.raw_stall += gap; break;
-    default: stats.noinst += gap; break;
+    default:
+      if (br_mispred_pending_ > 0) {
+        auto br = std::min(gap, br_mispred_pending_);
+        stats.brmiss_stall += br;
+        br_mispred_pending_ -= br;
+        gap -= br;
+      }
+      stats.noinst += gap;
+      break;
     }
-    last_commit_tick_ = until;
+    last_attr_tick_ = until;
+  }
+
+  // Transition stall cause: flush old cause's cycles, then set new.
+  void
+  set_stall(StallCause new_cause) {
+    if (new_cause == stall_cause_)
+      return;
+    flush_stall_cycles(curr_tick());
+    stall_cause_ = new_cause;
   }
 
   // Queue of penalty fetch PCs to issue after misprediction
