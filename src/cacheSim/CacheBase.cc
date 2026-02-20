@@ -96,6 +96,18 @@ CacheBase::handle_fill(CacheLine* blk, addr_t addr,
 }
 
 bool
+CacheBase::probe(addr_t addr) const {
+  addr_t tag = tagOf(addr);
+  size_t si = setIndexOf(addr);
+  auto& set = setsArr_.at(si);
+  for (auto& l : set) {
+    if (l.isValid() && l.getTag() == tag)
+      return true;
+  }
+  return false;
+}
+
+bool
 CacheBase::handle_prefetch(addr_t addr, bool is_hit) {
   assert(false);
   if (!prefetcher_)
@@ -193,7 +205,6 @@ PipeCache::recv_mem_resp(MemTransPtr trans) {
     handle_fill(pipe_.back()->line, trans->addr, trans->data);
   }
   blocked_until_ = curr_tick() + 1;
-  // w_waiting_ = false;
 }
 
 void
