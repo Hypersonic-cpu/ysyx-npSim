@@ -23,8 +23,8 @@ ifeq ($(NPSIM_ACTIVE),1)
 # ACTIVE mode, run `make` in this folder
 CXX := clang++-22
 CXXFLAGS ?= -std=c++23 -stdlib=libc++ -O3 -flto -g -fPIC -I./src -Wall -Wno-reorder-ctor
-CXXFLAGS += -I $(NPC_HOME)/libs/json/include
-CXXFLAGS += -I $(NPC_HOME)/rvproc/sim-cxx/stats_template
+CXXFLAGS += -I ./libs/json/include
+CXXFLAGS += -I ./libs/stats_template
 CXXFLAGS += -D ACTIVE_MODE=1 $(DBG_FLAGS)
 
 SRCS := $(SRCS_CACHE) $(SRCS_BRANCH) $(SRCS_PIPE) $(SRCS_TRACE) $(SRCS_DEFINE) $(SRCS_SDRAM) src/main.cc
