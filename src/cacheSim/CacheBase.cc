@@ -1,4 +1,5 @@
 
+#include "areaSim/AreaEst.hh"
 #include "cacheSim/CacheBase.hh"
 #include "cacheSim/RamConn.hh"
 #include "defines/debug.hh"
@@ -117,6 +118,14 @@ PipeCache::config_json() const {
   j["assoc"] = assoc();
   j["blkSize"] = blksize();
   j["latency"] = pipe_depth_;
+
+  json ar;
+  ar["comb_percent"] = 0.15;
+  ar["timing_area"] = 0.0;
+  ar["cacti_objs"] = json::array({
+    area::cacti_cache("sram", size(), blksize(), assoc())
+  });
+  j["area"] = ar;
   return j;
 }
 

@@ -1,6 +1,7 @@
 // cacheSim/CacheBase.hh
 #pragma once
 
+#include "areaSim/AreaEst.hh"
 #include "cacheSim/CacheLine.hh"
 #include "cacheSim/Prefetcher.hh"
 #include "cacheSim/RamConn.hh"
@@ -292,6 +293,7 @@ public:
     json j;
     j["type"] = "NoCache";
     j["size"] = 0;
+    j["area"] = area::comb_only(0.0);
     return j;
   }
 
@@ -342,8 +344,15 @@ public:
   json
   config_json() const override {
     json j;
-    j["type"] = "NoCache";
-    j["size"] = 0;
+    j["type"] = "StoreBuffer";
+    j["entries"] = entries;
+    // Each entry: 32-bit addr + 32-bit data + 8-bit mask = 72 bits
+    double ff_area = area::dff_area_um2(entries * 72);
+    json ar;
+    ar["comb_percent"] = 0.3;
+    ar["timing_area"] = ff_area;
+    ar["cacti_objs"] = json::array();
+    j["area"] = ar;
     return j;
   }
 

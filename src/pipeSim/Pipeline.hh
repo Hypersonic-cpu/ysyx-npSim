@@ -1,4 +1,5 @@
 #pragma once
+#include "areaSim/AreaEst.hh"
 #include "branchSim/BranchPred.hh"
 #include "cacheSim/CacheBase.hh"
 #include "defines/base.hh"
@@ -158,6 +159,7 @@ public:
     json j;
     j["BranchPenaltyCycles"] = BranchMissPenalty;
     j["BranchPenaltyFetches"] = PenaltyFetchCount;
+    j["area"] = area::comb_only(14000.0);
     return j;
   }
 

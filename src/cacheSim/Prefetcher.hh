@@ -1,4 +1,5 @@
 #pragma once
+#include "areaSim/AreaEst.hh"
 #include "defines/types.hh"
 #include "defines/base.hh"
 #include "stats.hpp"
@@ -52,7 +53,7 @@ public:
 
   json
   config_json() const override {
-    return json({});
+    return json{{"area", area::comb_only(0.0)}};
   }
 };
 

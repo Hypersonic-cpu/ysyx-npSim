@@ -1,6 +1,7 @@
 // cacheSim/RamConn.hh
 #pragma once
 
+#include "areaSim/AreaEst.hh"
 #include "defines/base.hh"
 #include "defines/interface.hh"
 #include "defines/types.hh"
@@ -46,6 +47,7 @@ public:
     j["latency"] = latency_;
     j["burst_latency"] = burst_latency_;
     j["num_hosts"] = hosts_.size();
+    j["area"] = area::comb_only(200.0);
     return j;
   }
 

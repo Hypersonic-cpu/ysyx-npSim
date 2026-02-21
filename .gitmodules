@@ -1,3 +1,6 @@
 [submodule "libs/json"]
 	path = libs/json
 	url = /home/kong/ysyx-workbench/npc/libs/json
+[submodule "libs/cacti"]
+	path = libs/cacti
+	url = https://github.com/HewlettPackard/cacti.git
