@@ -204,6 +204,7 @@ PipeCache::recv_mem_resp(MemTransPtr trans) {
   if (is_read) {
     handle_fill(pipe_.back()->line, trans->addr, trans->data);
   }
+  // Write responses are fire-and-forget (already acked to CPU)
   blocked_until_ = curr_tick() + 1;
 }
 
@@ -273,8 +274,22 @@ PipeCache::read_req(addr_t addr) {
 
 void
 PipeCache::write_req(addr_t addr, word_t data, uint8_t mask) {
-  // Instruction cache is readonly
-  assert(false && "Instruction cache is readonly");
+  // Write-through, no-allocate for dCache
+  // Writes don't go through the pipe — fire-and-forget to SDRAM
+  DPRINTF(Cache, "Recv WRITE Req @ %08x data=%08x strb=%x", addr, data, mask);
+  auto blk = probe(addr) ? access(addr) : nullptr;
+  if (blk && blk->isValid()) {
+    auto wm = CacheBase::strbExtend(mask);
+    auto& w = blk->atAligned(offsetOf(addr));
+    w = (~wm & w) | (wm & data);
+  }
+  // Write-through: send to SDRAM in background
+  mem_side_->recv_req(std::make_unique<MemTrans>(
+    Req, Write, addr, cache_id_, static_cast<uint16_t>(1),
+    std::vector<word_t>({data}), std::vector<uint8_t>({mask})));
+  w_waiting_ = true;
+  // Immediately acknowledge write to CPU
+  cpu_resp_recv_({addr, 0, cache_id_, Write});
 }
 
 void

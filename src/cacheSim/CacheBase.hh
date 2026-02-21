@@ -219,8 +219,9 @@ public:
 
   auto
   is_ready() const -> std::pair<bool, bool> override {
-    auto c = is_shifted_ && !pending_flush_;
-    return {c, c};
+    auto r = is_shifted_ && !pending_flush_;
+    // Writes block only when SDRAM write channel busy
+    return {r, !pending_flush_ && !w_waiting_};
   }
 
   bool handle_prefetch(addr_t addr, bool is_hit) override;
@@ -236,7 +237,7 @@ public:
 
   tick_t
   next_update() const override {
-    return (r_waiting_ || w_waiting_) ? InfTime : blocked_until_;
+    return r_waiting_ ? InfTime : blocked_until_;
   }
   void update_impl() override;
 

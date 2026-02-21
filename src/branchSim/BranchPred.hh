@@ -115,7 +115,7 @@ struct BPStatsBase : public StatsBase {
 
   void
   dump_stats(std::ostream& os = std::cout) const override {
-    os << "BranchPredictor Stats:\n";
+    os << "BranchPred Stats:\n";
     os << "  Accesses: " << accesses << "\n";
     os << "  Misses: " << misses << "\n";
     os << "  Miss Rate: " << miss_rate() << "\n";
@@ -135,15 +135,15 @@ struct BPStatsBase : public StatsBase {
   }
 };
 
-class BranchPredictor : public SimObject {
+class BranchPred : public SimObject {
 public:
   BPStatsBase stats;
 
 public:
-  explicit BranchPredictor(const std::string& name)
+  explicit BranchPred(const std::string& name)
       : SimObject(name, &this->stats)
       , stats(name) {}
-  virtual ~BranchPredictor() = default;
+  virtual ~BranchPred() = default;
   virtual bool predict(addr_t pc, addr_t target) = 0;
   virtual void update(addr_t pc, bool taken) = 0;
   virtual bool judge(bool taken_gold, bool taken_pred, addr_t tar_gold,
@@ -155,7 +155,7 @@ public:
 }; // namespace branchSim
 
 // Simple 2-bit bimodal predictor
-class BimodalPredictor : public BranchPredictor {
+class BimodalPredictor : public BranchPred {
 public:
   explicit BimodalPredictor(const std::string& name, size_t entries_pow2,
                             uint8_t init_val = 1);
@@ -178,10 +178,10 @@ private:
 };
 
 // Always Taken Predictor
-class AlwaysTakenPredictor : public BranchPredictor {
+class AlwaysTakenPredictor : public BranchPred {
 public:
   explicit AlwaysTakenPredictor()
-      : BranchPredictor("AlwaysTaken") {}
+      : BranchPred("AlwaysTaken") {}
 
   bool
   predict(addr_t pc, addr_t) override {
@@ -194,10 +194,10 @@ public:
 };
 
 // Always Not-Taken Predictor (NoBPU - used when no BPU)
-class NoBPU : public BranchPredictor {
+class NoBPU : public BranchPred {
 public:
   explicit NoBPU()
-      : BranchPredictor("NoBPU") {}
+      : BranchPred("NoBPU") {}
 
   bool
   predict(addr_t pc, addr_t) override {
@@ -210,10 +210,10 @@ public:
 };
 
 // Backward Taken, Forward Not Taken
-class BTFNTPredictor : public BranchPredictor {
+class BTFNTPredictor : public BranchPred {
 public:
   BTFNTPredictor()
-      : BranchPredictor("BTFNTPredictor") {}
+      : BranchPred("BTFNTPredictor") {}
 
   bool
   predict(addr_t pc, addr_t target) override {
@@ -225,7 +225,7 @@ public:
 };
 
 // GShare Predictor: Uses global history XOR'd with PC
-class GSharePredictor : public BranchPredictor {
+class GSharePredictor : public BranchPred {
 public:
   explicit GSharePredictor(const std::string& name, size_t entries_pow2,
                            size_t history_len = 10, uint8_t init_val = 1);
@@ -251,7 +251,7 @@ private:
 
 // Tournament Predictor: Selector chooses between local (bimodal) and global
 // (gshare)
-class TournamentPredictor : public BranchPredictor {
+class TournamentPredictor : public BranchPred {
 public:
   explicit TournamentPredictor(const std::string& name, size_t entries_pow2,
                                size_t history_len = 10);
@@ -287,15 +287,15 @@ private:
 
 // Return Address Stack Wrapper
 /*
-class RASPredictorWrapper : public BranchPredictor {
-  std::shared_ptr<BranchPredictor> base_;
+class RASPredictorWrapper : public BranchPred {
+  std::shared_ptr<BranchPred> base_;
   std::vector<addr_t> stack_;
   size_t top_ = 0;
   size_t cap_;
 
 public:
-  RASPredictorWrapper(std::shared_ptr<BranchPredictor> base, size_t
-entries) : BranchPredictor(base->name() + "+RAS") , base_(base) ,
+  RASPredictorWrapper(std::shared_ptr<BranchPred> base, size_t
+entries) : BranchPred(base->name() + "+RAS") , base_(base) ,
 stack_(entries) , cap_(entries) {}
 
   bool
@@ -368,11 +368,11 @@ public:
   BPStatsBase stats;
 
 private:
-  std::unique_ptr<BranchPredictor> bpu_;
+  std::unique_ptr<BranchPred> bpu_;
   std::unique_ptr<BTBBase> btb_;
 
 public:
-  explicit BranchUnit(std::unique_ptr<BranchPredictor> bpu,
+  explicit BranchUnit(std::unique_ptr<BranchPred> bpu,
                       std::unique_ptr<BTBBase> btb)
       : SimObject("BranchUnit", &this->stats)
       , stats("BranchUnit")

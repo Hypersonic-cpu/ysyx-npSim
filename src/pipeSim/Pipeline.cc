@@ -305,6 +305,12 @@ Pipeline::do_memory() {
   const auto& trans = sim_pipe_.at(Execute);
   const auto& inst = trans->trace_inst;
 
+  // Don't re-send if already waiting for memory
+  if (trans->wait_mem) {
+    schedule(Memory, InfTime);
+    return;
+  }
+
   if (inst.mem_op == MemLoad) {
     DPRINTF(Pipeline, "LS -> Req [Load] PC=0x%08x addr=0x%08x", inst.pc,
             inst.mem_addr);
@@ -366,6 +372,17 @@ Pipeline::handle_lsu_resp() {
   if (inst.mem_op != MemNone) {
     update_reg_time(inst.dst_reg, curr_tick() + 1);
   }
+  // After load completes, check if decode is blocked by RAW dependency.
+  // RTL attributes the cycle between load completion and forwarding as RAW
+  // (decode sees waitRAW=true since gprFw=false at LS stage).
+  if (auto* ids = sim_pipe_.at(Fetch).get()) {
+    const auto& idi = ids->trace_inst;
+    auto rdy = std::max(reg_ready_.at(idi.src_reg[0]),
+                        reg_ready_.at(idi.src_reg[1]));
+    if (rdy > curr_tick()) {
+      set_stall(RAW);
+    }
+  }
   async_schedule(Memory, curr_tick() + 1);
   sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
 }
@@ -386,7 +403,7 @@ Pipeline::do_writeback() {
     stall_cause_ = NoInst;
   }
   stats.insts++;
-  stats.cycles = curr_tick();
+  stats.cycles = curr_tick() - reset_tick_;
   sim_pipe_.at(Memory) = nullptr;
   schedule(WriteBack, curr_tick() + 1);
 }

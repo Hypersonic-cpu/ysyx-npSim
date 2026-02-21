@@ -1,4 +1,4 @@
-#include "branchSim/BranchPredictor.hh"
+#include "branchSim/BranchPred.hh"
 #include "defines/types.hh"
 #include <cstdint>
 #include <string>
@@ -37,9 +37,9 @@ CompressedBTB::update(addr_t pc, addr_t target) {
 
 BimodalPredictor::BimodalPredictor(const std::string& name,
                                    size_t table_pow2, uint8_t init_val)
-    : BranchPredictor(name)
-    , mask_((1 << table_pow2) - 1)
+    : BranchPred(name)
     , init_state_{init_val}
+    , mask_((1 << table_pow2) - 1)
     , table_(1 << table_pow2, init_val) {}
 
 bool
@@ -73,7 +73,7 @@ BimodalPredictor::index(addr_t pc) const {
 }
 
 bool
-BranchPredictor::judge(bool taken_gold, bool taken_pred, addr_t tar_gold,
+BranchPred::judge(bool taken_gold, bool taken_pred, addr_t tar_gold,
                        addr_t tar_pred) {
   auto accurate = true;
   if (taken_gold ^ taken_pred) {
@@ -105,10 +105,10 @@ BranchPredictor::judge(bool taken_gold, bool taken_pred, addr_t tar_gold,
 // GShare Predictor Implementation
 GSharePredictor::GSharePredictor(const std::string& name, size_t table_pow2,
                                  size_t history_len, uint8_t init_val)
-    : BranchPredictor(name)
+    : BranchPred(name)
+    , init_state_{init_val}
     , history_len_{history_len}
     , mask_((1 << table_pow2) - 1)
-    , init_state_{init_val}
     , global_history_{0}
     , table_(1 << table_pow2, init_val) {}
 
@@ -149,7 +149,7 @@ GSharePredictor::index(addr_t pc) const {
 // Tournament Predictor Implementation
 TournamentPredictor::TournamentPredictor(const std::string& name,
                                          size_t table_pow2, size_t history_len)
-    : BranchPredictor(name)
+    : BranchPred(name)
     , history_len_{history_len}
     , mask_((1 << table_pow2) - 1)
     , global_history_{0}

@@ -1,5 +1,5 @@
 #pragma once
-#include "branchSim/BranchPredictor.hh"
+#include "branchSim/BranchPred.hh"
 #include "cacheSim/CacheBase.hh"
 #include "defines/base.hh"
 #include "defines/interface.hh"
@@ -167,6 +167,7 @@ public:
   reset_stats() override {
     SimObject::reset_stats();
     last_attr_tick_ = curr_tick();
+    reset_tick_ = curr_tick();
     stall_cause_ = NoInst;
     br_mispred_pending_ = 0;
     deferred_br_penalty_ = 0;
@@ -308,6 +309,7 @@ private:
   StallCause stall_cause_{NoInst};
   tick_t br_mispred_pending_{0}; // RTL: 2 BrMispred cycles per misprediction
   tick_t deferred_br_penalty_{0}; // Deferred penalty when load blocks EX
+  tick_t reset_tick_{0}; // Tick when stats were last reset
 
   // Flush accumulated stall cycles from last_attr_tick_ to `until`.
   // BrMispred is attributed from a pending counter (2 per misprediction,

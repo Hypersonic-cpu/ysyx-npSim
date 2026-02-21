@@ -74,4 +74,18 @@ private:
   int32_t last_stride = 0;
 };
 
+// Tagged prefetcher: prefetch next line only on miss
+class TaggedPrefetcher : public Prefetcher {
+public:
+  TaggedPrefetcher(const std::string& prefix)
+      : Prefetcher(prefix + "-TaggedPrefetcher") {}
+  std::optional<addr_t>
+  probe(addr_t addr, bool is_hit) override {
+    if (!is_hit) {
+      return addr + blkSize_;
+    }
+    return std::nullopt;
+  }
+};
+
 } // namespace cacheSim
