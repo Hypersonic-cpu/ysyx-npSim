@@ -1,4 +1,5 @@
 #pragma once
+#include "areaSim/AreaEst.hh"
 #include "defines/types.hh"
 #include "defines/base.hh"
 #include "defines/debug.hh"
@@ -33,7 +34,16 @@ public:
   }
   json
   config_json() const override {
-    return json{{"entries", table_.size()}};
+    // Each entry: pc_tag(32) + target(32) + valid(1) + type(2) = 67 bits ≈ 9B
+    size_t entry_bytes = 9;
+    size_t total = table_.size() * entry_bytes;
+    json ar;
+    ar["comb_percent"] = 0.2;
+    ar["timing_area"] = 0.0;
+    ar["cacti_objs"] = json::array({
+      area::cacti_ram("btb", total, entry_bytes)
+    });
+    return json{{"entries", table_.size()}, {"area", ar}};
   }
   void
   reset_stats() override {}
@@ -150,7 +160,7 @@ public:
                      addr_t tar_pred);
   json
   config_json() const override {
-    return json({});
+    return json{{"area", area::comb_only(0.0)}};
   }
 };
 
@@ -167,6 +177,21 @@ public:
   config_json() const override {
     json j;
     j["entries"] = table_.size();
+    // 2-bit counters, packed: ceil(entries*2/8) bytes
+    size_t total_bytes = (table_.size() * 2 + 7) / 8;
+    json ar;
+    ar["comb_percent"] = 0.3;
+    ar["timing_area"] = 0.0;
+    if (total_bytes >= 64) {
+      ar["cacti_objs"] = json::array({
+        area::cacti_ram("bpu_table", total_bytes, 1)
+      });
+    } else {
+      // Too small for CACTI, estimate as FFs
+      ar["timing_area"] = area::dff_area_um2(table_.size() * 2);
+      ar["cacti_objs"] = json::array();
+    }
+    j["area"] = ar;
     return j;
   }
 
@@ -237,6 +262,19 @@ public:
     json j;
     j["entries"] = table_.size();
     j["history_len"] = history_len_;
+    size_t total_bytes = (table_.size() * 2 + 7) / 8;
+    json ar;
+    ar["comb_percent"] = 0.3;
+    ar["timing_area"] = area::dff_area_um2(history_len_);
+    if (total_bytes >= 64) {
+      ar["cacti_objs"] = json::array({
+        area::cacti_ram("bpu_table", total_bytes, 1)
+      });
+    } else {
+      ar["timing_area"] = area::dff_area_um2(table_.size() * 2 + history_len_);
+      ar["cacti_objs"] = json::array();
+    }
+    j["area"] = ar;
     return j;
   }
 
@@ -263,6 +301,21 @@ public:
     json j;
     j["entries"] = selector_table_.size();
     j["history_len"] = history_len_;
+    // 3 tables of 2-bit counters + history register
+    size_t table_bits = selector_table_.size() * 2 * 3;
+    size_t total_bytes = (table_bits + 7) / 8;
+    json ar;
+    ar["comb_percent"] = 0.3;
+    ar["timing_area"] = area::dff_area_um2(history_len_);
+    if (total_bytes >= 64) {
+      ar["cacti_objs"] = json::array({
+        area::cacti_ram("bpu_table", total_bytes, 1)
+      });
+    } else {
+      ar["timing_area"] = area::dff_area_um2(table_bits + history_len_);
+      ar["cacti_objs"] = json::array();
+    }
+    j["area"] = ar;
     return j;
   }
 
@@ -290,6 +343,11 @@ class NoBTB : public BTBBase {
 public:
   explicit NoBTB()
       : BTBBase("NoBTB", 0) {}
+
+  json
+  config_json() const override {
+    return json{{"entries", 0}, {"area", area::comb_only(0.0)}};
+  }
 
   addr_t
   lookup(addr_t pc) const override {
@@ -421,6 +479,7 @@ public:
     j["bpu_config"] = bpu_->config_json();
     j["btb"] = btb_->name();
     j["btb_config"] = btb_->config_json();
+    j["area"] = area::comb_only(500.0);
     return j;
   }
 
