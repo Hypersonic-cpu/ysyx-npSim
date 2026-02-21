@@ -45,13 +45,28 @@ def get_icache_mr(data):
 def get_stall_breakdown(data):
     s = get_stats(data)
     core = s.get("Core", {})
+    bd = core.get("CycBreakdown", core)
     total = core.get("cycles", 1)
     return {
-        "NoInst": core.get("NoInst", 0) / total,
-        "LsuStall": core.get("LsuStall", 0) / total,
-        "BrMispred": core.get("BranchMispred", 0) / total,
-        "RAW": core.get("RAW", 0) / total,
-        "Useful": core.get("NoStall", 0) / total,
+        "NoInst": bd.get("NoInst", 0) / total,
+        "LsuStall": bd.get("LsuStall", 0) / total,
+        "BrMispred": bd.get("BranchMispred", 0) / total,
+        "RAW": bd.get("RAW", 0) / total,
+        "Useful": bd.get("NoStall", core.get("NoStall", 0)) / total,
+    }
+
+
+def get_cycle_breakdown(data):
+    """Return absolute cycle counts per category."""
+    s = get_stats(data)
+    core = s.get("Core", {})
+    bd = core.get("CycBreakdown", core)
+    return {
+        "NoInst": bd.get("NoInst", 0),
+        "LsuStall": bd.get("LsuStall", 0),
+        "BrMispred": bd.get("BranchMispred", 0),
+        "RAW": bd.get("RAW", 0),
+        "Useful": bd.get("NoStall", core.get("NoStall", 0)),
     }
 
 
@@ -75,7 +90,7 @@ def plot_sweep_a():
 
     traces = ["coremark-10rnd-vld", "micro-train-vld"]
     sizes = [256, 512, 1024, 4096]
-    lines = [16, 32, 64]
+    lines = [8, 16, 32, 64]
     assocs = [1, 2]
 
     for trace in traces:
