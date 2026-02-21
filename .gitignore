@@ -6,12 +6,13 @@
 *.xz
 *.zst
 simout/
+areaout/
 .zed/
 build/
 tags
 **/tags
 perf.*
-.github/
+# .github/
 *.png
 *.svg
 *.jpeg

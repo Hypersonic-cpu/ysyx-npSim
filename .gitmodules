@@ -1,0 +1,3 @@
+[submodule "libs/json"]
+	path = libs/json
+	url = /home/kong/ysyx-workbench/npc/libs/json
