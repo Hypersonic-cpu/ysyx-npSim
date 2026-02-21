@@ -7,7 +7,7 @@ NPSIM="${NPSIM_HOME:-$(dirname "$0")/..}/build/npsim.elf"
 OUTDIR="${NPSIM_HOME:-$(dirname "$0")/..}/simout/sweep_a"
 TRACES=(
   "coremark-10rnd-vld"
-  "micro-test-vld"
+  "micro-train-vld"
 )
 TRACEDIR="${NPSIM_HOME:-$(dirname "$0")/..}/tests"
 

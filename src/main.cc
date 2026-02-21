@@ -413,6 +413,9 @@ main(int argc, char** argv) {
                                             icache.get(), core.get()};
 
   TraceInst inst;
+  // Read-ahead buffer: resolve branch targets from trace sequence
+  TraceInst next_inst;
+  bool has_next = reader.next(next_inst);
 
   // Root JSON object
   json root;
@@ -432,7 +435,14 @@ main(int argc, char** argv) {
 
     // Feed instruction
     if (core->inst_avail()) {
-      if (reader.next(inst) && inst_cnt < max_insts) [[likely]] {
+      if (has_next && inst_cnt < max_insts) [[likely]] {
+        inst = next_inst;
+        has_next = reader.next(next_inst);
+        // For taken branches, set mem_addr to the branch target
+        // (next instruction's PC in the trace)
+        if (inst.is_branch && inst.br_taken && has_next) {
+          inst.mem_addr = next_inst.pc;
+        }
         core->feed_inst(inst);
         inst_cnt++;
         DPRINTFS(Main,

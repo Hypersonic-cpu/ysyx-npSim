@@ -217,9 +217,15 @@ PipeCache::update_impl() {
     // NOTE: Control whether write back or not using `dirty` but not valid.
     // Is replay -> valid
     assert(!is_replay_ || bk->line->isValid());
+    bool was_miss = is_replay_;
     is_replay_ = false;
     if (bk->line->isValid()) {
       handle_hit(bk);
+      // Trigger prefetch after access (only reads, and only if no
+      // outstanding memory request)
+      if (bk->mop == Read && !r_waiting_) {
+        handle_prefetch(bk->addr, !was_miss);
+      }
     } else {
       mem_side_->recv_req(std::make_unique<MemTrans>(
         Req, Read, bk->addr, cache_id_,
@@ -254,8 +260,36 @@ PipeCache::update_impl() {
 
 bool
 PipeCache::handle_prefetch(addr_t addr, bool is_hit) {
-  // Prefetcher is disabled in this implementation
-  return false;
+  if (!prefetcher_)
+    return false;
+
+  auto maybe = prefetcher_->probe(addr, is_hit);
+  if (!maybe.has_value())
+    return false;
+
+  addr_t paddr = *maybe;
+  // Check if already in cache
+  addr_t tag = tagOf(paddr);
+  size_t si = setIndexOf(paddr);
+  auto& set = setsArr_.at(si);
+  for (size_t i = 0; i < set.size(); ++i) {
+    if (set.at(i).isValid() && set.at(i).getTag() == tag) {
+      return false; // Already cached
+    }
+  }
+
+  // Fill the line immediately (simplified: no memory latency for prefetch)
+  prefetcher_->prefetch_issued++;
+  auto* victim =
+    &*std::min_element(set.begin(), set.end(),
+                       [](const CacheLine& a, const CacheLine& b) {
+                         return a.stamp < b.stamp;
+                       });
+  victim->setTag(tag);
+  victim->activate();
+  victim->is_prefetched = true;
+  DPRINTF(Cache, "Prefetch Fill @ %08x (set %zu)", paddr, si);
+  return true;
 }
 
 void

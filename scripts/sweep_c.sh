@@ -23,9 +23,9 @@ DPFS=( "none" "stride" )
 JOBS=0
 MAX_JOBS=4
 
-# Use all traces for StoreBuffer, only micro-test for dCache (perf)
-STBUF_TRACES=( "coremark-10rnd-vld" "micro-test-vld" )
-DCACHE_TRACES=( "micro-test-vld" )
+# Use coremark + micro-train for all configs
+STBUF_TRACES=( "coremark-10rnd-vld" "micro-train-vld" )
+DCACHE_TRACES=( "coremark-10rnd-vld" "micro-train-vld" )
 
 for mode in ideal real; do
   if [ "$mode" = "ideal" ]; then

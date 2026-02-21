@@ -73,13 +73,13 @@ def plot_sweep_a():
         print("sweep_a not found, skipping")
         return
 
-    traces = ["coremark-10rnd-vld", "micro-test-vld"]
+    traces = ["coremark-10rnd-vld", "micro-train-vld"]
     sizes = [256, 512, 1024, 4096]
     lines = [16, 32, 64]
     assocs = [1, 2]
 
     for trace in traces:
-        short = "CoreMark" if "coremark" in trace else "MicroTest"
+        short = "CoreMark" if "coremark" in trace else "MicroTrain"
         for assoc in assocs:
             ipc_grid = np.zeros((len(sizes), len(lines)))
             mr_grid = np.zeros((len(sizes), len(lines)))
@@ -140,12 +140,12 @@ def plot_sweep_b():
         print("sweep_b not found, skipping")
         return
 
-    traces = ["coremark-10rnd-vld", "micro-test-vld"]
+    traces = ["coremark-10rnd-vld", "micro-train-vld"]
     bpus = ["none", "bimodal", "gshare", "tournament", "alwaystaken", "btfnt"]
     ipfs = ["none", "nextline", "stride", "tagged"]
 
     for trace in traces:
-        short = "CoreMark" if "coremark" in trace else "MicroTest"
+        short = "CoreMark" if "coremark" in trace else "MicroTrain"
 
         # IPC heatmap: BPU vs Prefetcher
         ipc_grid = np.zeros((len(bpus), len(ipfs)))
@@ -223,14 +223,14 @@ def plot_sweep_c():
         print("sweep_c not found, skipping")
         return
 
-    traces = ["coremark-10rnd-vld", "micro-test-vld"]
+    traces = ["coremark-10rnd-vld", "micro-train-vld"]
     modes = ["ideal", "real"]
     stbuf_sizes = [2, 4, 8]
     dcache_sizes = [256, 512, 1024, 4096]
     dpfs = ["none", "stride"]
 
     for trace in traces:
-        short = "CoreMark" if "coremark" in trace else "MicroTest"
+        short = "CoreMark" if "coremark" in trace else "MicroTrain"
 
         for mode in modes:
             # Collect data for all data-side configs
