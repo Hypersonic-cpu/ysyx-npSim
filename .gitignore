@@ -10,5 +10,10 @@ simout/
 build/
 tags
 **/tags
-perf.data*
+perf.*
 .github/
+*.png
+*.svg
+*.jpeg
+*.jpg
+visual/plots/

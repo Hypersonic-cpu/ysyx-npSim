@@ -14,8 +14,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include "branchSim/BranchPredictor.hh"
+#include "branchSim/BranchPred.hh"
 #include "cacheSim/CacheBase.hh"
+#include "cacheSim/Prefetcher.hh"
 #include "cacheSim/RamConn.hh"
 #include "defines/base.hh"
 
@@ -30,7 +31,6 @@
 
 using namespace trace;
 using namespace debug;
-using branchSim::BranchPredictor;
 using branchSim::BranchUnit;
 using branchSim::BTBBase;
 using cacheSim::CacheBase;
@@ -53,9 +53,9 @@ set_global_tick(tick_t t) noexcept {
 
 // Configuration parameters — match RTL defaults
 // RTL PMemBox FSM adds 2 cycles per beat (RECV + HOLD states)
-// DPI-C returns 42/10, effective latency per beat = DPI + 2
-static tint_t mem_latency = 44;
-static tint_t mem_bstlat = 12;
+// DPI-C returns 40/8, effective latency per beat = DPI + 2
+static tint_t mem_latency = 42;
+static tint_t mem_bstlat = 10;
 static std::string trace_file;
 // RTL: iCacheConf(32, 1024, 16, 1) → 1KB, 16B line, direct-mapped
 static size_t l1i_size = 1024;
@@ -81,6 +81,8 @@ static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 2;
 static tick_t br_mis_pen = 9;
 static size_t pf_count = 5;
+static std::string ipf_type = "none"; // iCache prefetcher type
+static std::string dpf_type = "none"; // dCache prefetcher type
 
 // Dummy pmem_read for CacheBase
 // SDRAM use same wire for R/W
@@ -135,6 +137,8 @@ parse_args(int argc, char* argv[]) {
     {"stbuf-entries", required_argument, 0, 'Z'},
     {"br-pen", required_argument, 0, 'X'},
     {"pf-count", required_argument, 0, 'Y'},
+    {"ipf", required_argument, 0, 'P'},
+    {"dpf", required_argument, 0, 'p'},
     {"print-brief", no_argument, 0, 201U},
     {"print-none", no_argument, 0, 200U},
     {0, 0, 0, 0}};
@@ -178,7 +182,7 @@ parse_args(int argc, char* argv[]) {
       mem_bstlat = std::stoul(optarg);
       break;
     case 'O':
-      out_file = std::string{"simout/"} + optarg;
+      out_file = optarg;
       break;
     case 'T':
       bpu_type = optarg;
@@ -209,6 +213,12 @@ parse_args(int argc, char* argv[]) {
     case 'Y':
       pf_count = std::stoul(optarg);
       break;
+    case 'P':
+      ipf_type = optarg;
+      break;
+    case 'p':
+      dpf_type = optarg;
+      break;
     case 201:
       print_mode = 1;
       break;
@@ -230,7 +240,7 @@ parse_args(int argc, char* argv[]) {
   return 0;
 }
 
-std::unique_ptr<BranchPredictor>
+std::unique_ptr<branchSim::BranchPred>
 create_bpu_core() {
   if (bpu_type == "bimodal") {
     return std::make_unique<branchSim::BimodalPredictor>("BimodalBP",
@@ -349,18 +359,34 @@ main(int argc, char** argv) {
     "Core", ifq_size, actual_stq_size, branch_unit.get(),
     br_mis_pen, pf_count);
 
+  std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
+  if (ipf_type == "nextline") {
+    ipf = std::make_shared<cacheSim::NextLinePrefetcher>("iCache");
+  } else if (ipf_type == "stride") {
+    ipf = std::make_shared<cacheSim::StridePrefetcher>("iCache");
+  } else if (ipf_type == "tagged") {
+    ipf = std::make_shared<cacheSim::TaggedPrefetcher>("iCache");
+  }
+
   auto icache = std::make_unique<cacheSim::PipeCache>(
     "iCache",
     /* host */ core.get(),
-    /* pipe depth */ 2, l1i_size, l1i_blksize, l1i_assoc, nullptr,
+    /* pipe depth */ 2, l1i_size, l1i_blksize, l1i_assoc, ipf,
     /* cache ID */ 0);
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
-    assert(false);
+    std::shared_ptr<cacheSim::Prefetcher> dpf = nullptr;
+    if (dpf_type == "stride") {
+      dpf = std::make_shared<cacheSim::StridePrefetcher>("dCache");
+    } else if (dpf_type == "nextline") {
+      dpf = std::make_shared<cacheSim::NextLinePrefetcher>("dCache");
+    } else if (dpf_type == "tagged") {
+      dpf = std::make_shared<cacheSim::TaggedPrefetcher>("dCache");
+    }
     dcache = std::make_unique<cacheSim::PipeCache>(
       "dCache",
       /* host */ core.get(),
-      /* pipe depth */ 3, l1d_size, l1d_blksize, l1d_assoc, nullptr,
+      /* pipe depth */ 3, l1d_size, l1d_blksize, l1d_assoc, dpf,
       /* cache ID */ 1);
   } else {
     dcache = std::make_unique<cacheSim::StoreBuffer>(
