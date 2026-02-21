@@ -16,7 +16,7 @@ enum SysOp { SysNone = 0, SysResetStats = 1, SysDumpStats = 2 };
 #pragma pack(push, 1)
 struct TraceInst {
   /*  3: 0 */ uint32_t pc;
-  /*  7: 4 */ uint32_t mem_addr;  // =nextPC if br_taken
+  /*  7: 4 */ uint32_t mem_addr;  // load/store addr, or branch target if taken
   /*     8 */ uint8_t mem_op;     // 0: No Mem Op, 1: Load, 2: Store
   /*     9 */ uint8_t is_branch;  // 0: No, 1: Yes
   /*    10 */ uint8_t br_taken;   // 0: Not Taken, 1: Taken
