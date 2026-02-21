@@ -14,7 +14,7 @@ TRACEDIR="${NPSIM_HOME:-$(dirname "$0")/..}/tests"
 mkdir -p "$OUTDIR"
 
 SIZES=( 256 512 1024 4096 )
-LINES=( 16 32 64 )
+LINES=( 8 16 32 64 )
 ASSOCS=( 1 2 )
 JOBS=0
 MAX_JOBS=4

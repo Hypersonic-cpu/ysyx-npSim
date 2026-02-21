@@ -114,11 +114,15 @@ Pipeline::do_fetch_0() {
       penalty_inst, /* is_penalty */ true, /* wait_mem */ true);
     candidate = std::move(penalty_trans);
   } else if (input_buffer_ != nullptr) {
-    // Normal fetch blocked until penalty stall expires (pipeline redirect)
     if (curr_tick() < penalty_stall_until_ || deferred_br_penalty_ > 0) {
       DPRINTF(Pipeline, " IF Penalty Stall (until %lu, now %lu)",
               penalty_stall_until_, curr_tick());
       return;
+    }
+    // Penalty recovery ends when first real instruction enters fetch
+    if (in_penalty_recovery_) {
+      flush_stall_cycles(curr_tick());
+      in_penalty_recovery_ = false;
     }
     candidate = std::move(input_buffer_);
     candidate->wait_mem = true;
@@ -142,7 +146,7 @@ Pipeline::do_fetch_0() {
 
     if (!accurate) {
       flush_stall_cycles(curr_tick());
-      br_mispred_pending_ += 2; // RTL: exactly 2 BrMispred cycles/mispredict
+      in_penalty_recovery_ = true;
       // Generate penalty fetches for the wrong path
       addr_t wrong_path_pc;
       if (real_taken && !pred.will_redirect) {

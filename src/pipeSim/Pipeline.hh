@@ -92,17 +92,20 @@ public:
       j["insts"] = insts;
       j["cycles"] = cycles;
       j["ipc"] = get_ipc();
-      j["NoStall"] = nostall;
-      j["NoInst"] = noinst;
-      j["LsuStall"] = lsu_stall;
-      j["BranchMispred"] = brmiss_stall;
-      j["RAW"] = raw_stall;
+      // Cycle breakdown (absolute and percentage)
+      json bd;
+      bd["NoStall"] = nostall;
+      bd["NoInst"] = noinst;
+      bd["LsuStall"] = lsu_stall;
+      bd["BranchMispred"] = brmiss_stall;
+      bd["RAW"] = raw_stall;
       if (cycles > 0) {
-        j["NoInst_pct"] = 100.0 * noinst / cycles;
-        j["LsuStall_pct"] = 100.0 * lsu_stall / cycles;
-        j["BranchMispred_pct"] = 100.0 * brmiss_stall / cycles;
-        j["RAW_pct"] = 100.0 * raw_stall / cycles;
+        bd["NoInst_pct"] = 100.0 * noinst / cycles;
+        bd["LsuStall_pct"] = 100.0 * lsu_stall / cycles;
+        bd["BranchMispred_pct"] = 100.0 * brmiss_stall / cycles;
+        bd["RAW_pct"] = 100.0 * raw_stall / cycles;
       }
+      j["CycBreakdown"] = bd;
       return j;
     }
 
@@ -169,7 +172,7 @@ public:
     last_attr_tick_ = curr_tick();
     reset_tick_ = curr_tick();
     stall_cause_ = NoInst;
-    br_mispred_pending_ = 0;
+    in_penalty_recovery_ = false;
     deferred_br_penalty_ = 0;
   }
 
@@ -307,13 +310,13 @@ private:
   // Per-cycle stall tracking (matches RTL BlockedCause attribution)
   tick_t last_attr_tick_{0};
   StallCause stall_cause_{NoInst};
-  tick_t br_mispred_pending_{0}; // RTL: 2 BrMispred cycles per misprediction
-  tick_t deferred_br_penalty_{0}; // Deferred penalty when load blocks EX
-  tick_t reset_tick_{0}; // Tick when stats were last reset
+  tick_t deferred_br_penalty_{0};
+  tick_t reset_tick_{0};
 
-  // Flush accumulated stall cycles from last_attr_tick_ to `until`.
-  // BrMispred is attributed from a pending counter (2 per misprediction,
-  // matching RTL PMU) and consumed from NoInst budget.
+  // True while penalty fetches are in flight or penalty stall is active.
+  // All IFU-idle cycles during this window are BrMispred, not NoInst.
+  bool in_penalty_recovery_{false};
+
   void
   flush_stall_cycles(tick_t until) {
     if (until <= last_attr_tick_)
@@ -323,13 +326,11 @@ private:
     case LsuStall: stats.lsu_stall += gap; break;
     case RAW: stats.raw_stall += gap; break;
     default:
-      if (br_mispred_pending_ > 0) {
-        auto br = std::min(gap, br_mispred_pending_);
-        stats.brmiss_stall += br;
-        br_mispred_pending_ -= br;
-        gap -= br;
+      if (in_penalty_recovery_) {
+        stats.brmiss_stall += gap;
+      } else {
+        stats.noinst += gap;
       }
-      stats.noinst += gap;
       break;
     }
     last_attr_tick_ = until;
