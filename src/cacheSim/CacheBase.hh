@@ -86,11 +86,6 @@ public:
 
 public:
   using CPU = pipeSim::Processor;
-  // using rresp_t = void (*)(addr_t addr, word_t ret);
-  // using wresp_t = void (*)(addr_t addr);
-  // using avail_t = void (*)();
-  // using ack_t = void (*)(addr_t addr, word_t ret, uint16_t id, bool
-  // is_read);
 
   using mrresp_t = void (*)(addr_t addr, const std::vector<word_t>& ret);
   using mwresp_t = void (*)(addr_t addr);
@@ -128,7 +123,6 @@ public:
 
   // Read / write channel ready
   virtual auto is_ready() const -> std::pair<bool, bool> = 0;
-  // TODO: Remove this ?
   virtual void flush_all() = 0;
   virtual void read_req(addr_t addr) = 0;
   virtual void write_req(addr_t addr, word_t data, uint8_t mask) = 0;
@@ -228,7 +222,6 @@ public:
   void read_req(addr_t addr) override;
   void write_req(addr_t addr, word_t data, uint8_t mask) override;
   void recv_mem_resp(MemTransPtr trans) override;
-  // void memw_resp(addr_t addr) override;
 
   void flush_all() override;
 
@@ -254,8 +247,6 @@ protected:
 
   void handle_hit(const PipePtr& req);
   void handle_flush();
-  // void handle_fill(CacheLine* blk, addr_t addr,
-  //                  const std::vector<word_t>& ret) override;
 
   std::vector<PipePtr> pipe_;
   size_t pipe_depth_;
@@ -286,8 +277,6 @@ public:
   void read_req(addr_t addr) override;
   void write_req(addr_t addr, word_t data, uint8_t mask) override;
   void recv_mem_resp(MemTransPtr trans) override;
-  // void memr_resp(addr_t addr, const std::vector<word_t>& ret) override;
-  // void memw_resp(addr_t addr) override;
   void flush_all() override;
 
   void
@@ -359,7 +348,6 @@ public:
   }
 
   struct StBufEnt {
-    // bool valid = false;
     addr_t addr;
     word_t data;
     uint8_t mask;

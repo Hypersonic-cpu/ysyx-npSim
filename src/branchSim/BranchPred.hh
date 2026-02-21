@@ -152,7 +152,7 @@ public:
   config_json() const override {
     return json({});
   }
-}; // namespace branchSim
+};
 
 // Simple 2-bit bimodal predictor
 class BimodalPredictor : public BranchPred {
@@ -284,59 +284,6 @@ private:
   size_t local_index(addr_t pc) const;
   size_t global_index(addr_t pc) const;
 };
-
-// Return Address Stack Wrapper
-/*
-class RASPredictorWrapper : public BranchPred {
-  std::shared_ptr<BranchPred> base_;
-  std::vector<addr_t> stack_;
-  size_t top_ = 0;
-  size_t cap_;
-
-public:
-  RASPredictorWrapper(std::shared_ptr<BranchPred> base, size_t
-entries) : BranchPred(base->name() + "+RAS") , base_(base) ,
-stack_(entries) , cap_(entries) {}
-
-  bool
-  predict(addr_t pc, addr_t target, bool is_call, bool is_ret) override {
-    if (is_ret) {
-      return true;
-    }
-    return base_->predict(pc, target, is_call, is_ret);
-  }
-
-  void
-  update(addr_t pc, bool taken, addr_t target, bool is_call,
-         bool is_ret) override {
-    if (is_call) {
-      stack_[top_] = pc + 4; // Push return addr
-      top_ = (top_ + 1) % cap_;
-    } else if (is_ret) {
-      top_ = (top_ + cap_ - 1) % cap_; // Pop
-    }
-    base_->update(pc, taken, target, is_call, is_ret);
-  }
-
-  // Delegate stats
-  json
-  stats_json() const override {
-    return base_->stats_json();
-  }
-  json
-  config_json() const override {
-    return base_->config_json();
-  }
-  void
-  reset_stats() override {
-    base_->reset_stats();
-  }
-  void
-  dump_stats(std::ostream& os) const override {
-    base_->dump_stats(os);
-  }
-};
-*/
 
 // NoBTB - always returns 0 (miss)
 class NoBTB : public BTBBase {

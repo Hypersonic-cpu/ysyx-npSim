@@ -36,7 +36,7 @@ using branchSim::BTBBase;
 using cacheSim::CacheBase;
 using memSim::RAMArbiter;
 
-// Global tick for CacheBase
+// Global simulation tick counter
 static tick_t g_tick = 0;
 
 tick_t
@@ -84,14 +84,7 @@ static size_t pf_count = 5;
 static std::string ipf_type = "none"; // iCache prefetcher type
 static std::string dpf_type = "none"; // dCache prefetcher type
 
-// Dummy pmem_read for CacheBase
-// SDRAM use same wire for R/W
-// cache_id: 0=ICache, 1=DCache (LSU)
-// if (!sdram) return curr_tick();
-// bool is_lsu = (cache_id == 1);
-// return sdram->request_access(addr, bfirst, is_lsu);
-
-// Always functional
+// Dummy physical memory stubs (active mode: caches don't read data)
 void
 pmem_read(addr_t addr, addr_t* ret) {}
 void
@@ -407,15 +400,13 @@ main(int argc, char** argv) {
 
   const std::vector<SimObject*> simlist{sdram.get(), dcache.get(),
                                         icache.get(),
-                                        core.get()}; // TODO: BPU prefetcher
+                                        core.get()};
   // NOTE: Bottom-up order. Mem -> Cache -> CPU
   const std::vector<ClockedObject*> devlist{sdram.get(), dcache.get(),
                                             icache.get(), core.get()};
 
   TraceInst inst;
-  // Read-ahead buffer: resolve branch targets from trace sequence
-  TraceInst next_inst;
-  bool has_next = reader.next(next_inst);
+  bool has_next = true;
 
   // Root JSON object
   json root;
@@ -436,37 +427,24 @@ main(int argc, char** argv) {
     // Feed instruction
     if (core->inst_avail()) {
       if (has_next && inst_cnt < max_insts) [[likely]] {
-        inst = next_inst;
-        has_next = reader.next(next_inst);
-        // For taken branches, set mem_addr to the branch target
-        // (next instruction's PC in the trace)
-        if (inst.is_branch && inst.br_taken && has_next) {
-          inst.mem_addr = next_inst.pc;
+        has_next = reader.next(inst);
+        if (!has_next) {
+          core->set_draining();
+        } else {
+          core->feed_inst(inst);
+          inst_cnt++;
+          DPRINTFS(Main,
+                   "Inst feed: PC %8x rs%2d:%2d rd%2d mem%1d:%8x br%1d:%1d",
+                   inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg,
+                   inst.mem_op, inst.mem_addr, inst.is_branch, inst.br_taken);
         }
-        core->feed_inst(inst);
-        inst_cnt++;
-        DPRINTFS(Main,
-                 "Inst feed: PC %8x rs%2d:%2d rd%2d mem%1d:%8x br%1d:%1d",
-                 inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg,
-                 inst.mem_op, inst.mem_addr, inst.is_branch, inst.br_taken);
 
       } else {
         core->set_draining();
       }
     }
 
-    // if (inst_cnt % 10 == 0) {
-    //   auto it =
-    //     std::ranges::min_element(devlist, std::less<>{}, [](const auto& p)
-    //     {
-    //       return p->next_update();
-    //     });
-    //   assert(it != devlist.end());
-    //   auto closest_upd = std::max(curr_tick() + 1, (*it)->next_update());
-    //   set_global_tick(closest_upd);
-    // } else {
     set_global_tick(curr_tick() + 1);
-    // }
 
     if (inst.sys_op == SysOp::SysResetStats) [[unlikely]] {
       inst.sys_op = SysOp::SysNone;

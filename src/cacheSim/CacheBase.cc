@@ -15,10 +15,6 @@ namespace cacheSim {
 using enum MemRWOpt;
 using enum Direction;
 
-// =========================================================
-// Cache Base
-// =========================================================
-
 addr_t
 CacheBase::tagOf(addr_t addr) const {
   return blockAddrOf(addr);
@@ -51,8 +47,6 @@ size_t
 CacheBase::blksize() const {
   return lineBytes_;
 }
-
-/** == Protected == */
 
 CacheLine*
 CacheBase::access(addr_t addr) {
@@ -107,45 +101,14 @@ CacheBase::probe(addr_t addr) const {
   return false;
 }
 
+/** Base class handle_prefetch — not expected to be called directly. */
 bool
 CacheBase::handle_prefetch(addr_t addr, bool is_hit) {
-  assert(false);
-  if (!prefetcher_)
-    return false;
-
-  auto maybe = prefetcher_->probe(addr, is_hit);
-  if (!maybe.has_value())
-    return false;
-
-  addr_t paddr = *maybe;
-
-  // Check if already in cache
-  addr_t tag = tagOf(paddr);
-  size_t si = setIndexOf(paddr);
-  auto& set = setsArr_.at(si);
-
-  for (size_t i = 0; i < set.size(); ++i) {
-    auto& l = set.at(i);
-    if (l.isValid() && l.getTag() == tag) {
-      // Already in cache
-      return false;
-    }
-  }
-
-  // Not in cache, insert it
-  prefetcher_->prefetch_issued++;
-  auto it = std::min_element(set.begin(), set.end(),
-                             [](const CacheLine& a, const CacheLine& b) {
-                               return a.stamp < b.stamp;
-                             });
-  it->invalidate();
-  it->is_prefetched = true;
-  return true;
+  assert(false && "Override in subclass");
+  return false;
 }
 
-// =========================================================
-// Pipelined Cache (Read|Write)
-// =========================================================
+/** Pipelined Cache */
 
 json
 PipeCache::config_json() const {
@@ -165,34 +128,16 @@ PipeCache::handle_hit(const PipePtr& bk) {
   blocked_until_ = curr_tick() + 1;
   if (is_read) {
     cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
-    //   std::make_unique<MemTrans>(
-    // Resp, Read, bk->addr, cache_id_, static_cast<uint16_t>(1),
-    // std::vector<word_t>({dt})));
   } else {
     auto mask = CacheBase::strbExtend(bk->wrstrb);
     dt = (~mask & dt) | (mask & bk->wrdata);
     bk->line->setDirty();
     cpu_resp_recv_({bk->addr, dt, cache_id_, Write});
-    // cpu_resp_recv_(std::make_unique<MemTrans>(
-    //   Resp, Write, bk->addr, cache_id_, static_cast<uint16_t>(1),
-    //   std::vector<word_t>({dt})));
   }
   DPRINTF(Cache, "Cache Resp (%s) @ addr %08x data %08x",
           bk->mop == Read ? "Read " : "Write", bk->addr, dt);
 }
 
-// MUST be called by memory do_update, before cache->do_update
-// Triggering next-cycle response to CPU
-// void
-// PipeCache::memr_resp(addr_t addr, const std::vector<word_t>& ret) {
-//   assert(r_waiting_);
-//   handle_fill(pipe_.back()->line, addr, ret);
-//   blocked_until_ = curr_tick() + 1;
-//   r_waiting_ = false;
-// }
-
-// void
-// PipeCache::memw_resp(addr_t addr) {
 void
 PipeCache::recv_mem_resp(MemTransPtr trans) {
   auto is_read = trans->mop == Read;
@@ -232,7 +177,7 @@ PipeCache::update_impl() {
         static_cast<uint16_t>(lineBytes_ / sizeof(word_t))));
 
       if (bk->line->isDirty()) {
-        // TODO: Write back if dirty
+        // Dirty eviction: write-back not yet implemented
       }
       r_waiting_ = true;
       is_replay_ = true;

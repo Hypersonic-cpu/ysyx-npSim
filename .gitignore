@@ -17,3 +17,4 @@ perf.*
 *.jpeg
 *.jpg
 visual/plots/
+CHANGELOG.md

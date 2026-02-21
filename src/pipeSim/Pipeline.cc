@@ -69,11 +69,6 @@ Pipeline::update_impl() {
   do_fetch_0();
 
   calc_sched();
-  // std::print("Next Core Update (");
-  // for (auto elem : stage_update_) {
-  //   std::print("{:d}, ", (int64_t)elem);
-  // }
-  // std::println(")");
 }
 
 void
@@ -190,16 +185,13 @@ Pipeline::do_fetch_0() {
 void
 Pipeline::do_fetch_1() {
   assert(fetch_inst_queue_.size() <= ifq_size_);
-  // auto& nxtupd = stage_update_.at(Fetch);
   if (fetch_inst_queue_.size()) {
     assert(sim_pipe_.at(Fetch) == nullptr);
     auto& ptr = fetch_inst_queue_.front();
     if (ptr->wait_mem) {
-      // nxtupd = InfTime;
       schedule(Fetch, InfTime);
       return;
     }
-    // ptr->out_valid = true;
     if (!ptr->is_penalty_fetch)
       sim_pipe_.at(Fetch) = std::move(ptr);
     fetch_inst_queue_.pop_front();
@@ -222,7 +214,6 @@ Pipeline::handle_ifu_resp() {
   ptr->wait_mem = false;
   DPRINTF(Pipeline, " IF Resp -> PC %08x Penalty %d Sched T@ %lu",
           ptr->trace_inst.pc, ptr->is_penalty_fetch, curr_tick() + 1);
-  // stage_update_.at(Fetch) = curr_tick() + 1;
   async_schedule(Fetch, curr_tick() + 1);
 }
 
@@ -255,8 +246,7 @@ Pipeline::do_decode() {
   }
   // Known time
   auto finish_time = std::max(curr_tick(), ready_time) + 1;
-  // stage_update_.at(Decode) = finish_time;
-  if (!lsu_active) set_stall(NoInst); // RAW resolved, pipeline refilling
+  if (!lsu_active) set_stall(NoInst);
   schedule(Decode, finish_time);
   if (rd) {
     reg_ready_.at(rd) = InfTime;
@@ -322,7 +312,6 @@ Pipeline::do_memory() {
             inst.mem_addr);
     set_stall(LsuStall);
     send_lsu_req(inst.mem_addr, 0xbadU, 0xf, true);
-    // stage_update_.at(Memory) = InfTime;
     schedule(Memory, InfTime);
     return;
   } else {
@@ -336,7 +325,6 @@ void
 Pipeline::send_lsu_req(addr_t addr, word_t data, uint8_t strb,
                        bool is_write) {
   auto const [rready, wready] = dmem->is_ready();
-  // stage_update_.at(Memory) = InfTime;
   schedule(Memory, InfTime);
   if (is_write ? wready : rready) {
     sim_pipe_.at(Execute)->wait_mem = true;
@@ -346,7 +334,6 @@ Pipeline::send_lsu_req(addr_t addr, word_t data, uint8_t strb,
     } else {
       dmem->read_req(aligned);
     }
-  } else {
   }
 }
 
