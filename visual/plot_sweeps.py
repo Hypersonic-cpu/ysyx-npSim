@@ -83,10 +83,13 @@ def get_bp_miss_rate(data):
 def load_area(sweep_subdir, json_basename):
     """Load area_comp.json for a given sweep result."""
     stem = json_basename.replace(".json", "")
-    area_dir = os.path.join(AREAOUT, f"{sweep_subdir}_{stem}")
-    # Try alternative: areaout/<stem>/area_comp.json
-    if not os.path.isdir(area_dir):
-        area_dir = os.path.join(AREAOUT, stem)
+    # Primary: areaout/<sweep_subdir>/<stem>/area_comp.json
+    area_dir = os.path.join(AREAOUT, sweep_subdir, stem)
+    path = os.path.join(area_dir, "area_comp.json")
+    if os.path.isfile(path):
+        return load_json(path)
+    # Fallback: areaout/<stem>/area_comp.json
+    area_dir = os.path.join(AREAOUT, stem)
     path = os.path.join(area_dir, "area_comp.json")
     if os.path.isfile(path):
         return load_json(path)

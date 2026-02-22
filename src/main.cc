@@ -398,9 +398,10 @@ main(int argc, char** argv) {
   icache->set_cpu_side_handlers(cpu_rsp, cpu_ack);
   dcache->set_cpu_side_handlers(cpu_rsp, cpu_ack);
 
-  const std::vector<SimObject*> simlist{sdram.get(), dcache.get(),
-                                        icache.get(),
-                                        core.get()};
+  std::vector<SimObject*> simlist{sdram.get(), dcache.get(),
+                                   icache.get(), branch_unit.get(),
+                                   core.get()};
+  if (ipf) simlist.push_back(ipf.get());
   // NOTE: Bottom-up order. Mem -> Cache -> CPU
   const std::vector<ClockedObject*> devlist{sdram.get(), dcache.get(),
                                             icache.get(), core.get()};
