@@ -1,49 +1,181 @@
 #!/usr/bin/env python3
 """Parse npSim config JSON, estimate area, output area composition.
 
-Uses analytical SRAM area model since CACTI is unavailable on aarch64.
-Area estimates at NanGate 45nm technology node.
+SRAM area is estimated via CACTI (NanGate 45nm). Combinational and
+register-file area uses analytical DFF model.
 """
 
 import argparse
 import json
+import math
+import re
+import subprocess
 import sys
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+CACTI_DIR = SCRIPT_DIR.parent / "libs" / "cacti"
+CACTI_BIN = CACTI_DIR / "cacti"
+TECH_UM = 0.045
 TECH_NM = 45
-
-# 6T SRAM cell area at 45nm: ~0.346 um² (NanGate45 lib)
-SRAM_CELL_UM2 = 0.346
-
-# Typical SRAM array efficiency: 50-70% (the rest is decoders, sense amps, etc)
-SRAM_EFFICIENCY = 0.55
 
 # DFF area per bit at 45nm: ~5 um²
 DFF_PER_BIT = 5.0
 
+# Minimum SRAM size (bytes) for CACTI; below this, use DFF estimate
+CACTI_MIN_BYTES = 128
 
-def sram_area(bits):
-    """Estimate SRAM array area including peripheral logic."""
-    cell_area = bits * SRAM_CELL_UM2
-    return cell_area / SRAM_EFFICIENCY
+# --- Analytical fallback (commented out, kept for reference) ----------
+# SRAM_CELL_UM2 = 0.346  # 6T cell at 45nm
+# SRAM_EFFICIENCY = 0.55
+#
+# def sram_area_analytical(bits):
+#     """Estimate SRAM array area including peripheral logic."""
+#     return bits * SRAM_CELL_UM2 / SRAM_EFFICIENCY
+#
+# def cache_area_analytical(size_bytes, block_bytes, assoc):
+#     """Estimate cache area: data + tag arrays."""
+#     data_bits = size_bytes * 8
+#     num_sets = size_bytes // (block_bytes * assoc)
+#     idx_bits = int(math.log2(num_sets)) if num_sets > 1 else 0
+#     off_bits = int(math.log2(block_bytes)) if block_bytes > 1 else 0
+#     tag_bits_per_line = (32 - idx_bits - off_bits) + 2
+#     num_lines = size_bytes // block_bytes
+#     tag_bits = num_lines * tag_bits_per_line
+#     return sram_area_analytical(data_bits), sram_area_analytical(tag_bits)
+# ------------------------------------------------------------------
 
 
-def cache_area(size_bytes, block_bytes, assoc):
-    """Estimate cache area: data array + tag array."""
-    data_bits = size_bytes * 8
+def gen_cacti_cfg(outpath, size, block, assoc, is_cache=True):
+    """Generate a CACTI .cfg file. Returns path, or None if too small."""
+    if size < CACTI_MIN_BYTES:
+        return None
 
-    num_sets = size_bytes // (block_bytes * assoc)
-    # Tag bits per line: 32 - log2(sets) - log2(block_size) + valid + dirty
-    import math
-    idx_bits = int(math.log2(num_sets)) if num_sets > 1 else 0
-    off_bits = int(math.log2(block_bytes)) if block_bytes > 1 else 0
-    tag_bits_per_line = (32 - idx_bits - off_bits) + 2  # valid + dirty
-    num_lines = size_bytes // block_bytes
-    tag_bits = num_lines * tag_bits_per_line
+    bus_width = block * 8
+    cache_type = '"cache"' if is_cache else '"ram"'
+    # CACTI fails on very small caches; use ram mode for < 512B
+    if is_cache and size < 512:
+        cache_type = '"ram"'
+        assoc = 1
 
-    data_area = sram_area(data_bits)
-    tag_area = sram_area(tag_bits)
-    return data_area, tag_area
+    lines = [
+        f"-size (bytes) {size}",
+        f"-block size (bytes) {block}",
+        f"-associativity {assoc}",
+        "-read-write port 1",
+        "-exclusive read port 0",
+        "-exclusive write port 0",
+        "-single ended read ports 0",
+        "-UCA bank count 1",
+        f"-technology (u) {TECH_UM}",
+        "-page size (bits) 8192",
+        "-burst length 8",
+        "-internal prefetch width 8",
+        '-Data array cell type - "itrs-hp"',
+        '-Data array peripheral type - "itrs-hp"',
+        '-Tag array cell type - "itrs-hp"',
+        '-Tag array peripheral type - "itrs-hp"',
+        f"-output/input bus width {bus_width}",
+        "-operating temperature (K) 350",
+        f"-cache type {cache_type}",
+        '-tag size (b) "default"',
+        '-access mode (normal, sequential, fast) - "normal"',
+        "-design objective (weight delay, dynamic power, leakage power, "
+        "cycle time, area) 0:0:0:100:0",
+        "-deviate (delay, dynamic power, leakage power, cycle time, area) "
+        "20:100000:100000:100000:100000",
+        "-NUCAdesign objective (weight delay, dynamic power, leakage power, "
+        "cycle time, area) 100:100:0:0:100",
+        "-NUCAdeviate (delay, dynamic power, leakage power, cycle time, "
+        "area) 10:10000:10000:10000:10000",
+        '-Optimize ED or ED^2 (ED, ED^2, NONE): "NONE"',
+        '-Cache model (NUCA, UCA)  - "UCA"',
+        "-NUCA bank count 0",
+        '-Wire signaling (fullswing, lowswing, default) - "Global_30"',
+        '-Wire inside mat - "semi-global"',
+        '-Wire outside mat - "semi-global"',
+        '-Interconnect projection - "conservative"',
+        "-Core count 1",
+        '-Cache level (L2/L3) - "L2"',
+        '-Add ECC - "true"',
+        '-Print level (DETAILED, CONCISE) - "DETAILED"',
+        '-Print input parameters - "true"',
+        '-Force cache config - "false"',
+        "-Ndwl 1", "-Ndbl 1", "-Nspd 0",
+        "-Ndcm 1", "-Ndsam1 0", "-Ndsam2 0",
+    ]
+    with open(outpath, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    return outpath
+
+
+def run_cacti(cfg_path):
+    """Run CACTI and parse area output (mm² → um²).
+    CACTI uses relative paths for tech_params/, so we must run from its dir.
+    """
+    cfg_abs = Path(cfg_path).resolve()
+    try:
+        result = subprocess.run(
+            [str(CACTI_BIN), "-infile", str(cfg_abs)],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(CACTI_DIR)
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"  CACTI error: {e}", file=sys.stderr)
+        return None
+
+    data_area = 0.0
+    tag_area = 0.0
+    for line in result.stdout.splitlines():
+        m = re.match(r"\s+Data array: Area \(mm2\):\s+([\d.e+-]+)", line)
+        if m:
+            v = float(m.group(1))
+            if not math.isnan(v):
+                data_area = v
+        m = re.match(r"\s+Tag array: Area \(mm2\):\s+([\d.e+-]+)", line)
+        if m:
+            v = float(m.group(1))
+            if not math.isnan(v):
+                tag_area = v
+
+    if data_area == 0.0 and tag_area == 0.0:
+        return None  # CACTI failed to produce results
+    return {
+        "data_um2": round(data_area * 1e6, 1),
+        "tag_um2": round(tag_area * 1e6, 1),
+        "total_um2": round((data_area + tag_area) * 1e6, 1),
+    }
+
+
+def estimate_sram(name, label, obj, outdir):
+    """Estimate SRAM area via CACTI, falling back to DFF for tiny structures."""
+    t = obj["type"]
+    size = obj["size"]
+    if size < 1:
+        return 0.0, {}
+
+    if t == "cache":
+        block = obj["block_size"]
+        assoc = obj["assoc"]
+        is_cache = True
+    else:
+        block = max(obj.get("word_size", 1), 1)
+        assoc = 1
+        is_cache = False
+
+    cfg_name = f"cacti_{name}_{label}.cfg"
+    cfg_path = outdir / cfg_name
+    generated = gen_cacti_cfg(cfg_path, size, block, assoc, is_cache)
+
+    if generated is not None:
+        cacti_result = run_cacti(cfg_path)
+        if cacti_result is not None:
+            return cacti_result["total_um2"], cacti_result
+
+    # Fallback: DFF-based estimate for structures too small for CACTI
+    bits = size * 8
+    area = bits * DFF_PER_BIT
+    return area, {"dff_estimate_um2": round(area, 1)}
 
 
 def estimate_component(name, conf, outdir):
@@ -61,27 +193,8 @@ def estimate_component(name, conf, outdir):
 
     for obj in cacti_objs:
         label = obj.get("label", "unknown")
-        t = obj["type"]
-        size = obj["size"]
-
-        if size < 1:
-            continue
-
-        if t == "cache":
-            data_a, tag_a = cache_area(
-                size, obj["block_size"], obj["assoc"]
-            )
-            area_um2 = data_a + tag_a
-            sram_details[label] = {
-                "data_um2": round(data_a, 1),
-                "tag_um2": round(tag_a, 1),
-                "total_um2": round(area_um2, 1),
-            }
-        else:
-            # RAM: simple SRAM array
-            area_um2 = sram_area(size * 8)
-            sram_details[label] = round(area_um2, 1)
-
+        area_um2, detail = estimate_sram(name, label, obj, outdir)
+        sram_details[label] = detail
         sram_total += area_um2
 
     total = timing_area + sram_total
@@ -100,18 +213,17 @@ def estimate_component(name, conf, outdir):
 
 def process_nested_branch(name, conf, outdir):
     """Handle BranchUnit which nests bpu_config and btb_config."""
-    results = []
-    results.append(estimate_component(name, conf, outdir))
+    results = [estimate_component(name, conf, outdir)]
 
     bpu_conf = conf.get("bpu_config", {})
     if bpu_conf:
-        bpu_name = conf.get("bpu", "BPU")
-        results.append(estimate_component(bpu_name, bpu_conf, outdir))
+        results.append(estimate_component(
+            conf.get("bpu", "BPU"), bpu_conf, outdir))
 
     btb_conf = conf.get("btb_config", {})
     if btb_conf:
-        btb_name = conf.get("btb", "BTB")
-        results.append(estimate_component(btb_name, btb_conf, outdir))
+        results.append(estimate_component(
+            conf.get("btb", "BTB"), btb_conf, outdir))
 
     return results
 
@@ -139,10 +251,8 @@ def main():
     for comp_name, comp_conf in config.items():
         if not isinstance(comp_conf, dict):
             continue
-
         if "bpu_config" in comp_conf:
-            results = process_nested_branch(comp_name, comp_conf, outdir)
-            for r in results:
+            for r in process_nested_branch(comp_name, comp_conf, outdir):
                 all_results.append(r)
                 grand_total += r["total_um2"]
         else:
@@ -153,7 +263,7 @@ def main():
     output = {
         "source": args.conf_json,
         "technology_nm": TECH_NM,
-        "model": "analytical (6T SRAM cell 0.346um², efficiency 55%)",
+        "model": "CACTI 7.0 (45nm) + DFF for sub-128B structures",
         "total_area_um2": round(grand_total, 1),
         "total_area_mm2": round(grand_total / 1e6, 6),
         "components": all_results,
