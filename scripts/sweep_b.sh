@@ -25,8 +25,8 @@ for trace in "${TRACES[@]}"; do
       tag="${trace}_bp-${bpu}_pf-${ipf}"
       ipf_arg=""
       [ "$ipf" != "none" ] && ipf_arg="--ipf $ipf"
-      bpu_args="--bpu-type $bpu"
-      [ "$bpu" != "none" ] && bpu_args="$bpu_args --bpu-size 16 --btb-size 16"
+      bpu_args="--bpu-type $bpu --btb-size 1"
+      [ "$bpu" != "none" ] && bpu_args="--bpu-type $bpu --bpu-size 16 --btb-size 16"
 
       $NPSIM "$TRACEDIR/${trace}.nptr.zst" \
         $CACHE_ARGS $bpu_args $ipf_arg \
