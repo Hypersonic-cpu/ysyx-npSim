@@ -41,7 +41,7 @@ for mode in ideal real; do
       $NPSIM "$TRACEDIR/${trace}.nptr.zst" \
         $ICACHE_ARGS --stbuf-entries "$stbsz" \
         --br-pen 9 --print-none \
-        -O "$OUTDIR/${tag}.json" &
+        --outdir "sweep_c/${tag}" &
       JOBS=$((JOBS + 1))
       if [ "$JOBS" -ge "$MAX_JOBS" ]; then
         wait -n
@@ -60,7 +60,7 @@ for mode in ideal real; do
         $NPSIM "$TRACEDIR/${trace}.nptr.zst" \
           $ICACHE_ARGS --l1d-size "${dsz}B" --l1d-blksize 16 --l1d-assoc 1 \
           $dpf_arg --br-pen 9 --print-none \
-          -O "$OUTDIR/${tag}.json" &
+          --outdir "sweep_c/${tag}" &
         JOBS=$((JOBS + 1))
         if [ "$JOBS" -ge "$MAX_JOBS" ]; then
           wait -n

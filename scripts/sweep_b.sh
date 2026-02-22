@@ -31,7 +31,7 @@ for trace in "${TRACES[@]}"; do
       $NPSIM "$TRACEDIR/${trace}.nptr.zst" \
         $CACHE_ARGS $bpu_args $ipf_arg \
         --br-pen 9 --print-none \
-        -O "$OUTDIR/${tag}.json" &
+        --outdir "sweep_b/${tag}" &
       JOBS=$((JOBS + 1))
       if [ "$JOBS" -ge "$MAX_JOBS" ]; then
         wait -n

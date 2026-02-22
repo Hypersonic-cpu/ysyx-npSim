@@ -19,3 +19,4 @@ perf.*
 *.jpg
 visual/plots/
 CHANGELOG.md
+area/__pycache__/
