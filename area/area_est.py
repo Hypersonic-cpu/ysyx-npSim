@@ -51,7 +51,9 @@ def gen_cacti_cfg(outpath, size, block, assoc, is_cache=True):
     if size < CACTI_MIN_BYTES:
         return None
 
-    bus_width = block * 8
+    # For caches, the access port is one CPU word (32 bits for RV32),
+    # not the full block. For RAM tables, each access reads one entry.
+    bus_width = 32 if is_cache else block * 8
     cache_type = '"cache"' if is_cache else '"ram"'
 
     lines = [
@@ -143,8 +145,28 @@ def run_cacti(cfg_path):
     }
 
 
+def _tag_area_analytical(size, block, assoc):
+    """Estimate tag array area using 6T SRAM cell model (45nm).
+    Returns (area_um2, tag_bits)."""
+    SRAM_CELL_UM2 = 0.346  # 6T cell area at 45nm
+    SRAM_EFFICIENCY = 0.55  # array efficiency (cells / total)
+    num_sets = size // (block * assoc)
+    num_lines = size // block
+    off_bits = int(math.log2(block)) if block > 1 else 0
+    idx_bits = int(math.log2(num_sets)) if num_sets > 1 else 0
+    tag_bits_per_line = max(32 - off_bits - idx_bits, 1) + 2  # +valid+dirty
+    total_tag_bits = num_lines * tag_bits_per_line
+    area = total_tag_bits * SRAM_CELL_UM2 / SRAM_EFFICIENCY
+    return round(area, 1), total_tag_bits
+
+
 def estimate_sram(name, label, obj, outdir):
-    """Estimate SRAM area via CACTI with fallback: cache → ram → DFF."""
+    """Estimate SRAM area via CACTI with fallback chain:
+    1. CACTI cache mode (best: models data + tag together)
+    2. CACTI RAM for data + analytical SRAM for tag (captures tag overhead)
+    3. CACTI RAM for whole array (ignores tag overhead)
+    4. DFF (last resort)
+    """
     t = obj["type"]
     size = obj["size"]
     if size < 1:
@@ -166,7 +188,25 @@ def estimate_sram(name, label, obj, outdir):
             if result is not None:
                 return result["total_um2"], result
 
-    # Try ram mode — reduce word size until CACTI has enough entries (≥32)
+    # For caches where CACTI cache mode failed: split into
+    # data array (CACTI RAM) + tag array (analytical SRAM).
+    if t == "cache":
+        data_cfg = outdir / f"cacti_{name}_{label}_data.cfg"
+        gen = gen_cacti_cfg(data_cfg, size, 4, 1, is_cache=False)
+        if gen is not None:
+            data_result = run_cacti(data_cfg)
+            if data_result is not None:
+                tag_area, tag_bits = _tag_area_analytical(size, block, assoc)
+                total = data_result["total_um2"] + tag_area
+                return total, {
+                    "mode": "split_data_tag",
+                    "data_um2": data_result["total_um2"],
+                    "tag_um2": tag_area,
+                    "tag_bits": tag_bits,
+                    "total_um2": round(total, 1),
+                }
+
+    # Try ram mode — reduce word size until CACTI has enough entries
     for ram_block in sorted(set([block, block // 2, block // 4, 8, 4]),
                             reverse=True):
         if ram_block < 1:
