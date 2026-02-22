@@ -166,15 +166,20 @@ def estimate_sram(name, label, obj, outdir):
             if result is not None:
                 return result["total_um2"], result
 
-    # Try ram mode as fallback (assoc=1, word-level access)
-    ram_block = max(block, 1)
-    cfg_path = outdir / f"cacti_{name}_{label}_ram.cfg"
-    gen = gen_cacti_cfg(cfg_path, size, ram_block, 1, is_cache=False)
-    if gen is not None:
-        result = run_cacti(cfg_path)
-        if result is not None:
-            result["mode"] = "ram_fallback"
-            return result["total_um2"], result
+    # Try ram mode — reduce word size until CACTI has enough entries (≥32)
+    for ram_block in sorted(set([block, block // 2, block // 4, 8, 4]),
+                            reverse=True):
+        if ram_block < 1:
+            continue
+        if size // ram_block < 16:
+            continue
+        cfg_path = outdir / f"cacti_{name}_{label}_ram{ram_block}.cfg"
+        gen = gen_cacti_cfg(cfg_path, size, ram_block, 1, is_cache=False)
+        if gen is not None:
+            result = run_cacti(cfg_path)
+            if result is not None:
+                result["mode"] = "ram_fallback"
+                return result["total_um2"], result
 
     # Last resort: DFF-based estimate
     bits = size * 8
