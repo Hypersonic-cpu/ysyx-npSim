@@ -53,10 +53,6 @@ def gen_cacti_cfg(outpath, size, block, assoc, is_cache=True):
 
     bus_width = block * 8
     cache_type = '"cache"' if is_cache else '"ram"'
-    # CACTI fails on very small caches; use ram mode for < 512B
-    if is_cache and size < 512:
-        cache_type = '"ram"'
-        assoc = 1
 
     lines = [
         f"-size (bytes) {size}",
@@ -148,7 +144,7 @@ def run_cacti(cfg_path):
 
 
 def estimate_sram(name, label, obj, outdir):
-    """Estimate SRAM area via CACTI, falling back to DFF for tiny structures."""
+    """Estimate SRAM area via CACTI with fallback: cache → ram → DFF."""
     t = obj["type"]
     size = obj["size"]
     if size < 1:
@@ -157,25 +153,33 @@ def estimate_sram(name, label, obj, outdir):
     if t == "cache":
         block = obj["block_size"]
         assoc = obj["assoc"]
-        is_cache = True
     else:
         block = max(obj.get("word_size", 1), 1)
         assoc = 1
-        is_cache = False
 
-    cfg_name = f"cacti_{name}_{label}.cfg"
-    cfg_path = outdir / cfg_name
-    generated = gen_cacti_cfg(cfg_path, size, block, assoc, is_cache)
+    # Try cache mode first (only for cache-type objects)
+    if t == "cache":
+        cfg_path = outdir / f"cacti_{name}_{label}_cache.cfg"
+        gen = gen_cacti_cfg(cfg_path, size, block, assoc, is_cache=True)
+        if gen is not None:
+            result = run_cacti(cfg_path)
+            if result is not None:
+                return result["total_um2"], result
 
-    if generated is not None:
-        cacti_result = run_cacti(cfg_path)
-        if cacti_result is not None:
-            return cacti_result["total_um2"], cacti_result
+    # Try ram mode as fallback (assoc=1, word-level access)
+    ram_block = max(block, 1)
+    cfg_path = outdir / f"cacti_{name}_{label}_ram.cfg"
+    gen = gen_cacti_cfg(cfg_path, size, ram_block, 1, is_cache=False)
+    if gen is not None:
+        result = run_cacti(cfg_path)
+        if result is not None:
+            result["mode"] = "ram_fallback"
+            return result["total_um2"], result
 
-    # Fallback: DFF-based estimate for structures too small for CACTI
+    # Last resort: DFF-based estimate
     bits = size * 8
     area = bits * DFF_PER_BIT
-    return area, {"dff_estimate_um2": round(area, 1)}
+    return area, {"dff_fallback": True, "dff_estimate_um2": round(area, 1)}
 
 
 def estimate_component(name, conf, outdir):
@@ -234,7 +238,7 @@ def main():
     )
     parser.add_argument("--conf-json", required=True,
                         help="Path to npSim output JSON file")
-    parser.add_argument("--out-dir", required=True,
+    parser.add_argument("--outdir", required=True,
                         help="Output directory for results")
     args = parser.parse_args()
 
@@ -242,7 +246,7 @@ def main():
         data = json.load(f)
 
     config = data.get("config", {})
-    outdir = Path(args.out_dir)
+    outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
     all_results = []

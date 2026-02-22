@@ -66,7 +66,8 @@ static size_t l1d_blksize = 16;
 static size_t l1d_assoc = 1;
 static size_t max_insts = std::numeric_limits<size_t>::max();
 static size_t max_ticks = std::numeric_limits<tick_t>::max();
-static std::string out_file;
+static std::string out_dir;
+static bool dry_run = false;
 
 // BPU Config
 static std::string bpu_type = "";
@@ -120,7 +121,8 @@ parse_args(int argc, char* argv[]) {
     {"debug-flags", required_argument, 0, 'd'},
     {"mem-lat", required_argument, 0, 'M'},
     {"mem-bstlat", required_argument, 0, 'm'},
-    {"outfile", required_argument, 0, 'O'},
+    {"outdir", required_argument, 0, 'O'},
+    {"dry-run", no_argument, 0, 'D'},
     {"bpu-type", required_argument, 0, 'T'},
     {"bpu-size", required_argument, 0, 'e'},
     {"btb-size", required_argument, 0, 't'},
@@ -175,7 +177,10 @@ parse_args(int argc, char* argv[]) {
       mem_bstlat = std::stoul(optarg);
       break;
     case 'O':
-      out_file = optarg;
+      out_dir = optarg;
+      break;
+    case 'D':
+      dry_run = true;
       break;
     case 'T':
       bpu_type = optarg;
@@ -226,8 +231,11 @@ parse_args(int argc, char* argv[]) {
 
   if (optind < argc) {
     trace_file = argv[optind];
-  } else {
-    std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
+  } else if (!dry_run) {
+    std::cerr << "Usage: " << argv[0]
+              << " <trace_file> [options]\n"
+              << "  --dry-run   Dump config/area without simulation\n"
+              << "  --outdir=DIR  Output to simout/DIR/{conf,stats}.json\n";
     return 1;
   }
   return 0;
@@ -301,6 +309,15 @@ append_stats_json(json& root, size_t curr_cnt,
 }
 
 inline void
+outdir_ensure(const std::string& dir) {
+  if (!dir.empty()) {
+    std::string cmd = "mkdir -p simout/" + dir;
+    [[maybe_unused]] int ret = system(cmd.c_str());
+    assert(!ret && "Cannot create output directory");
+  }
+}
+
+inline void
 outfile_write(const std::string& path, const json& root) {
   std::ofstream ofs(path);
   if (!ofs) {
@@ -308,26 +325,7 @@ outfile_write(const std::string& path, const json& root) {
   } else {
     ofs << root.dump(4) << "\n";
     ofs.close();
-    std::cout << "Wrote stats JSON to " << path << "\n";
-  }
-}
-
-inline void
-outfile_check(const std::string& file) {
-  if (!file.empty()) {
-    std::string path = file;
-    // Check if path has directory
-    std::string dir = ".";
-    if (path.find('/') != std::string::npos) {
-      dir = path.substr(0, path.find_last_of('/'));
-      std::string cmd = "mkdir -p " + dir;
-      [[maybe_unused]] int ret = system(cmd.c_str());
-      assert(!ret && "Cannot create output directory");
-    }
-
-    std::ofstream ofs(path);
-    assert(ofs.is_open() && "Cannot create output file");
-    ofs.close();
+    std::cout << "Wrote JSON to " << path << "\n";
   }
 }
 
@@ -337,10 +335,7 @@ main(int argc, char** argv) {
     return retcode;
   }
 
-  // Ensure output directory and file exist immediately
-  outfile_check(out_file);
-
-  TraceReader reader(trace_file.c_str());
+  outdir_ensure(out_dir);
 
   /** Component Configuration */
   auto branch_unit = create_branch_unit();
@@ -402,6 +397,25 @@ main(int argc, char** argv) {
                                    icache.get(), branch_unit.get(),
                                    core.get()};
   if (ipf) simlist.push_back(ipf.get());
+
+  // Dump config (shared by --dry-run and normal mode)
+  json root;
+  root["config"] = collect_config_json(simlist);
+
+  if (!out_dir.empty()) {
+    outfile_write("simout/" + out_dir + "/conf.json", root);
+  }
+
+  // --dry-run: dump config only, skip simulation
+  if (dry_run) {
+    if (out_dir.empty()) {
+      std::cout << root.dump(4) << "\n";
+    }
+    return 0;
+  }
+
+  TraceReader reader(trace_file.c_str());
+
   // NOTE: Bottom-up order. Mem -> Cache -> CPU
   const std::vector<ClockedObject*> devlist{sdram.get(), dcache.get(),
                                             icache.get(), core.get()};
@@ -409,23 +423,16 @@ main(int argc, char** argv) {
   TraceInst inst;
   bool has_next = true;
 
-  // Root JSON object
-  json root;
-  // Add config once at the beginning
-  root["config"] = collect_config_json(simlist);
-
   size_t dump_cnt = 0;
   size_t inst_cnt = 0;
 
   auto loop_start = std::chrono::high_resolution_clock::now();
   // Main SimLoop
   do {
-    // Handle response, core processes inst
     for (auto dev : devlist) {
       dev->do_update();
     }
 
-    // Feed instruction
     if (core->inst_avail()) {
       if (has_next && inst_cnt < max_insts) [[likely]] {
         has_next = reader.next(inst);
@@ -485,6 +492,8 @@ main(int argc, char** argv) {
 
   // Dump final stats
   append_stats_json(root, dump_cnt++, simlist);
-  outfile_write(out_file, root);
+  if (!out_dir.empty()) {
+    outfile_write("simout/" + out_dir + "/stats.json", root);
+  }
   return 0;
 }

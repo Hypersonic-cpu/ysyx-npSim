@@ -28,7 +28,7 @@ for trace in "${TRACES[@]}"; do
           --l1i-size "${sz}B" --l1i-blksize "$ln" --l1i-assoc "$assoc" \
           --bpu-type bimodal --bpu-size 16 --btb-size 16 \
           --br-pen 9 --print-none \
-          -O "$OUTDIR/${tag}.json" &
+          --outdir "sweep_a/${tag}" &
         JOBS=$((JOBS + 1))
         if [ "$JOBS" -ge "$MAX_JOBS" ]; then
           wait -n
