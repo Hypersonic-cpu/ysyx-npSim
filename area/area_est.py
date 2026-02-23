@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Parse npSim config JSON, estimate area, output area composition.
 
-SRAM area is estimated via CACTI (NanGate 45nm). Combinational and
-register-file area uses analytical DFF model.
+SRAM area is estimated via CACTI (NanGate 45nm) or analytical 6T cell model.
+DFF (timing_bits) and STA (timing_area) use the NanGate 45nm DFF_X1 constant.
 """
 
 import argparse
@@ -19,31 +19,34 @@ CACTI_BIN = CACTI_DIR / "cacti"
 TECH_UM = 0.045
 TECH_NM = 45
 
-# DFF area per bit at 45nm: ~5 um²
+# NanGate 45nm DFF_X1: ~5 um² per bit
 DFF_PER_BIT = 5.0
 
-# Minimum SRAM size (bytes) for CACTI; below this, use DFF estimate
+# 6T SRAM cell model at 45nm (analytical fallback when CACTI is unavailable)
+SRAM_CELL_UM2 = 0.346   # 6T cell area
+SRAM_EFFICIENCY = 0.55  # cell area / total array area (includes peripheral)
+
+# Minimum SRAM size (bytes) for CACTI
 CACTI_MIN_BYTES = 128
 
-# --- Analytical fallback (commented out, kept for reference) ----------
-# SRAM_CELL_UM2 = 0.346  # 6T cell at 45nm
-# SRAM_EFFICIENCY = 0.55
-#
-# def sram_area_analytical(bits):
-#     """Estimate SRAM array area including peripheral logic."""
-#     return bits * SRAM_CELL_UM2 / SRAM_EFFICIENCY
-#
-# def cache_area_analytical(size_bytes, block_bytes, assoc):
-#     """Estimate cache area: data + tag arrays."""
-#     data_bits = size_bytes * 8
-#     num_sets = size_bytes // (block_bytes * assoc)
-#     idx_bits = int(math.log2(num_sets)) if num_sets > 1 else 0
-#     off_bits = int(math.log2(block_bytes)) if block_bytes > 1 else 0
-#     tag_bits_per_line = (32 - idx_bits - off_bits) + 2
-#     num_lines = size_bytes // block_bytes
-#     tag_bits = num_lines * tag_bits_per_line
-#     return sram_area_analytical(data_bits), sram_area_analytical(tag_bits)
-# ------------------------------------------------------------------
+
+def _analytical_sram_area(size_bytes):
+    """Estimate SRAM area using 6T cell model (data bits only; no tags)."""
+    bits = size_bytes * 8
+    return round(bits * SRAM_CELL_UM2 / SRAM_EFFICIENCY, 1)
+
+
+def _tag_area_analytical(size, block, assoc):
+    """Estimate tag array area using 6T SRAM cell model (45nm).
+    Returns (area_um2, tag_bits)."""
+    num_sets = size // (block * assoc)
+    num_lines = size // block
+    off_bits = int(math.log2(block)) if block > 1 else 0
+    idx_bits = int(math.log2(num_sets)) if num_sets > 1 else 0
+    tag_bits_per_line = max(32 - off_bits - idx_bits, 1) + 2  # +valid+dirty
+    total_tag_bits = num_lines * tag_bits_per_line
+    area = total_tag_bits * SRAM_CELL_UM2 / SRAM_EFFICIENCY
+    return round(area, 1), total_tag_bits
 
 
 def gen_cacti_cfg(outpath, size, block, assoc, is_cache=True):
@@ -146,85 +149,91 @@ def run_cacti(cfg_path):
 
 
 def _tag_area_analytical(size, block, assoc):
-    """Estimate tag array area using 6T SRAM cell model (45nm).
-    Returns (area_um2, tag_bits)."""
-    SRAM_CELL_UM2 = 0.346  # 6T cell area at 45nm
-    SRAM_EFFICIENCY = 0.55  # array efficiency (cells / total)
+    # Kept for potential future use; not called by estimate_sram any more.
+    SRAM_CELL_UM2 = 0.346
+    SRAM_EFFICIENCY = 0.55
     num_sets = size // (block * assoc)
     num_lines = size // block
     off_bits = int(math.log2(block)) if block > 1 else 0
     idx_bits = int(math.log2(num_sets)) if num_sets > 1 else 0
-    tag_bits_per_line = max(32 - off_bits - idx_bits, 1) + 2  # +valid+dirty
+    tag_bits_per_line = max(32 - off_bits - idx_bits, 1) + 2
     total_tag_bits = num_lines * tag_bits_per_line
     area = total_tag_bits * SRAM_CELL_UM2 / SRAM_EFFICIENCY
     return round(area, 1), total_tag_bits
 
 
 def estimate_sram(name, label, obj, outdir):
-    """Estimate SRAM area via CACTI with fallback chain:
-    1. CACTI cache mode (best: models data + tag together)
-    2. CACTI RAM for data + analytical SRAM for tag (captures tag overhead)
-    3. CACTI RAM for whole array (ignores tag overhead)
-    4. DFF (last resort)
+    """Estimate SRAM area for one cacti_obj descriptor.
+
+    Supports two type values (and legacy names for backward compatibility):
+      "sram" / "cache" / "ram"  →  SRAM macro (SyncReadMem in RTL)
+        - has block_size + assoc  → CACTI cache mode
+        - has word_size only      → CACTI RAM mode
+        Falls back to analytical 6T SRAM cell model if CACTI unavailable.
+        Never falls back to DFF (DFF is only for explicitly declared timing_bits).
+
+    The CACTI minimum is CACTI_MIN_BYTES; below that, CACTI is skipped and
+    the analytical model is used directly.
     """
-    t = obj["type"]
+    t = obj.get("type", "sram")
     size = obj["size"]
     if size < 1:
         return 0.0, {}
 
-    if t == "cache":
+    has_cache_params = "block_size" in obj and "assoc" in obj
+
+    if has_cache_params:
+        # ── Cache mode (iCache / dCache) ─────────────────────────────────
         block = obj["block_size"]
         assoc = obj["assoc"]
-    else:
-        block = max(obj.get("word_size", 1), 1)
-        assoc = 1
-
-    # Try cache mode first (only for cache-type objects)
-    if t == "cache":
         cfg_path = outdir / f"cacti_{name}_{label}_cache.cfg"
         gen = gen_cacti_cfg(cfg_path, size, block, assoc, is_cache=True)
         if gen is not None:
             result = run_cacti(cfg_path)
             if result is not None:
+                result["obj_type"] = "sram_cache"
+                result["mode"] = "cacti_cache"
                 return result["total_um2"], result
 
-    # For caches where CACTI cache mode failed: split into
-    # data array (CACTI RAM) + tag array (analytical SRAM).
-    if t == "cache":
-        data_cfg = outdir / f"cacti_{name}_{label}_data.cfg"
-        gen = gen_cacti_cfg(data_cfg, size, 4, 1, is_cache=False)
-        if gen is not None:
-            data_result = run_cacti(data_cfg)
-            if data_result is not None:
-                tag_area, tag_bits = _tag_area_analytical(size, block, assoc)
-                total = data_result["total_um2"] + tag_area
-                return total, {
-                    "mode": "split_data_tag",
-                    "data_um2": data_result["total_um2"],
-                    "tag_um2": tag_area,
-                    "tag_bits": tag_bits,
-                    "total_um2": round(total, 1),
-                }
+        # Analytical fallback: data array + tag array
+        data_area = _analytical_sram_area(size)
+        tag_area, tag_bits = _tag_area_analytical(size, block, assoc)
+        total = data_area + tag_area
+        return total, {
+            "obj_type": "sram_cache",
+            "mode": "sram_analytical",
+            "data_um2": data_area,
+            "tag_um2": tag_area,
+            "tag_bits": tag_bits,
+            "total_um2": round(total, 1),
+        }
 
-    # Try ram mode — reduce word size until CACTI has enough entries
-    for ram_block in sorted(set([block, block // 2, block // 4, 8, 4]),
-                            reverse=True):
-        if ram_block < 1:
-            continue
-        if size // ram_block < 16:
-            continue
-        cfg_path = outdir / f"cacti_{name}_{label}_ram{ram_block}.cfg"
-        gen = gen_cacti_cfg(cfg_path, size, ram_block, 1, is_cache=False)
-        if gen is not None:
-            result = run_cacti(cfg_path)
-            if result is not None:
-                result["mode"] = "ram_fallback"
-                return result["total_um2"], result
+    else:
+        # ── RAM mode (BTB, BPU tables) ────────────────────────────────────
+        block = max(obj.get("word_size", 1), 1)
+        for ram_block in sorted(set([block, block // 2, block // 4, 8, 4]),
+                                reverse=True):
+            if ram_block < 1:
+                continue
+            if size // ram_block < 16:
+                continue
+            cfg_path = outdir / f"cacti_{name}_{label}_ram{ram_block}.cfg"
+            gen = gen_cacti_cfg(cfg_path, size, ram_block, 1, is_cache=False)
+            if gen is not None:
+                result = run_cacti(cfg_path)
+                if result is not None:
+                    result["obj_type"] = "sram_ram"
+                    result["mode"] = "ram_ok"
+                    return result["total_um2"], result
 
-    # Last resort: DFF-based estimate
-    bits = size * 8
-    area = bits * DFF_PER_BIT
-    return area, {"dff_fallback": True, "dff_estimate_um2": round(area, 1)}
+        # Analytical fallback: data bits only (no tags for RAM mode)
+        area_um2 = _analytical_sram_area(size)
+        return area_um2, {
+            "obj_type": "sram_ram",
+            "mode": "sram_analytical",
+            "sram_analytical_um2": area_um2,
+            "bits": size * 8,
+        }
 
 
 def estimate_component(name, conf, outdir):
@@ -234,6 +243,11 @@ def estimate_component(name, conf, outdir):
         return {"name": name, "total_um2": 0.0}
 
     timing_area = area_conf.get("timing_area", 0.0)
+    # timing_bits: DFF bit count emitted by C++ (process-agnostic).
+    # Backward compat: old JSONs have DFF area baked into timing_area already,
+    # so timing_bits defaults to 0 and has no effect on old-format files.
+    timing_bits = area_conf.get("timing_bits", 0)
+    dff_area = timing_bits * DFF_PER_BIT
     comb_pct = area_conf.get("comb_percent", 0.0)
     cacti_objs = area_conf.get("cacti_objs", [])
 
@@ -246,7 +260,8 @@ def estimate_component(name, conf, outdir):
         sram_details[label] = detail
         sram_total += area_um2
 
-    total = timing_area + sram_total
+    seq_total = timing_area + dff_area  # all sequential/logic area
+    total = seq_total + sram_total
     if comb_pct > 0 and total > 0:
         total = total / (1.0 - comb_pct)
 
@@ -254,8 +269,9 @@ def estimate_component(name, conf, outdir):
         "name": name,
         "total_um2": round(total, 1),
         "timing_area_um2": round(timing_area, 1),
+        "dff_area_um2": round(dff_area, 1),
         "sram_area_um2": round(sram_total, 1),
-        "comb_area_um2": round(total - timing_area - sram_total, 1),
+        "comb_area_um2": round(total - seq_total - sram_total, 1),
         "sram_details": sram_details,
     }
 
@@ -312,7 +328,7 @@ def main():
     output = {
         "source": args.conf_json,
         "technology_nm": TECH_NM,
-        "model": "CACTI 7.0 (45nm) + DFF for sub-128B structures",
+        "model": "CACTI 7.0 (45nm); analytical 6T SRAM fallback; DFF via timing_bits",
         "total_area_um2": round(grand_total, 1),
         "total_area_mm2": round(grand_total / 1e6, 6),
         "components": all_results,

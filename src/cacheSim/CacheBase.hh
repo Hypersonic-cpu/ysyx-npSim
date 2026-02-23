@@ -346,11 +346,11 @@ public:
     json j;
     j["type"] = "StoreBuffer";
     j["entries"] = entries;
-    // Each entry: 32-bit addr + 32-bit data + 8-bit mask = 72 bits
-    double ff_area = area::dff_area_um2(entries * 72);
+    // Each entry: 32-bit addr + 32-bit data + 8-bit mask = 72 bits → DFF
     json ar;
     ar["comb_percent"] = 0.3;
-    ar["timing_area"] = ff_area;
+    ar["timing_area"] = 0.0;
+    ar["timing_bits"] = entries * 72;
     ar["cacti_objs"] = json::array();
     j["area"] = ar;
     return j;
