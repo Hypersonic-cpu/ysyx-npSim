@@ -20,3 +20,5 @@ perf.*
 visual/plots/
 CHANGELOG.md
 area/__pycache__/
+scripts/generated_sh/
+**/__pycache__/

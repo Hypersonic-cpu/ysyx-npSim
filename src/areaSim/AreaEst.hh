@@ -6,44 +6,41 @@ namespace area {
 
 using json = nlohmann::ordered_json;
 
-/** Estimate flip-flop area at NanGate 45nm.
-    A DFF is roughly 5 um² per bit at 45nm. */
-inline double
-dff_area_um2(size_t bits) {
-  return bits * 5.0;
-}
-
-/** Build an area JSON node for a pure-combinational component
-    (no SRAM, just known timing area from STA). */
+/** Build an area JSON node for a component whose area comes entirely from
+    STA (timing_area_um2) and has no SRAM macros or explicit DFF counts.
+    timing_bits defaults to 0 and timing_area is process-calibrated from STA. */
 inline json
 comb_only(double timing_area_um2) {
   json j;
   j["comb_percent"] = 0.0;
   j["timing_area"] = timing_area_um2;
+  j["timing_bits"] = 0;
   j["cacti_objs"] = json::array();
   return j;
 }
 
-/** Build a CACTI cache object descriptor. */
+/** Build a SRAM descriptor for a cache-mode SRAM macro (iCache, dCache).
+    Python runs CACTI cache mode; falls back to analytical 6T SRAM cell model. */
 inline json
-cacti_cache(const std::string& label, size_t size_bytes,
-            size_t block_bytes, size_t assoc) {
+sram_cache(const std::string& label, size_t size_bytes,
+           size_t block_bytes, size_t assoc) {
   json j;
   j["label"] = label;
-  j["type"] = "cache";
+  j["type"] = "sram";
   j["size"] = size_bytes;
   j["block_size"] = block_bytes;
   j["assoc"] = assoc;
   return j;
 }
 
-/** Build a CACTI RAM object descriptor (for small tables like BPU). */
+/** Build a SRAM descriptor for a RAM-mode SRAM macro (BTB, BPU tables).
+    Python runs CACTI RAM mode; falls back to analytical 6T SRAM cell model. */
 inline json
-cacti_ram(const std::string& label, size_t size_bytes,
-          size_t word_bytes) {
+sram_ram(const std::string& label, size_t size_bytes,
+         size_t word_bytes) {
   json j;
   j["label"] = label;
-  j["type"] = "ram";
+  j["type"] = "sram";
   j["size"] = size_bytes;
   j["word_size"] = word_bytes;
   return j;

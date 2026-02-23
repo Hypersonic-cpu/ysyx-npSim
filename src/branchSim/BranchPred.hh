@@ -40,8 +40,9 @@ public:
     json ar;
     ar["comb_percent"] = 0.2;
     ar["timing_area"] = 0.0;
+    ar["timing_bits"] = 0;
     ar["cacti_objs"] = json::array({
-      area::cacti_ram("btb", total, entry_bytes)
+      area::sram_ram("btb", total, entry_bytes)
     });
     return json{{"entries", table_.size()}, {"area", ar}};
   }
@@ -177,20 +178,15 @@ public:
   config_json() const override {
     json j;
     j["entries"] = table_.size();
-    // 2-bit counters, packed: ceil(entries*2/8) bytes
+    // 2-bit counters packed: ceil(entries*2/8) bytes; always SRAM
     size_t total_bytes = (table_.size() * 2 + 7) / 8;
     json ar;
     ar["comb_percent"] = 0.3;
     ar["timing_area"] = 0.0;
-    if (total_bytes >= 64) {
-      ar["cacti_objs"] = json::array({
-        area::cacti_ram("bpu_table", total_bytes, 1)
-      });
-    } else {
-      // Too small for CACTI, estimate as FFs
-      ar["timing_area"] = area::dff_area_um2(table_.size() * 2);
-      ar["cacti_objs"] = json::array();
-    }
+    ar["timing_bits"] = 0;
+    ar["cacti_objs"] = json::array({
+      area::sram_ram("bpu_table", total_bytes, 1)
+    });
     j["area"] = ar;
     return j;
   }
@@ -265,15 +261,11 @@ public:
     size_t total_bytes = (table_.size() * 2 + 7) / 8;
     json ar;
     ar["comb_percent"] = 0.3;
-    ar["timing_area"] = area::dff_area_um2(history_len_);
-    if (total_bytes >= 64) {
-      ar["cacti_objs"] = json::array({
-        area::cacti_ram("bpu_table", total_bytes, 1)
-      });
-    } else {
-      ar["timing_area"] = area::dff_area_um2(table_.size() * 2 + history_len_);
-      ar["cacti_objs"] = json::array();
-    }
+    ar["timing_area"] = 0.0;
+    ar["timing_bits"] = history_len_;  // global history shift register = DFF
+    ar["cacti_objs"] = json::array({
+      area::sram_ram("bpu_table", total_bytes, 1)
+    });
     j["area"] = ar;
     return j;
   }
@@ -301,20 +293,16 @@ public:
     json j;
     j["entries"] = selector_table_.size();
     j["history_len"] = history_len_;
-    // 3 tables of 2-bit counters + history register
+    // 3 tables of 2-bit counters + global history register
     size_t table_bits = selector_table_.size() * 2 * 3;
     size_t total_bytes = (table_bits + 7) / 8;
     json ar;
     ar["comb_percent"] = 0.3;
-    ar["timing_area"] = area::dff_area_um2(history_len_);
-    if (total_bytes >= 64) {
-      ar["cacti_objs"] = json::array({
-        area::cacti_ram("bpu_table", total_bytes, 1)
-      });
-    } else {
-      ar["timing_area"] = area::dff_area_um2(table_bits + history_len_);
-      ar["cacti_objs"] = json::array();
-    }
+    ar["timing_area"] = 0.0;
+    ar["timing_bits"] = history_len_;  // global history shift register = DFF
+    ar["cacti_objs"] = json::array({
+      area::sram_ram("bpu_table", total_bytes, 1)
+    });
     j["area"] = ar;
     return j;
   }
