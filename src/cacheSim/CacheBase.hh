@@ -327,7 +327,9 @@ public:
     if (pending_flush_) [[unlikely]] {
       return {false, false};
     }
-    return {!r_busy_, fifo_.size() < entries};
+    // entries==0: unbuffered writes, stall until SDRAM responds
+    bool w_rdy = (entries == 0) ? !w_busy_ : fifo_.size() < entries;
+    return {!r_busy_, w_rdy};
   }
   void read_req(addr_t addr) override;
   void write_req(addr_t addr, word_t data, uint8_t mask) override;

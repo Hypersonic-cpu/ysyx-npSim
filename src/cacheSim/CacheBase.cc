@@ -458,11 +458,22 @@ StoreBuffer::read_req(addr_t addr) {
 void
 StoreBuffer::write_req(addr_t addr, word_t data, uint8_t mask) {
   DPRINTF(Cache, "Recv Cpu[%s] Req @ %08x", "Write", addr);
-  assert(fifo_.size() < entries);
-  fifo_.emplace_back(StBufEnt{addr, data, mask});
-  sched_w_time_ = curr_tick() + 1;
-  sched_w_resp_ = {
-    .addr = addr, .data = 0xbadc0de, .id = cache_id_, .mop = Write};
+  stats.accesses++;
+  if (entries == 0) {
+    // Unbuffered: send write directly to SDRAM, stall pipeline
+    stats.misses++;
+    mem_side_->recv_req(
+      std::make_unique<MemTrans>(Req, Write, addr, cache_id_, 1,
+                                 std::vector<word_t>({data}),
+                                 std::vector<uint8_t>({mask})));
+    w_busy_ = true;
+  } else {
+    assert(fifo_.size() < entries);
+    fifo_.emplace_back(StBufEnt{addr, data, mask});
+    sched_w_time_ = curr_tick() + 1;
+    sched_w_resp_ = {
+      .addr = addr, .data = 0xbadc0de, .id = cache_id_, .mop = Write};
+  }
 }
 
 void
@@ -488,22 +499,32 @@ StoreBuffer::recv_mem_resp(MemTransPtr trans) {
     sched_r_time_ = curr_tick() + 1;
     sched_r_resp_ = temp_resp;
   } else {
-    auto& front = fifo_.front();
-    assert(front.addr == trans->addr);
-    if (fifo_.size() == entries) {
-      cpu_ack_recv_(AckTrans{.id = cache_id_, .mop = Write});
-      DPRINTF(Cache, "StBuf slot available");
-    }
-    fifo_.pop_front();
-    w_busy_ = false;
-    // Drain next buffered write to memory if available
-    if (!fifo_.empty()) {
-      auto& next = fifo_.front();
-      mem_side_->recv_req(std::make_unique<MemTrans>(
-        Req, Write, next.addr, cache_id_, 1,
-        std::vector<word_t>({next.data}),
-        std::vector<uint8_t>({next.mask})));
-      w_busy_ = true;
+    if (entries == 0) {
+      // Unbuffered: schedule CPU write response, unblock pipeline
+      sched_w_time_ = curr_tick() + 1;
+      sched_w_resp_ = {.addr = trans->addr,
+                       .data = 0xbadc0de,
+                       .id = cache_id_,
+                       .mop = Write};
+      w_busy_ = false;
+    } else {
+      auto& front = fifo_.front();
+      assert(front.addr == trans->addr);
+      if (fifo_.size() == entries) {
+        cpu_ack_recv_(AckTrans{.id = cache_id_, .mop = Write});
+        DPRINTF(Cache, "StBuf slot available");
+      }
+      fifo_.pop_front();
+      w_busy_ = false;
+      // Drain next buffered write to memory if available
+      if (!fifo_.empty()) {
+        auto& next = fifo_.front();
+        mem_side_->recv_req(std::make_unique<MemTrans>(
+          Req, Write, next.addr, cache_id_, 1,
+          std::vector<word_t>({next.data}),
+          std::vector<uint8_t>({next.mask})));
+        w_busy_ = true;
+      }
     }
   }
 }
