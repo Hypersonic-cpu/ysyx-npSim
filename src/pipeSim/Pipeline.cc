@@ -16,8 +16,9 @@ using trace::MemLoad;
 using trace::MemNone;
 using trace::MemStore;
 
-Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
-                   BranchUnit* bpu, tick_t br_mis_pen, size_t pf_count)
+Pipeline::Pipeline(const std::string& name, size_t ifq_size,
+                   size_t stq_size, BranchUnit* bpu,
+                   tick_t br_mis_pen)
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}
@@ -27,271 +28,264 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
                      &Pipeline::do_execute, &Pipeline::do_memory,
                      &Pipeline::do_writeback}
     , ifq_size_{ifq_size}
-    , fetch_inst_queue_{}
-    , penalty_inst_queue_{}
+    , fetch_queue_{}
     , ongoing_insts_{0}
-    , BranchMissPenalty{br_mis_pen}
-    , PenaltyFetchCount{pf_count} {
+    , BranchMissPenalty{br_mis_pen} {
   assert(bpu && "BranchUnit must not be null");
 }
 
-/**
- * Processing follow the instruction order. Thus start from PCGEN to WB,
- * unlike the backward approach used in gem5.
- */
+// ── Main update: process stages back-to-front, then try fetch ────
 void
 Pipeline::update_impl() {
-  DPRINTF(Event, "Update Pipeline: ");
+  DPRINTF(Event, "Update Pipeline:");
   for (int i = Num_PipeStage - 1; i >= 0; i--) {
-    DPRINTF(Event, " %s : ptr %p, ptr-1 %p, upd %lu",
-            StageName.at(i).c_str(), sim_pipe_.at(i).get(),
-            (i ? sim_pipe_.at(i - 1) : input_buffer_).get(),
-            (int64_t)stage_update_.at(i));
-    if (i == static_cast<int>(Decode)) {
-      if (sim_pipe_.at(Fetch)) {
-        [[maybe_unused]]
-        const auto& ifp = sim_pipe_.at(Fetch)->trace_inst;
-        DPRINTF(Event, " IDU rs %d, %d time %ld, %ld", ifp.src_reg[0],
-                ifp.src_reg[1], reg_ready_.at(ifp.src_reg[0]),
-                reg_ready_.at(ifp.src_reg[1]));
-      }
-    }
-    if (sim_pipe_.at(i) == nullptr && (!i || sim_pipe_.at(i - 1) != nullptr)
+    if (sim_pipe_.at(i) == nullptr
+        && (!i || sim_pipe_.at(i - 1) != nullptr)
         && stage_update_.at(i) <= curr_tick()) {
-      DPRINTF(Event, "  Moved (%s -> %s) T@ %lu",
+      DPRINTF(Event, "  Move (%s -> %s) T@ %lu",
               StageName.at(std::max(0, i - 1)).c_str(),
               StageName.at(i).c_str(), curr_tick());
-      // stage_update_.at(i) = InfTime;
       std::invoke(stage_handler_.at(i), this);
     }
   }
-  DPRINTF(Event, "Try IF Request");
-  do_fetch_0();
-
+  try_issue_fetch();
   calc_sched();
 }
 
+// ── Fetch issue: send requests to iCache ─────────────────────────
+//
+// Branch misprediction model (matches RTL FetchStage):
+//
+//  T+0: Branch enters IF. We know it's mispredicted (from trace).
+//       The branch itself is issued to iCache normally.
+//       Set in_wrong_path_ = true, wrong_path_pc_ = pc+4.
+//       Schedule flush at T+2 (when branch reaches EX: IF→ID→EX).
+//
+//  T+1: IFU issues wrong-path fetch at wrong_path_pc_ (pc+4).
+//       This pollutes the iCache, matching RTL behavior.
+//
+//  T+2: Branch reaches EX. do_execute() triggers flush:
+//       - Flush all IFQ entries
+//       - Clear wrong-path state
+//       - Set fetch_resume_tick_ = T+2 + BranchMissPenalty
+//
+//  T+2+penalty: First correct-path fetch issues to iCache.
+//
 void
-Pipeline::do_fetch_0() {
-  if (!imem->is_ready().first || fetch_inst_queue_.size() == ifq_size_) {
-    return;
-  }
-  DPRINTF(Cache, "ICache ready = [%d, %d] InstQue size = %lu",
-          imem->is_ready().first, imem->is_ready().second,
-          fetch_inst_queue_.size());
+Pipeline::try_issue_fetch() {
+  while (imem->is_ready().first
+         && fetch_queue_.size() < ifq_size_) {
+    TransPtr candidate = nullptr;
 
-  TransPtr candidate = nullptr;
-
-  // Process pending penalty fetches first
-  if (is_draining_) [[unlikely]] {
-    Inst drain_inst{/* pc        */ 0,
-                    /* mem_addr  */ 0,
-                    /* mem_op    */ 0,
-                    /* is_branch */ false,
-                    /* br_taken  */ false,
-                    /* dst_reg   */ 0,
-                    /* src_reg   */ {0, 0},
-                    /* sys_op    */ 0,
-                    /* dummy     */ 0};
-    candidate = std::make_unique<Transaction>(drain_inst, false, true);
-  } else if (!penalty_inst_queue_.empty()) {
-    // Issue penalty fetches immediately — they model wrong-path iCache
-    // accesses that overlap with pipeline drain in RTL (no pre-stall).
-    addr_t penalty_pc = penalty_inst_queue_.front();
-    penalty_inst_queue_.pop();
-
-    // Create dummy instruction (add x0, x0, x0)
-    Inst penalty_inst{/* pc        */ penalty_pc,
-                      /* mem_addr  */ 0,
-                      /* mem_op    */ 0,
-                      /* is_branch */ false,
-                      /* br_taken  */ false,
-                      /* dst_reg   */ 0,
-                      /* src_reg   */ {0, 0},
-                      /* sys_op    */ 0,
-                      /* dummy     */ 0};
-
-    auto penalty_trans = std::make_unique<Transaction>(
-      penalty_inst, /* is_penalty */ true, /* wait_mem */ true);
-    candidate = std::move(penalty_trans);
-  } else if (input_buffer_ != nullptr) {
-    if (curr_tick() < penalty_stall_until_ || deferred_br_penalty_ > 0) {
-      DPRINTF(Pipeline, " IF Penalty Stall (until %lu, now %lu)",
-              penalty_stall_until_, curr_tick());
-      return;
-    }
-    // Penalty recovery ends when first real instruction enters fetch
-    if (in_penalty_recovery_) {
-      flush_stall_cycles(curr_tick());
-      in_penalty_recovery_ = false;
-    }
-    candidate = std::move(input_buffer_);
-    candidate->wait_mem = true;
-  } else {
-    return;
-  }
-
-  const auto& inst = candidate->trace_inst;
-
-  // Branch prediction at IF stage (before knowing if it's actually a
-  // branch). Only predict on non-penalty insts to avoid repetitive
-  // punishment.
-  if (!candidate->is_penalty_fetch) {
-    auto pred = bpu->predict(inst.pc);
-    auto real_taken = inst.is_branch && inst.br_taken;
-    addr_t real_target = real_taken ? inst.mem_addr : 0;
-    // Use BranchUnit::judge to check accuracy and update stats
-    auto accurate = bpu->judge(real_taken, real_target, pred);
-    candidate->br_pred = pred;
-    candidate->br_mispred = !accurate;
-
-    if (!accurate) {
-      flush_stall_cycles(curr_tick());
-      in_penalty_recovery_ = true;
-      // Generate penalty fetches for the wrong path
-      addr_t wrong_path_pc;
-      if (real_taken && !pred.will_redirect) {
-        // Predicted not-taken, but should take: wrong path is pc+4, pc+8...
-        wrong_path_pc = inst.pc + 4;
-      } else if (!real_taken && pred.will_redirect) {
-        // Predicted taken to 'a', but should not: wrong path is a+4, a+8...
-        wrong_path_pc = pred.pred_target + 4;
-      } else {
-        // Bad target: predicted to wrong address
-        // This happens when both predict taken but target differs
-        wrong_path_pc = pred.pred_target + 4;
+    if (is_draining_) [[unlikely]] {
+      Inst drain_inst{0, 0, 0, false, false, 0, {0, 0}, 0, 0};
+      candidate =
+        std::make_unique<Transaction>(drain_inst, true, true);
+    } else if (in_wrong_path_) {
+      // IFU keeps fetching wrong-path PCs until EX flushes
+      Inst wp_inst{wrong_path_pc_, 0, 0, false, false,
+                   0, {0, 0}, 0, 0};
+      candidate =
+        std::make_unique<Transaction>(wp_inst, true, true);
+      wrong_path_pc_ += 4;
+      DPRINTF(Pipeline, " IF WrongPath PC=0x%08x", wp_inst.pc);
+    } else if (curr_tick() < fetch_resume_tick_) {
+      // Post-flush recovery: can't fetch until redirect completes
+      break;
+    } else if (input_buffer_ != nullptr) {
+      // Normal fetch of real instruction
+      if (in_br_recovery_) {
+        flush_stall_cycles(curr_tick());
+        in_br_recovery_ = false;
       }
+      candidate = std::move(input_buffer_);
+      candidate->wait_mem = true;
 
-      DPRINTF(
-        Pipeline,
-        " IF BrPred Wrong -> Enqueue %lu penalty fetchs @PC=0x%08x ...",
-        PenaltyFetchCount, wrong_path_pc);
+      // Branch prediction at IF stage
+      const auto& inst = candidate->trace_inst;
+      auto pred = bpu->predict(inst.pc);
+      auto real_taken = inst.is_branch && inst.br_taken;
+      addr_t real_target = real_taken ? inst.mem_addr : 0;
+      auto accurate = bpu->judge(real_taken, real_target, pred);
+      candidate->br_pred = pred;
+      candidate->br_mispred = !accurate;
 
-      for (size_t i = 0; i < PenaltyFetchCount - 1; ++i) {
-        penalty_inst_queue_.push(
-          static_cast<addr_t>(i * 4 + wrong_path_pc));
+      if (!accurate) {
+        // Misprediction detected at IF. Enter wrong-path mode.
+        // IFU will fetch wrong PCs until branch reaches EX.
+        in_wrong_path_ = true;
+        flush_stall_cycles(curr_tick());
+        in_br_recovery_ = true;
+
+        // Wrong-path PC: the PC that IFU would fetch next
+        if (real_taken && !pred.will_redirect) {
+          // Predicted not-taken but should take: IFU fetches pc+4
+          wrong_path_pc_ = inst.pc + 4;
+        } else if (!real_taken && pred.will_redirect) {
+          // Predicted taken but should not: IFU fetches target
+          wrong_path_pc_ = pred.pred_target;
+        } else {
+          // Wrong target
+          wrong_path_pc_ = pred.pred_target;
+        }
+
+        // flush_at_tick_ is set but the actual flush happens when
+        // the branch passes through do_execute(). The wrong-path
+        // state is cleared there.
+        DPRINTF(Pipeline,
+                " IF BrMispred PC=0x%08x -> WrongPath @0x%08x",
+                inst.pc, wrong_path_pc_);
       }
-      // Fixed penalty stall before penalty fetches begin.
-      // In RTL, branch can't reach EX until any pending load clears LS.
-      // When a load is in progress, defer penalty start until load completes.
-      if (sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem) {
-        deferred_br_penalty_ = BranchMissPenalty;
-      } else {
-        penalty_stall_until_ = curr_tick() + BranchMissPenalty;
-      }
-      last_mispred_tick_ = curr_tick();
+    } else {
+      break;
     }
-  }
 
-  send_ifu_req(candidate->trace_inst.pc);
-  fetch_inst_queue_.emplace_back(std::move(candidate));
+    // Send iCache read request
+    [[maybe_unused]] auto const [rdy, _] = imem->is_ready();
+    assert(rdy);
+    imem->read_req(candidate->trace_inst.pc);
+    fetch_queue_.emplace_back(std::move(candidate));
+  }
 }
 
+// ── Fetch stage 1: IFQ head → pipeline[Fetch] ───────────────────
 void
 Pipeline::do_fetch_1() {
-  assert(fetch_inst_queue_.size() <= ifq_size_);
-  if (fetch_inst_queue_.size()) {
-    assert(sim_pipe_.at(Fetch) == nullptr);
-    auto& ptr = fetch_inst_queue_.front();
-    if (ptr->wait_mem) {
-      schedule(Fetch, InfTime);
-      return;
-    }
-    if (!ptr->is_penalty_fetch)
-      sim_pipe_.at(Fetch) = std::move(ptr);
-    fetch_inst_queue_.pop_front();
+  assert(fetch_queue_.size() <= ifq_size_);
+  if (fetch_queue_.empty()) {
+    schedule(Fetch, InfTime);
+    return;
   }
+  auto& ptr = fetch_queue_.front();
+  if (ptr->wait_mem) {
+    schedule(Fetch, InfTime);
+    return;
+  }
+  assert(sim_pipe_.at(Fetch) == nullptr);
+  if (!ptr->is_wrong_path) {
+    sim_pipe_.at(Fetch) = std::move(ptr);
+  }
+  fetch_queue_.pop_front();
 }
 
-void
-Pipeline::send_ifu_req(addr_t addr) {
-  [[maybe_unused]] auto const [rready, wready] = imem->is_ready();
-  assert(rready);
-  imem->read_req(addr);
-}
-
+// ── iCache response handler ──────────────────────────────────────
 void
 Pipeline::handle_ifu_resp() {
+  // Orphan response: iCache request was in-flight when EX flushed
+  if (orphan_icache_resps_ > 0) {
+    orphan_icache_resps_--;
+    DPRINTF(Pipeline, " IF Resp -> Orphan (ignored), %lu remain",
+            orphan_icache_resps_);
+    return;
+  }
   auto it = std::ranges::find_if(
-    fetch_inst_queue_, [](const auto& item) { return item->wait_mem; });
-  assert(it != fetch_inst_queue_.end());
-  auto& ptr = *it;
-  ptr->wait_mem = false;
-  DPRINTF(Pipeline, " IF Resp -> PC %08x Penalty %d Sched T@ %lu",
-          ptr->trace_inst.pc, ptr->is_penalty_fetch, curr_tick() + 1);
-  // In RTL, the EX-stage flush blocks new iCache requests (flushWire
-  // clears ar.valid), but in-flight requests already in the pipe
-  // complete normally.  The willShift speculative-miss check in
-  // PipeCache already blocks PFs that would miss, matching RTL's
-  // req.ready gating.  No additional cancellation is needed here.
+    fetch_queue_,
+    [](const auto& item) { return item->wait_mem; });
+  assert(it != fetch_queue_.end());
+  (*it)->wait_mem = false;
+  DPRINTF(Pipeline, " IF Resp -> PC %08x WP=%d T@ %lu",
+          (*it)->trace_inst.pc, (*it)->is_wrong_path,
+          curr_tick() + 1);
   async_schedule(Fetch, curr_tick() + 1);
 }
 
+// ── Decode ───────────────────────────────────────────────────────
 void
 Pipeline::do_decode() {
   const auto& trans = sim_pipe_.at(Fetch);
   const auto& inst = trans->trace_inst;
 
-  // When a memory op is in progress at Execute, maintain LsuStall
-  // attribution (RTL: oldest blocked instr determines BlockedCause)
-  bool lsu_active = sim_pipe_.at(Execute)
-                    && sim_pipe_.at(Execute)->wait_mem;
+  bool lsu_active =
+    sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem;
 
-  auto ready_time =
-    std::max(reg_ready_.at(inst.src_reg[0]), reg_ready_.at(inst.src_reg[1]));
-  auto rd = inst.dst_reg;
+  auto ready_time = std::max(reg_ready_.at(inst.src_reg[0]),
+                             reg_ready_.at(inst.src_reg[1]));
   if (ready_time == InfTime) {
-    DPRINTF(Pipeline, " ID -> Blocked : PC=0x%08x src[%d,%d] dst=%d",
-            inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg);
-    if (!lsu_active) set_stall(RAW);
+    DPRINTF(Pipeline, " ID Blocked: PC=0x%08x src[%d,%d]",
+            inst.pc, inst.src_reg[0], inst.src_reg[1]);
+    if (!lsu_active)
+      set_stall(RAW);
     schedule(Decode, InfTime);
     return;
   } else if (ready_time > curr_tick()) {
-    if (!lsu_active) set_stall(RAW);
-    DPRINTF(Pipeline, " ID -> Until T@ %lu: PC=0x%08x src[%d,%d] dst=%d",
-            ready_time, inst.pc, inst.src_reg[0], inst.src_reg[1],
-            inst.dst_reg);
+    if (!lsu_active)
+      set_stall(RAW);
+    DPRINTF(Pipeline, " ID Stall until T@%lu: PC=0x%08x",
+            ready_time, inst.pc);
     schedule(Decode, ready_time);
     return;
   }
-  // Known time
   auto finish_time = std::max(curr_tick(), ready_time) + 1;
-  if (!lsu_active) set_stall(NoInst);
+  if (!lsu_active)
+    set_stall(NoInst);
   schedule(Decode, finish_time);
-  if (rd) {
-    reg_ready_.at(rd) = InfTime;
-  }
-  DPRINTF(Pipeline, " ID -> Pass PC=0x%08x src[%d,%d] dst=%d T@ %lu -> %lu",
-          inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg,
-          curr_tick(), finish_time);
+  if (inst.dst_reg)
+    reg_ready_.at(inst.dst_reg) = InfTime;
+
+  DPRINTF(Pipeline,
+          " ID Pass PC=0x%08x src[%d,%d] dst=%d T@%lu->%lu",
+          inst.pc, inst.src_reg[0], inst.src_reg[1],
+          inst.dst_reg, curr_tick(), finish_time);
   sim_pipe_.at(Decode) = std::move(sim_pipe_.at(Fetch));
 }
 
+// ── Execute ──────────────────────────────────────────────────────
 void
 Pipeline::do_execute() {
   assert(stage_update_.at(Decode) <= curr_tick());
   const auto& trans = sim_pipe_.at(Decode);
   const auto& inst = trans->trace_inst;
 
-  // Update BPU and BTB with actual outcome (prediction was done at IF)
+  // Branch resolution at EX — matches RTL flushWire
   if (inst.is_branch) {
     bool real_taken = inst.br_taken != 0;
     addr_t real_target = real_taken ? inst.mem_addr : 0;
-    // Update BPU state based on actual outcome
     bpu->update(inst.pc, real_taken, real_target);
-    // Judge was done at IF, stats already updated there
+
+    if (trans->br_mispred) {
+      // ─── EX-stage flush ──────────────────────────────────
+      DPRINTF(Pipeline,
+              " EX Flush PC=0x%08x taken=%d target=0x%08x",
+              inst.pc, real_taken, real_target);
+
+      // Flush fetch queue — wrong-path entries discarded,
+      // real entries (shouldn't exist) get ongoing_insts_--
+      // Track in-flight iCache requests that will arrive later
+      for (auto& fq_entry : fetch_queue_) {
+        if (fq_entry) {
+          if (fq_entry->wait_mem)
+            orphan_icache_resps_++;
+          if (!fq_entry->is_wrong_path)
+            ongoing_insts_--;
+        }
+      }
+      fetch_queue_.clear();
+      // Clear wrong-path state
+      in_wrong_path_ = false;
+      // Clear input buffer if present
+      if (input_buffer_) {
+        ongoing_insts_--;
+        input_buffer_ = nullptr;
+      }
+
+      // After flush, IFU needs BranchMissPenalty cycles to
+      // redirect and issue first correct-path fetch
+      fetch_resume_tick_ = curr_tick() + BranchMissPenalty;
+    }
   }
 
   DPRINTF(Pipeline, " EX -> PC=0x%08x", inst.pc);
 
+  // Register forwarding — matches RTL:
+  // EXU: gprFw=false (no forwarding from EX)
+  // LSU: gprFw=(wbSel==fromAlu) — ALU results forward at LS
+  // WBU: always forwards
   if (inst.mem_op == MemNone) {
     if (inst.is_branch && inst.dst_reg != 0) {
-      // Jal/Jalr: wbSel!=fromAlu → LS gprFw=false, WB gprFw=true
-      // Forwarding available at WB, 2 cycles after EX
+      // Jal/Jalr: wbSel!=fromAlu → no LS forward, WB forwards
       update_reg_time(inst.dst_reg, curr_tick() + 2);
     } else {
-      // ALU: wbSel=fromAlu → LS gprFw=true
-      // Forwarding available at LS, 1 cycle after EX
+      // ALU: wbSel=fromAlu → LS forwards (1 cycle after EX)
       update_reg_time(inst.dst_reg, curr_tick() + 1);
     }
   }
@@ -300,35 +294,34 @@ Pipeline::do_execute() {
   schedule(Execute, curr_tick() + 1);
 }
 
+// ── Memory ───────────────────────────────────────────────────────
 void
 Pipeline::do_memory() {
   const auto& trans = sim_pipe_.at(Execute);
   const auto& inst = trans->trace_inst;
 
-  // Don't re-send if already waiting for memory
   if (trans->wait_mem) {
     schedule(Memory, InfTime);
     return;
   }
 
   if (inst.mem_op == MemLoad) {
-    DPRINTF(Pipeline, "LS -> Req [Load] PC=0x%08x addr=0x%08x", inst.pc,
+    DPRINTF(Pipeline, " LS Load PC=0x%08x addr=0x%08x", inst.pc,
             inst.mem_addr);
     set_stall(LsuStall);
     send_lsu_req(inst.mem_addr, 0xbadU, 0xf, false);
     return;
   } else if (inst.mem_op == MemStore) {
-    DPRINTF(Pipeline, "LS -> Req [Store] PC=0x%08x addr=0x%08x", inst.pc,
+    DPRINTF(Pipeline, " LS Store PC=0x%08x addr=0x%08x", inst.pc,
             inst.mem_addr);
     set_stall(LsuStall);
     send_lsu_req(inst.mem_addr, 0xbadU, 0xf, true);
     schedule(Memory, InfTime);
     return;
-  } else {
-    // No memory op
-    schedule(Memory, curr_tick() + 1);
-    sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
   }
+  // No memory op — pass through
+  schedule(Memory, curr_tick() + 1);
+  sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
 }
 
 void
@@ -339,88 +332,74 @@ Pipeline::send_lsu_req(addr_t addr, word_t data, uint8_t strb,
   if (is_write ? wready : rready) {
     sim_pipe_.at(Execute)->wait_mem = true;
     auto const aligned = addr & ~0x3U;
-    if (is_write) {
+    if (is_write)
       dmem->write_req(aligned, data, strb);
-    } else {
+    else
       dmem->read_req(aligned);
-    }
   }
 }
 
 void
 Pipeline::handle_lsu_resp() {
   const auto& trans = sim_pipe_.at(Execute);
-  assert(trans.get());
-  assert(trans->wait_mem);
+  assert(trans.get() && trans->wait_mem);
   assert(!sim_pipe_.at(Memory).get());
   trans->wait_mem = false;
   const auto& inst = trans->trace_inst;
 
-  DPRINTF(Pipeline, " LS -> [%s] Mem Resp : PC=0x%08x addr=0x%08x",
-          inst.mem_op == MemLoad ? "Load" : "Store", inst.pc, inst.mem_addr);
+  DPRINTF(Pipeline, " LS Resp [%s] PC=0x%08x addr=0x%08x",
+          inst.mem_op == MemLoad ? "Load" : "Store", inst.pc,
+          inst.mem_addr);
 
-  set_stall(NoInst); // LsuStall resolved
-  // Apply deferred branch penalty (RTL: branch reaches EX after load clears)
-  if (deferred_br_penalty_ > 0) {
-    penalty_stall_until_ = std::max(
-      penalty_stall_until_, curr_tick() + deferred_br_penalty_);
-    deferred_br_penalty_ = 0;
-  }
-  if (inst.mem_op != MemNone) {
+  set_stall(NoInst);
+  if (inst.mem_op != MemNone)
     update_reg_time(inst.dst_reg, curr_tick() + 1);
-  }
-  // After load completes, check if decode is blocked by RAW dependency.
-  // RTL attributes the cycle between load completion and forwarding as RAW
-  // (decode sees waitRAW=true since gprFw=false at LS stage).
+
+  // Check if decode is blocked by RAW from this load
   if (auto* ids = sim_pipe_.at(Fetch).get()) {
     const auto& idi = ids->trace_inst;
     auto rdy = std::max(reg_ready_.at(idi.src_reg[0]),
                         reg_ready_.at(idi.src_reg[1]));
-    if (rdy > curr_tick()) {
+    if (rdy > curr_tick())
       set_stall(RAW);
-    }
   }
   async_schedule(Memory, curr_tick() + 1);
   sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
 }
 
+// ── WriteBack ────────────────────────────────────────────────────
 void
 Pipeline::do_writeback() {
   ongoing_insts_--;
-  DPRINTF(Pipeline, " WB -> PC=0x%08x Remain %lu",
+  DPRINTF(Pipeline, " WB PC=0x%08x Remain %lu",
           sim_pipe_.at(Memory)->trace_inst.pc, ongoing_insts_);
-  // Flush stall cycles accumulated since last attribution
   flush_stall_cycles(curr_tick());
   stats.nostall++;
   last_attr_tick_ = curr_tick() + 1;
-  // Determine stall cause for next cycle
-  if (sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem) {
+  if (sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem)
     stall_cause_ = LsuStall;
-  } else {
+  else
     stall_cause_ = NoInst;
-  }
+
   stats.insts++;
   stats.cycles = curr_tick() - reset_tick_;
   sim_pipe_.at(Memory) = nullptr;
   schedule(WriteBack, curr_tick() + 1);
 }
 
+// ── Mem response dispatch ────────────────────────────────────────
 void
 Pipeline::recv_mem_resp(CpuTrans trans) {
   auto id = trans.id;
   [[maybe_unused]] auto addr = trans.addr;
-  [[maybe_unused]] auto is_write = trans.mop == MemRWOpt::Write;
-  DPRINTF(Pipeline, "Recv Mem [%s] Resp, ID = %d @ addr %08x",
-          is_write ? "Write" : "Read ", id, addr);
+  [[maybe_unused]] auto is_write =
+    trans.mop == MemRWOpt::Write;
+  DPRINTF(Pipeline, "Recv [%s] Resp, ID=%d addr=%08x",
+          is_write ? "Write" : "Read", id, addr);
   if (id == 0) {
-    assert(fetch_inst_queue_.front() != nullptr);
     assert(!is_write);
     handle_ifu_resp();
-    return;
   } else if (id == 1) {
-    [[maybe_unused]]
-    const auto& op = sim_pipe_.at(Execute)->trace_inst.mem_op;
-    assert(!is_write && op == MemLoad || is_write && op == MemStore);
     handle_lsu_resp();
   } else {
     assert(false && "No such ID");
@@ -430,33 +409,27 @@ Pipeline::recv_mem_resp(CpuTrans trans) {
 void
 Pipeline::ack_mem_avail(AckTrans ack) {
   auto id = ack.id;
-  if (id == 0) {
+  if (id == 0)
     async_schedule(Fetch, curr_tick());
-    return;
-  } else if (id == 1) {
+  else if (id == 1)
     async_schedule(Memory, curr_tick());
-    return;
-  } else {
+  else
     assert(false && "No such ID");
-  }
 }
 
+// ── Register ready time update ───────────────────────────────────
 void
 Pipeline::update_reg_time(uint8_t rd, tick_t when) {
-  if (rd) {
-    // Stall 1 cycle after finish
-    // ID |stall| --> |
-    // EX | --> | ^   ^
-    //    forward |   | IDU finished
+  if (rd)
     reg_ready_.at(rd) = when;
-  }
-  // Trigger retry of Decode Stage
+  // Retry decode if it was blocked on this register
   if (auto* ids = sim_pipe_.at(Fetch).get()) {
     if (stage_update_.at(Decode) == InfTime) {
       const auto& idi = ids->trace_inst;
       if (idi.src_reg[0] || idi.src_reg[1]) {
-        auto ready_time = std::max(reg_ready_.at(idi.src_reg[0]),
-                                   reg_ready_.at(idi.src_reg[1]));
+        auto ready_time = std::max(
+          reg_ready_.at(idi.src_reg[0]),
+          reg_ready_.at(idi.src_reg[1]));
         schedule(Decode, ready_time);
       }
     }
