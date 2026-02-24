@@ -94,10 +94,6 @@ Pipeline::try_issue_fetch() {
       break;
     } else if (input_buffer_ != nullptr) {
       // Normal fetch of real instruction
-      if (in_br_recovery_) {
-        flush_stall_cycles(curr_tick());
-        in_br_recovery_ = false;
-      }
       candidate = std::move(input_buffer_);
       candidate->wait_mem = true;
 
@@ -161,10 +157,17 @@ Pipeline::do_fetch_1() {
     schedule(Fetch, InfTime);
     return;
   }
-  assert(sim_pipe_.at(Fetch) == nullptr);
-  if (!ptr->is_wrong_path) {
-    sim_pipe_.at(Fetch) = std::move(ptr);
+  if (ptr->is_wrong_path) {
+    // Wrong-path entry completed: keep it in the queue to occupy
+    // the buffer slot.  In RTL, wrong-path instructions stay in
+    // the FetchStage buffer (consumed by IDU at 1/cycle or killed
+    // by flush).  Keeping them here naturally limits wrong-path
+    // iCache pollution to at most IFQ_SIZE requests.
+    schedule(Fetch, InfTime);
+    return;
   }
+  assert(sim_pipe_.at(Fetch) == nullptr);
+  sim_pipe_.at(Fetch) = std::move(ptr);
   fetch_queue_.pop_front();
 }
 
@@ -262,15 +265,18 @@ Pipeline::do_execute() {
       fetch_queue_.clear();
       // Clear wrong-path state
       in_wrong_path_ = false;
-      // Clear input buffer if present
-      if (input_buffer_) {
-        ongoing_insts_--;
-        input_buffer_ = nullptr;
-      }
+      // Keep input_buffer_ — it holds a valid trace instruction
+      // that should be re-fetched after the recovery stall.
 
       // After flush, IFU needs BranchMissPenalty cycles to
       // redirect and issue first correct-path fetch
       fetch_resume_tick_ = curr_tick() + BranchMissPenalty;
+
+      // End branch-recovery attribution at EX flush.  RTL only
+      // counts the flush+redirect cycles as BranchMispred; any
+      // subsequent iCache stall is NoInst.
+      flush_stall_cycles(curr_tick() + BranchMissPenalty);
+      in_br_recovery_ = false;
     }
   }
 
