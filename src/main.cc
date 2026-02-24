@@ -77,14 +77,10 @@ static bool use_ras = false;
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
-static size_t ifq_size = 4;
-static size_t stq_size = 8; // Only used when dCache is NoCache
+static size_t ifq_size = 3;  // RTL FetchStage PipeDepth=3
+static size_t stq_size = 8;  // Only used when dCache is NoCache
 static size_t stbuf_entries = 2;
-static tick_t br_mis_pen = 9;
-// RTL pipeline depth limits WP fetches to ~3/mispred, but npsim's
-// synthetic WP addresses require more WP fetches (pf=7 → 6 WP/mispred)
-// to reproduce RTL cache pollution effects for small direct-mapped caches.
-static size_t pf_count = 7;
+static tick_t br_mis_pen = 1; // Cycles from EX flush until first fetch
 static std::string ipf_type = "none"; // iCache prefetcher type
 static std::string dpf_type = "none"; // dCache prefetcher type
 
@@ -212,8 +208,7 @@ parse_args(int argc, char* argv[]) {
       br_mis_pen = std::stoul(optarg);
       break;
     case 'Y':
-      pf_count = std::stoul(optarg);
-      break;
+      break; // reserved (was pf_count)
     case 'P':
       ipf_type = optarg;
       break;
@@ -348,7 +343,7 @@ main(int argc, char** argv) {
   size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
     "Core", ifq_size, actual_stq_size, branch_unit.get(),
-    br_mis_pen, pf_count);
+    br_mis_pen);
 
   std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
   if (ipf_type == "nextline") {
