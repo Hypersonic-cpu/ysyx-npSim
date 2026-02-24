@@ -81,7 +81,10 @@ static size_t ifq_size = 4;
 static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 2;
 static tick_t br_mis_pen = 9;
-static size_t pf_count = 5;
+// RTL pipeline depth limits WP fetches to ~3/mispred, but npsim's
+// synthetic WP addresses require more WP fetches (pf=7 → 6 WP/mispred)
+// to reproduce RTL cache pollution effects for small direct-mapped caches.
+static size_t pf_count = 7;
 static std::string ipf_type = "none"; // iCache prefetcher type
 static std::string dpf_type = "none"; // dCache prefetcher type
 
@@ -374,7 +377,7 @@ main(int argc, char** argv) {
     dcache = std::make_unique<cacheSim::PipeCache>(
       "dCache",
       /* host */ core.get(),
-      /* pipe depth */ 3, l1d_size, l1d_blksize, l1d_assoc, dpf,
+      /* pipe depth */ 2, l1d_size, l1d_blksize, l1d_assoc, dpf,
       /* cache ID */ 1);
   } else {
     dcache = std::make_unique<cacheSim::StoreBuffer>(

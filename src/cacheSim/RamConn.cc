@@ -59,7 +59,8 @@ RAMArbiter::update_impl() {
     for (auto it = reqs_.rbegin(); it != reqs_.rend(); ++it) {
       if (it->first != nullptr) {
         r_serving_id_ = it->first->id;
-        auto start = curr_tick();
+        // +1: PMemBox HOLD→IDLE transition takes 1 extra cycle
+        auto start = curr_tick() + 1;
         r_busy_until_ = start + it->first->lat;
         DPRINTF(Mem, "R-ch picking [Read] @ %08x until T@ %lu",
                 it->first->addr, r_busy_until_);
@@ -91,7 +92,8 @@ RAMArbiter::update_impl() {
     for (auto it = reqs_.rbegin(); it != reqs_.rend(); ++it) {
       if (it->second != nullptr) {
         w_serving_id_ = it->second->id;
-        w_busy_until_ = curr_tick() + it->second->lat;
+        // +1: PMemBox HOLD→IDLE transition takes 1 extra cycle
+        w_busy_until_ = curr_tick() + 1 + it->second->lat;
         DPRINTF(Mem, "W-ch picking [Write] @ %08x until T@ %lu",
                 it->second->addr, w_busy_until_);
         break;

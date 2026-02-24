@@ -160,7 +160,9 @@ PipeCache::recv_mem_resp(MemTransPtr trans) {
     handle_fill(pipe_.back()->line, trans->addr, trans->data);
   }
   // Write responses are fire-and-forget (already acked to CPU)
-  blocked_until_ = curr_tick() + 1;
+  // RTL fillFinish = RegNext(...): 1 extra blocking cycle after the
+  // last beat before willShift can go high.  Total = +2 from last beat.
+  blocked_until_ = curr_tick() + 2;
 }
 
 void
@@ -169,6 +171,12 @@ PipeCache::update_impl() {
   // is_waiting_ is cleared on mem resp
   // Serve target
   if (const auto& bk = pipe_.back()) {
+    // Deferred tag lookup: do access() here instead of at read_req
+    // to match RTL SyncReadMem timing and avoid pipe-aliasing false
+    // misses.
+    if (bk->line == nullptr) {
+      bk->line = access(bk->addr);
+    }
     // NOTE: Control whether write back or not using `dirty` but not valid.
     // Is replay -> valid
     assert(!is_replay_ || bk->line->isValid());
@@ -182,6 +190,14 @@ PipeCache::update_impl() {
         handle_prefetch(bk->addr, !was_miss);
       }
     } else {
+      // Model RTL flowing→memreq state transition: the AXI AR
+      // request fires one cycle after the miss is detected.
+      if (!pending_fill_req_) {
+        pending_fill_req_ = true;
+        blocked_until_ = curr_tick() + 1;
+        return;
+      }
+      pending_fill_req_ = false;
       mem_side_->recv_req(std::make_unique<MemTrans>(
         Req, Read, bk->addr, cache_id_,
         static_cast<uint16_t>(lineBytes_ / sizeof(word_t))));
@@ -207,6 +223,25 @@ PipeCache::update_impl() {
   for (size_t i = pipe_.size() - 1; i > 0; --i) {
     pipe_[i] = std::move(pipe_[i - 1]);
   }
+
+  // RTL willShift check: after shift, speculatively probe the new back
+  // entry's tag.  In RTL the SyncReadMem tag compare is combinational
+  // with willShift, so a miss blocks req.ready in the SAME cycle.
+  // Without this check npsim detects the miss 1 cycle too late,
+  // allowing one extra wrong-path fetch to enter the pipe.
+  // Also do access() + pending_fill_req_ here to match RTL timing:
+  // RTL detects miss AND starts memreq state in the same cycle (T+1),
+  // so the AR fires at T+2.  Without this, npsim would need T+1
+  // (willShift block) + T+2 (access+pending) + T+3 (AR) = 1 extra.
+  if (pipe_.back() && pipe_.back()->line == nullptr
+      && !probe(pipe_.back()->addr)) {
+    // Do the full tag lookup now (same cycle as RTL's tag compare)
+    pipe_.back()->line = access(pipe_.back()->addr);
+    pending_fill_req_ = true;
+    blocked_until_ = curr_tick() + 1;
+    return;
+  }
+
   is_shifted_ = true;
   // Notify the CPU-side that cache is available this cycle
   cpu_ack_recv_({cache_id_, Read});
@@ -254,8 +289,9 @@ PipeCache::read_req(addr_t addr) {
   DPRINTF(Cache, "Recv READ Req @ %u", addr);
   assert(is_shifted_);
   assert(pipe_.front() == nullptr);
-  auto blk = access(addr);
-  auto req = std::make_unique<CachePipeEntry>(addr, blk, Read);
+  // Defer tag lookup to when entry reaches pipe back (matches RTL
+  // SyncReadMem timing and avoids pipe-aliasing false misses).
+  auto req = std::make_unique<CachePipeEntry>(addr, nullptr, Read);
   pipe_.front() = std::move(req);
   blocked_until_ = curr_tick() + 1;
   is_shifted_ = false;
@@ -303,6 +339,7 @@ PipeCache::handle_flush() {
   r_waiting_ = false;
   w_waiting_ = false;
   pending_flush_ = false;
+  pending_fill_req_ = false;
   blocked_until_ = curr_tick() + 1;
 }
 
