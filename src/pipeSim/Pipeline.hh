@@ -15,7 +15,6 @@
 #include <cstdint>
 #include <list>
 #include <memory>
-#include <queue>
 #include <string>
 #include <utility>
 
@@ -152,13 +151,12 @@ public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
                     size_t stq_size, BranchUnit* bpu,
-                    tick_t br_mis_pen = 10, size_t pf_count = 4);
+                    tick_t br_mis_pen = 10);
 
   json
   config_json() const override {
     json j;
     j["BranchPenaltyCycles"] = BranchMissPenalty;
-    j["BranchPenaltyFetches"] = PenaltyFetchCount;
     j["area"] = area::comb_only(14000.0);
     return j;
   }
@@ -185,7 +183,8 @@ public:
 
   bool
   inst_avail() const override {
-    return input_buffer_ == nullptr && !is_draining_;
+    return input_buffer_ == nullptr && !is_draining_
+           && !unresolved_branch_;
   }
 
   void
@@ -229,7 +228,9 @@ protected:
     // True if this is a speculative fetch after misprediction
     bool is_penalty_fetch;
     bool wait_mem;
-
+    // RTL instEmpty = (toidPtr === tailPtr) where tailPtr = RegNext.
+    // Pop is gated by tailPtr advancing (1 cycle after R fire).
+    tick_t ready_tick = 0;
     explicit Transaction() = delete;
     explicit Transaction(const Inst& inst, bool is_penalty = false,
                          bool is_wait_mem = false) noexcept
@@ -242,7 +243,6 @@ protected:
   using TransPtr = std::unique_ptr<Transaction>;
 
   tick_t BranchMissPenalty;
-  size_t PenaltyFetchCount;
 
   using SimPipe = std::array<TransPtr, Num_PipeStage>;
   TransPtr input_buffer_;
@@ -264,6 +264,7 @@ protected:
 
   void send_lsu_req(addr_t addr, word_t data, uint8_t strb, bool is_write);
   void send_ifu_req(addr_t addr);
+  void flush_wrong_path();
 
   void wakeup_pending();
   void update_reg_time(uint8_t rd, tick_t when);
@@ -276,7 +277,11 @@ protected:
 
   void
   async_schedule(PipeStage stage, tick_t when) {
-    schedule(stage, when);
+    // Use min: don't overwrite an earlier wakeup.  In RTL,
+    // io.out.fire is independent of incoming AR — a later cache
+    // response must not push back an already-scheduled pop.
+    assert(when >= curr_tick());
+    stage_update_.at(stage) = std::min(stage_update_.at(stage), when);
     calc_nxtupd_ = std::min(calc_nxtupd_, when);
   }
 
@@ -294,6 +299,26 @@ protected:
     for (auto elem : stage_update_) {
       if (elem > curr_tick()) {
         mins = std::min(mins, elem);
+      }
+    }
+    // Ensure pipeline wakes when stages can advance next tick.
+    // The backward processing order (WB→FE) means a stage populated
+    // late (e.g. do_fetch_1 filling sim_pipe_[Fetch]) misses its
+    // downstream check in the same update.  Without this, the
+    // pipeline stalls until an external event (e.g. iCache response)
+    // triggers async_schedule.
+    for (int i = 1; i < Num_PipeStage; ++i) {
+      if (sim_pipe_[i] == nullptr && sim_pipe_[i - 1] != nullptr) {
+        auto t = std::max(stage_update_[i], curr_tick() + 1);
+        mins = std::min(mins, t);
+      }
+    }
+    // Also wake if fetch queue has ready entries to pop.
+    if (!fetch_inst_queue_.empty()) {
+      auto& f = fetch_inst_queue_.front();
+      if (!f->wait_mem) {
+        auto t = std::max(f->ready_tick, curr_tick() + 1);
+        mins = std::min(mins, t);
       }
     }
     calc_nxtupd_ = mins;
@@ -347,12 +372,34 @@ private:
     stall_cause_ = new_cause;
   }
 
-  // Queue of penalty fetch PCs to issue after misprediction
-  std::queue<addr_t> penalty_inst_queue_;
+  // Dynamic wrong-path state: true when a mispredicted branch is in
+  // the pipeline but hasn't reached EX yet.  Fetch continues with
+  // sequential PCs from wrong_path_pc_ until the branch resolves.
+  bool unresolved_branch_{false};
+  addr_t wrong_path_pc_{0};
   tick_t penalty_stall_until_{0};
   tick_t last_mispred_tick_{0}; // For dynamic BrMisPen
+  // RTL BusConnect(exs.io.toFetch, ifs.io.fromEx, Pipeline) delays
+  // flushWire by 1 cycle.  pending_flush_ models this: set in
+  // do_execute, applied at the start of the NEXT update_impl.
+  bool pending_flush_{false};
   std::list<TransPtr> fetch_inst_queue_;
   size_t ifq_size_;
+  // RTL toidPtr is a register: advances 1 cycle AFTER io.out.fire.
+  // pop_pending_ models this: after do_fetch_1 pops an entry, the slot
+  // remains "occupied" for the current cycle's do_fetch_0 check.
+  bool pop_pending_{false};
+
+  // WP diagnostics
+  size_t wp_this_mispred_{0};
+  std::array<size_t, 10> wp_hist_{};
+public:
+  void dump_wp_hist() const {
+    std::print("WP histogram: ");
+    for (size_t i = 0; i < 10; ++i)
+      if (wp_hist_[i]) std::print("{}={} ", i, wp_hist_[i]);
+    std::print("\n");
+  }
 };
 
 } // namespace pipeSim

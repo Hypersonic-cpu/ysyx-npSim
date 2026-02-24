@@ -17,7 +17,7 @@ using trace::MemNone;
 using trace::MemStore;
 
 Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
-                   BranchUnit* bpu, tick_t br_mis_pen, size_t pf_count)
+                   BranchUnit* bpu, tick_t br_mis_pen)
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}
@@ -28,10 +28,8 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
                      &Pipeline::do_writeback}
     , ifq_size_{ifq_size}
     , fetch_inst_queue_{}
-    , penalty_inst_queue_{}
     , ongoing_insts_{0}
-    , BranchMissPenalty{br_mis_pen}
-    , PenaltyFetchCount{pf_count} {
+    , BranchMissPenalty{br_mis_pen} {
   assert(bpu && "BranchUnit must not be null");
 }
 
@@ -41,6 +39,21 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
  */
 void
 Pipeline::update_impl() {
+  pop_pending_ = false; // reset registered toidPtr delay
+
+  // RTL BusConnect Pipeline register: flush arrives 1 cycle after
+  // Execute detects the misprediction.
+  if (pending_flush_) {
+    pending_flush_ = false;
+    flush_wrong_path();
+    unresolved_branch_ = false;
+    if (sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem) {
+      deferred_br_penalty_ = BranchMissPenalty;
+    } else {
+      penalty_stall_until_ = curr_tick() + BranchMissPenalty;
+    }
+  }
+
   DPRINTF(Event, "Update Pipeline: ");
   for (int i = Num_PipeStage - 1; i >= 0; i--) {
     DPRINTF(Event, " %s : ptr %p, ptr-1 %p, upd %lu",
@@ -73,7 +86,13 @@ Pipeline::update_impl() {
 
 void
 Pipeline::do_fetch_0() {
-  if (!imem->is_ready().first || fetch_inst_queue_.size() == ifq_size_) {
+  // RTL bufFull = iotaMod(headPtr) === toidPtr.  Checks only the
+  // circular buffer (PipeDepth entries).  pop_pending_ models the
+  // 1-cycle register delay of toidPtr after io.out.fire: the slot
+  // freed by do_fetch_1 doesn't become "available" until next cycle.
+  size_t eff_size =
+    fetch_inst_queue_.size() + (pop_pending_ ? 1 : 0);
+  if (!imem->is_ready().first || eff_size >= ifq_size_) {
     return;
   }
   DPRINTF(Cache, "ICache ready = [%d, %d] InstQue size = %lu",
@@ -82,7 +101,7 @@ Pipeline::do_fetch_0() {
 
   TransPtr candidate = nullptr;
 
-  // Process pending penalty fetches first
+  // End-of-trace draining
   if (is_draining_) [[unlikely]] {
     Inst drain_inst{/* pc        */ 0,
                     /* mem_addr  */ 0,
@@ -94,30 +113,32 @@ Pipeline::do_fetch_0() {
                     /* sys_op    */ 0,
                     /* dummy     */ 0};
     candidate = std::make_unique<Transaction>(drain_inst, false, true);
-  } else if (!penalty_inst_queue_.empty()) {
-    // Issue penalty fetches immediately — they model wrong-path iCache
-    // accesses that overlap with pipeline drain in RTL (no pre-stall).
-    addr_t penalty_pc = penalty_inst_queue_.front();
-    penalty_inst_queue_.pop();
-
-    // Create dummy instruction (add x0, x0, x0)
-    Inst penalty_inst{/* pc        */ penalty_pc,
-                      /* mem_addr  */ 0,
-                      /* mem_op    */ 0,
-                      /* is_branch */ false,
-                      /* br_taken  */ false,
-                      /* dst_reg   */ 0,
-                      /* src_reg   */ {0, 0},
-                      /* sys_op    */ 0,
-                      /* dummy     */ 0};
-
-    auto penalty_trans = std::make_unique<Transaction>(
-      penalty_inst, /* is_penalty */ true, /* wait_mem */ true);
-    candidate = std::move(penalty_trans);
+  } else if (unresolved_branch_) {
+    // Dynamic wrong-path: keep fetching PC+4 from the mispredicted
+    // path until the branch resolves at EX.  The iCache naturally
+    // limits the WP count — a miss blocks further WP fetches.
+    Inst wp_inst{/* pc        */ wrong_path_pc_,
+                 /* mem_addr  */ 0,
+                 /* mem_op    */ 0,
+                 /* is_branch */ false,
+                 /* br_taken  */ false,
+                 /* dst_reg   */ 0,
+                 /* src_reg   */ {0, 0},
+                 /* sys_op    */ 0,
+                 /* dummy     */ 0};
+    candidate = std::make_unique<Transaction>(wp_inst, true, true);
+    wrong_path_pc_ += 4;
+    ++wp_this_mispred_;
   } else if (input_buffer_ != nullptr) {
     if (curr_tick() < penalty_stall_until_ || deferred_br_penalty_ > 0) {
       DPRINTF(Pipeline, " IF Penalty Stall (until %lu, now %lu)",
               penalty_stall_until_, curr_tick());
+      // Ensure pipeline wakes at penalty expiry even if no in-flight
+      // WP entries remain to trigger an async schedule.
+      if (penalty_stall_until_ > curr_tick()
+          && penalty_stall_until_ != InfTime) {
+        schedule(Fetch, penalty_stall_until_);
+      }
       return;
     }
     // Penalty recovery ends when first real instruction enters fetch
@@ -133,14 +154,11 @@ Pipeline::do_fetch_0() {
 
   const auto& inst = candidate->trace_inst;
 
-  // Branch prediction at IF stage (before knowing if it's actually a
-  // branch). Only predict on non-penalty insts to avoid repetitive
-  // punishment.
+  // Branch prediction at IF stage (only for real instructions)
   if (!candidate->is_penalty_fetch) {
     auto pred = bpu->predict(inst.pc);
     auto real_taken = inst.is_branch && inst.br_taken;
     addr_t real_target = real_taken ? inst.mem_addr : 0;
-    // Use BranchUnit::judge to check accuracy and update stats
     auto accurate = bpu->judge(real_taken, real_target, pred);
     candidate->br_pred = pred;
     candidate->br_mispred = !accurate;
@@ -148,37 +166,20 @@ Pipeline::do_fetch_0() {
     if (!accurate) {
       flush_stall_cycles(curr_tick());
       in_penalty_recovery_ = true;
-      // Generate penalty fetches for the wrong path
-      addr_t wrong_path_pc;
+      // Start dynamic wrong-path fetching — the branch will be
+      // resolved when it reaches do_execute(), at which point
+      // flush_wrong_path() applies the penalty.
+      unresolved_branch_ = true;
       if (real_taken && !pred.will_redirect) {
-        // Predicted not-taken, but should take: wrong path is pc+4, pc+8...
-        wrong_path_pc = inst.pc + 4;
+        wrong_path_pc_ = inst.pc + 4;
       } else if (!real_taken && pred.will_redirect) {
-        // Predicted taken to 'a', but should not: wrong path is a+4, a+8...
-        wrong_path_pc = pred.pred_target + 4;
+        wrong_path_pc_ = pred.pred_target + 4;
       } else {
-        // Bad target: predicted to wrong address
-        // This happens when both predict taken but target differs
-        wrong_path_pc = pred.pred_target + 4;
+        wrong_path_pc_ = pred.pred_target + 4;
       }
-
-      DPRINTF(
-        Pipeline,
-        " IF BrPred Wrong -> Enqueue %lu penalty fetchs @PC=0x%08x ...",
-        PenaltyFetchCount, wrong_path_pc);
-
-      for (size_t i = 0; i < PenaltyFetchCount - 1; ++i) {
-        penalty_inst_queue_.push(
-          static_cast<addr_t>(i * 4 + wrong_path_pc));
-      }
-      // Fixed penalty stall before penalty fetches begin.
-      // In RTL, branch can't reach EX until any pending load clears LS.
-      // When a load is in progress, defer penalty start until load completes.
-      if (sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem) {
-        deferred_br_penalty_ = BranchMissPenalty;
-      } else {
-        penalty_stall_until_ = curr_tick() + BranchMissPenalty;
-      }
+      DPRINTF(Pipeline,
+              " IF BrPred Wrong -> Dynamic WP from PC=0x%08x",
+              wrong_path_pc_);
       last_mispred_tick_ = curr_tick();
     }
   }
@@ -197,9 +198,16 @@ Pipeline::do_fetch_1() {
       schedule(Fetch, InfTime);
       return;
     }
+    // RTL: instEmpty = (toidPtr === tailPtr), tailPtr = RegNext.
+    // Pop is only possible 1 cycle after R fire.
+    if (ptr->ready_tick > curr_tick()) {
+      schedule(Fetch, ptr->ready_tick);
+      return;
+    }
     if (!ptr->is_penalty_fetch)
       sim_pipe_.at(Fetch) = std::move(ptr);
     fetch_inst_queue_.pop_front();
+    pop_pending_ = true; // model RTL toidPtr register delay
   }
 }
 
@@ -217,14 +225,11 @@ Pipeline::handle_ifu_resp() {
   assert(it != fetch_inst_queue_.end());
   auto& ptr = *it;
   ptr->wait_mem = false;
-  DPRINTF(Pipeline, " IF Resp -> PC %08x Penalty %d Sched T@ %lu",
-          ptr->trace_inst.pc, ptr->is_penalty_fetch, curr_tick() + 1);
-  // In RTL, the EX-stage flush blocks new iCache requests (flushWire
-  // clears ar.valid), but in-flight requests already in the pipe
-  // complete normally.  The willShift speculative-miss check in
-  // PipeCache already blocks PFs that would miss, matching RTL's
-  // req.ready gating.  No additional cancellation is needed here.
-  async_schedule(Fetch, curr_tick() + 1);
+  // RTL: tailPtr = RegNext → pop gated 1 cycle after R fire.
+  ptr->ready_tick = curr_tick() + 1;
+  DPRINTF(Pipeline, " IF Resp -> PC %08x Penalty %d Ready T@ %lu",
+          ptr->trace_inst.pc, ptr->is_penalty_fetch, ptr->ready_tick);
+  async_schedule(Fetch, ptr->ready_tick);
 }
 
 void
@@ -283,6 +288,12 @@ Pipeline::do_execute() {
   }
 
   DPRINTF(Pipeline, " EX -> PC=0x%08x", inst.pc);
+
+  // Branch misprediction resolved at EX: defer flush by 1 cycle
+  // to model RTL BusConnect Pipeline register delay.
+  if (trans->br_mispred) {
+    pending_flush_ = true;
+  }
 
   if (inst.mem_op == MemNone) {
     if (inst.is_branch && inst.dst_reg != 0) {
@@ -431,6 +442,7 @@ void
 Pipeline::ack_mem_avail(AckTrans ack) {
   auto id = ack.id;
   if (id == 0) {
+    // iCache ready: wake pipeline for do_fetch_0 and do_fetch_1.
     async_schedule(Fetch, curr_tick());
     return;
   } else if (id == 1) {
@@ -462,6 +474,33 @@ Pipeline::update_reg_time(uint8_t rd, tick_t when) {
     }
   }
   assert(reg_ready_.at(0) == 0);
+}
+
+void
+Pipeline::flush_wrong_path() {
+  // Remove WP entries from fetch queue.  Keep entries that are still
+  // waiting for iCache (wait_mem=true) — the iCache will respond
+  // naturally and do_fetch_1 will discard them.  Remove ready WP
+  // entries (wait_mem=false) immediately.
+  auto it = fetch_inst_queue_.begin();
+  while (it != fetch_inst_queue_.end()) {
+    if ((*it)->is_penalty_fetch && !(*it)->wait_mem) {
+      it = fetch_inst_queue_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  // Clear Fetch stage if it holds a WP instruction
+  if (sim_pipe_.at(Fetch)
+      && sim_pipe_.at(Fetch)->is_penalty_fetch) {
+    sim_pipe_.at(Fetch) = nullptr;
+  }
+  // Count WP (wp_this_mispred_ already counts each WP AR from do_fetch_0)
+  if (wp_this_mispred_ < 10) wp_hist_[wp_this_mispred_]++;
+  else wp_hist_[9]++;
+  wp_this_mispred_ = 0;
+  DPRINTF(Pipeline, " EX Flush WP: remaining queue %lu",
+          fetch_inst_queue_.size());
 }
 
 } // namespace pipeSim

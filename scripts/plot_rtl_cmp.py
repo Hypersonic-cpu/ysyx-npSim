@@ -29,12 +29,12 @@ BLKS = [16, 32, 64]
 
 
 def load_rtl_ipc(size, blk):
-    p = NPC_HOME / "ccout" / "sweep-cache" / f"l1i_{size}_blk{blk}_assoc1" / "stats.json"
+    p = NPC_HOME / "ccout" / "sweep-microtrain" / f"l1i_{size}_blk{blk}_assoc1" / "stats.json"
     with open(p) as f:
         return json.load(f)["pmu"]["ipc"]
 
 
-def load_npsim_ipc(size, blk, sweep_dir="sweep-final"):
+def load_npsim_ipc(size, blk, sweep_dir="sweep-microtrain"):
     p = NPSIM_HOME / "simout" / sweep_dir / f"l1i_{size}_blk{blk}" / "stats.json"
     with open(p) as f:
         d = json.load(f)
@@ -43,7 +43,7 @@ def load_npsim_ipc(size, blk, sweep_dir="sweep-final"):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--outfile", default="visual/plots/rtl_cmp.png")
+    parser.add_argument("--outfile", default="visual/plots/rtl_cmp_mt.png")
     args = parser.parse_args()
 
     outpath = NPSIM_HOME / args.outfile
@@ -104,7 +104,7 @@ def main():
                      fontweight="bold", color="black")
     fig.colorbar(im2, ax=ax2, label="ΔIPC %")
 
-    fig.suptitle("npSim vs RTL IPC Comparison — CoreMark (assoc=1, NoBPU,\n"
+    fig.suptitle("npSim vs RTL IPC Comparison — MicroTrain (assoc=1, NoBPU,\n"
                  "mem_lat=42, bst_lat=10, stbuf=2, pf=7)",
                  fontsize=12, fontweight="bold")
     fig.tight_layout()

@@ -77,14 +77,13 @@ static bool use_ras = false;
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
-static size_t ifq_size = 4;
+// RTL FetchStage PipeDepth=3: max 3 outstanding entries (bufFull)
+static size_t ifq_size = 3;
 static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 2;
-static tick_t br_mis_pen = 9;
-// RTL pipeline depth limits WP fetches to ~3/mispred, but npsim's
-// synthetic WP addresses require more WP fetches (pf=7 → 6 WP/mispred)
-// to reproduce RTL cache pollution effects for small direct-mapped caches.
-static size_t pf_count = 7;
+// Dynamic WP model: penalty applied at EX, not IF.  RTL recovery
+// from EX flush to first correct-path instruction = 3 cycles.
+static tick_t br_mis_pen = 1;
 static std::string ipf_type = "none"; // iCache prefetcher type
 static std::string dpf_type = "none"; // dCache prefetcher type
 
@@ -134,7 +133,6 @@ parse_args(int argc, char* argv[]) {
     {"stq-size", required_argument, 0, 'w'},
     {"stbuf-entries", required_argument, 0, 'Z'},
     {"br-pen", required_argument, 0, 'X'},
-    {"pf-count", required_argument, 0, 'Y'},
     {"ipf", required_argument, 0, 'P'},
     {"dpf", required_argument, 0, 'p'},
     {"print-brief", no_argument, 0, 201U},
@@ -210,9 +208,6 @@ parse_args(int argc, char* argv[]) {
       break;
     case 'X':
       br_mis_pen = std::stoul(optarg);
-      break;
-    case 'Y':
-      pf_count = std::stoul(optarg);
       break;
     case 'P':
       ipf_type = optarg;
@@ -348,7 +343,7 @@ main(int argc, char** argv) {
   size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
     "Core", ifq_size, actual_stq_size, branch_unit.get(),
-    br_mis_pen, pf_count);
+    br_mis_pen);
 
   std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
   if (ipf_type == "nextline") {
@@ -492,6 +487,7 @@ main(int argc, char** argv) {
   std::println(ANSI_FG_YELLOW
                "> Host Time: {:d} ms IPC: {:.6f} <" ANSI_ALL_NONE,
                loop_us, core->stats.get_ipc());
+  core->dump_wp_hist();
 
   // Dump final stats
   append_stats_json(root, dump_cnt++, simlist);
