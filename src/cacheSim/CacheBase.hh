@@ -231,7 +231,9 @@ public:
 
   tick_t
   next_update() const override {
-    return r_waiting_ ? InfTime : blocked_until_;
+    if (r_waiting_ && !pending_fill_req_)
+      return InfTime;
+    return blocked_until_;
   }
   void update_impl() override;
 
@@ -256,6 +258,8 @@ protected:
   bool is_shifted_;
   bool is_replay_;
   bool pending_flush_;
+  // Model RTL flowing→memreq state: defer memory request by 1 cycle
+  bool pending_fill_req_{false};
   tick_t blocked_until_;
 };
 

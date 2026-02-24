@@ -81,6 +81,7 @@ Pipeline::do_fetch_0() {
           fetch_inst_queue_.size());
 
   TransPtr candidate = nullptr;
+
   // Process pending penalty fetches first
   if (is_draining_) [[unlikely]] {
     Inst drain_inst{/* pc        */ 0,
@@ -218,6 +219,11 @@ Pipeline::handle_ifu_resp() {
   ptr->wait_mem = false;
   DPRINTF(Pipeline, " IF Resp -> PC %08x Penalty %d Sched T@ %lu",
           ptr->trace_inst.pc, ptr->is_penalty_fetch, curr_tick() + 1);
+  // In RTL, the EX-stage flush blocks new iCache requests (flushWire
+  // clears ar.valid), but in-flight requests already in the pipe
+  // complete normally.  The willShift speculative-miss check in
+  // PipeCache already blocks PFs that would miss, matching RTL's
+  // req.ready gating.  No additional cancellation is needed here.
   async_schedule(Fetch, curr_tick() + 1);
 }
 
