@@ -54,7 +54,7 @@ set_global_tick(tick_t t) noexcept {
 // Configuration parameters — match RTL defaults
 // RTL PMemBox FSM adds 2 cycles per beat (RECV + HOLD states)
 // DPI-C returns 40/8, effective latency per beat = DPI + 2
-static tint_t mem_latency = 42;
+static tint_t mem_latency = 45;
 static tint_t mem_bstlat = 10;
 static std::string trace_file;
 // RTL: iCacheConf(32, 1024, 16, 1) → 1KB, 16B line, direct-mapped
@@ -77,8 +77,8 @@ static bool use_ras = false;
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
-static size_t ifq_size = 3;  // RTL FetchStage PipeDepth=3
-static size_t stq_size = 8;  // Only used when dCache is NoCache
+static size_t ifq_size = 3; // RTL FetchStage PipeDepth=3
+static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 2;
 static tick_t br_mis_pen = 1; // Cycles from EX flush until first fetch
 static std::string ipf_type = "none"; // iCache prefetcher type
@@ -230,8 +230,7 @@ parse_args(int argc, char* argv[]) {
   if (optind < argc) {
     trace_file = argv[optind];
   } else if (!dry_run) {
-    std::cerr << "Usage: " << argv[0]
-              << " <trace_file> [options]\n"
+    std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n"
               << "  --dry-run   Dump config/area without simulation\n"
               << "  --outdir=DIR  Output to simout/DIR/{conf,stats}.json\n";
     return 1;
@@ -300,10 +299,26 @@ collect_config_json(const std::vector<SimObject*>& simlist) {
 
 inline void
 append_stats_json(json& root, size_t curr_cnt,
-                  const std::vector<SimObject*>& simlist) {
-  // Generate and store stats
+                  const std::vector<SimObject*>& simlist,
+                  const TraceSanitizer& san) {
   std::string key = "stats" + std::to_string(curr_cnt);
-  root[key] = collect_stats_json(simlist);
+  json stats_obj = collect_stats_json(simlist);
+  stats_obj["TraceSanitizer"] = {
+    {"total", san.total},
+    {"loads", san.loads},
+    {"stores", san.stores},
+    {"branches", san.branches},
+    {"br_taken", san.br_taken},
+    {"br_not_taken", san.br_not_taken},
+    {"alu", san.alu},
+    {"has_dst", san.has_dst},
+    {"has_src1", san.has_src1},
+    {"has_src2", san.has_src2},
+    {"sys_ops", san.sys_ops},
+    {"bad_marker", san.bad_marker},
+    {"br_taken_no_target", san.br_taken_no_target},
+  };
+  root[key] = stats_obj;
 }
 
 inline void
@@ -342,8 +357,7 @@ main(int argc, char** argv) {
   // Only use store queue when NoCache (need buffering for SDRAM)
   size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
-    "Core", ifq_size, actual_stq_size, branch_unit.get(),
-    br_mis_pen);
+    "Core", ifq_size, actual_stq_size, branch_unit.get(), br_mis_pen);
 
   std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
   if (ipf_type == "nextline") {
@@ -375,8 +389,13 @@ main(int argc, char** argv) {
       /* pipe depth */ 2, l1d_size, l1d_blksize, l1d_assoc, dpf,
       /* cache ID */ 1);
   } else {
-    dcache = std::make_unique<cacheSim::StoreBuffer>(
-      "stBuf", stbuf_entries, static_cast<uint16_t>(1));
+    if (stbuf_entries == 0) {
+      dcache = std::make_unique<cacheSim::NoCache>("dNoCache",
+                                                   static_cast<uint16_t>(1));
+    } else {
+      dcache = std::make_unique<cacheSim::StoreBuffer>(
+        "stBuf", stbuf_entries, static_cast<uint16_t>(1));
+    }
   }
   core->set_cache_ports(icache.get(), dcache.get());
   pipeSim::Processor* proc = &(*core);
@@ -391,10 +410,10 @@ main(int argc, char** argv) {
   icache->set_cpu_side_handlers(cpu_rsp, cpu_ack);
   dcache->set_cpu_side_handlers(cpu_rsp, cpu_ack);
 
-  std::vector<SimObject*> simlist{sdram.get(), dcache.get(),
-                                   icache.get(), branch_unit.get(),
-                                   core.get()};
-  if (ipf) simlist.push_back(ipf.get());
+  std::vector<SimObject*> simlist{sdram.get(), dcache.get(), icache.get(),
+                                  branch_unit.get(), core.get()};
+  if (ipf)
+    simlist.push_back(ipf.get());
 
   // Dump config (shared by --dry-run and normal mode)
   json root;
@@ -413,6 +432,8 @@ main(int argc, char** argv) {
   }
 
   TraceReader reader(trace_file.c_str());
+  TraceSanitizer sanitizer;  // windowed (resets with SysResetStats)
+  TraceSanitizer sanitizer_all;  // cumulative (never resets)
 
   // NOTE: Bottom-up order. Mem -> Cache -> CPU
   const std::vector<ClockedObject*> devlist{sdram.get(), dcache.get(),
@@ -438,11 +459,13 @@ main(int argc, char** argv) {
           core->set_draining();
         } else {
           core->feed_inst(inst);
+          sanitizer.record(inst);
+          sanitizer_all.record(inst);
           inst_cnt++;
-          DPRINTFS(Main,
-                   "Inst feed: PC %8x rs%2d:%2d rd%2d mem%1d:%8x br%1d:%1d",
-                   inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg,
-                   inst.mem_op, inst.mem_addr, inst.is_branch, inst.br_taken);
+          DPRINTFS(
+            Main, "Inst feed: PC %8x rs%2d:%2d rd%2d mem%1d:%8x br%1d:%1d",
+            inst.pc, inst.src_reg[0], inst.src_reg[1], inst.dst_reg,
+            inst.mem_op, inst.mem_addr, inst.is_branch, inst.br_taken);
         }
 
       } else {
@@ -460,6 +483,7 @@ main(int argc, char** argv) {
       for (auto* obj : simlist) {
         obj->reset_stats();
       }
+      sanitizer.reset();
     } else if (inst.sys_op == SysOp::SysDumpStats) [[unlikely]] {
       inst.sys_op = SysOp::SysNone;
       std::println(ANSI_FG_YELLOW
@@ -469,6 +493,7 @@ main(int argc, char** argv) {
         for (const auto* obj : simlist) {
           obj->dump_stats();
         }
+        sanitizer.dump();
       } else if (print_mode == 1) {
         std::println(
           "#Cyc {:d} IPC {:.6f} BPMR {:.6f} i$MR {:.6f} d$MR {:.6f}",
@@ -476,7 +501,7 @@ main(int argc, char** argv) {
           branch_unit->stats.miss_rate(), icache->stats.miss_rate(),
           dcache ? dcache->stats.miss_rate() : -1);
       }
-      append_stats_json(root, dump_cnt++, simlist);
+      append_stats_json(root, dump_cnt++, simlist, sanitizer);
     }
   } while (!core->is_finished() && curr_tick() < max_ticks);
 
@@ -488,8 +513,12 @@ main(int argc, char** argv) {
                "> Host Time: {:d} ms IPC: {:.6f} <" ANSI_ALL_NONE,
                loop_us, core->stats.get_ipc());
 
-  // Dump final stats
-  append_stats_json(root, dump_cnt++, simlist);
+  // Dump final stats (use cumulative sanitizer)
+  append_stats_json(root, dump_cnt++, simlist, sanitizer_all);
+  if (print_mode == 2) {
+    std::println("--- Cumulative Trace Summary ---");
+    sanitizer_all.dump();
+  }
   if (!out_dir.empty()) {
     outfile_write("simout/" + out_dir + "/stats.json", root);
   }
