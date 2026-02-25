@@ -23,9 +23,8 @@ axis2 = {
         {"l1i-blksize": "8"},
         {"l1i-blksize": "16"},
         {"l1i-blksize": "32"},
-        {"l1i-blksize": "64"},
     ],
-    "labels": ["8B", "16B", "32B", "64B"],
+    "labels": ["8B", "16B", "32B"],
 }
 
 default_conf = {
@@ -34,7 +33,7 @@ default_conf = {
     "bpu-type":       "none",
     "stbuf-entries":  "0",
     "br-pen":         "1",
-    "mem-lat":        "45",
-    "mem-bstlat":     "10",
+    "sdram-lat":      "45",
+    "sdram-burst-lat":"10",
     "ifq-size":       "3",
 }

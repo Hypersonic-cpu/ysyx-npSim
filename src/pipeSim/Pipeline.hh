@@ -176,7 +176,7 @@ public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
                     size_t stq_size, BranchUnit* bpu,
-                    tick_t br_mis_pen = 1, bool wp_drain = false);
+                    tick_t br_mis_pen = 1, bool soc_mode = false);
 
   json
   config_json() const override {
@@ -354,7 +354,16 @@ private:
   // At that tick, the IFQ is flushed and IFU redirects.
   bool in_wrong_path_{false};
   addr_t wrong_path_pc_{0};  // Next wrong-path PC to fetch
-  bool wp_drain_;  // SoC mode: drain wrong-path IFQ entries
+
+  // SoC mode: IDU drains completed wrong-path IFQ entries at
+  // 1/cycle, freeing slots for new wrong-path fetches.  This
+  // matches SoC RTL behavior where high SDRAM latency naturally
+  // rate-limits wrong-path iCache pollution.
+  //
+  // NPC mode (soc_mode_=false): wrong-path entries stay in IFQ
+  // until EX flushes, limiting total wrong-path fetches to
+  // IFQ_SIZE.  This matches NPC RTL's lower memory latency.
+  bool soc_mode_;
 
   // After EX flush, IFU needs BranchMissPenalty cycles before
   // issuing the first correct-path fetch.
