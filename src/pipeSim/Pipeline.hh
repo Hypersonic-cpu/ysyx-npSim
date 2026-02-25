@@ -176,7 +176,7 @@ public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
                     size_t stq_size, BranchUnit* bpu,
-                    tick_t br_mis_pen = 1);
+                    tick_t br_mis_pen = 1, bool wp_drain = false);
 
   json
   config_json() const override {
@@ -354,6 +354,7 @@ private:
   // At that tick, the IFQ is flushed and IFU redirects.
   bool in_wrong_path_{false};
   addr_t wrong_path_pc_{0};  // Next wrong-path PC to fetch
+  bool wp_drain_;  // SoC mode: drain wrong-path IFQ entries
 
   // After EX flush, IFU needs BranchMissPenalty cycles before
   // issuing the first correct-path fetch.

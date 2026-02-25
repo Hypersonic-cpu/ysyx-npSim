@@ -56,6 +56,11 @@ set_global_tick(tick_t t) noexcept {
 // DPI-C returns 40/8, effective latency per beat = DPI + 2
 static tint_t mem_latency = 45;
 static tint_t mem_bstlat = 10;
+static bool soc_mode = false;
+// SoC SRAM single-beat latency (on-chip, fast)
+static tint_t soc_sram_lat = 1;
+// SoC SDRAM single-beat latency (for LSU word accesses, no burst overhead)
+static tint_t soc_sdram_single_lat = 50;
 static std::string trace_file;
 // RTL: iCacheConf(32, 1024, 16, 1) → 1KB, 16B line, direct-mapped
 static size_t l1i_size = 1024;
@@ -135,6 +140,9 @@ parse_args(int argc, char* argv[]) {
     {"dpf", required_argument, 0, 'p'},
     {"print-brief", no_argument, 0, 201U},
     {"print-none", no_argument, 0, 200U},
+    {"socmode", no_argument, 0, 202U},
+    {"sram-lat", required_argument, 0, 203U},
+    {"sdram-single-lat", required_argument, 0, 204U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -220,6 +228,15 @@ parse_args(int argc, char* argv[]) {
       break;
     case 200:
       print_mode = 0;
+      break;
+    case 202:
+      soc_mode = true;
+      break;
+    case 203:
+      soc_sram_lat = std::stoul(optarg);
+      break;
+    case 204:
+      soc_sdram_single_lat = std::stoul(optarg);
       break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
@@ -357,7 +374,8 @@ main(int argc, char** argv) {
   // Only use store queue when NoCache (need buffering for SDRAM)
   size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
-    "Core", ifq_size, actual_stq_size, branch_unit.get(), br_mis_pen);
+    "Core", ifq_size, actual_stq_size, branch_unit.get(), br_mis_pen,
+    soc_mode);
 
   std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
   if (ipf_type == "nextline") {
@@ -402,7 +420,8 @@ main(int argc, char** argv) {
 
   auto sdram = std::make_unique<memSim::RAMArbiter>(
     "SDRAM", mem_latency, mem_bstlat,
-    std::vector<CacheBase*>({icache.get(), dcache.get()}));
+    std::vector<CacheBase*>({icache.get(), dcache.get()}),
+    soc_mode, soc_sram_lat, soc_sdram_single_lat);
   icache->set_mem_port(sdram.get());
   dcache->set_mem_port(sdram.get());
   CpuSideAckReceiver cpu_ack = [proc](auto t) { proc->ack_mem_avail(t); };

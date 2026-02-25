@@ -41,10 +41,13 @@ def load_rtl_stats(rtl_dir: Path) -> dict:
         if assoc != 1 or sz not in SIZES or blk not in BLKSZ:
             continue
         stats_file = sub / "stats.json"
-        if not stats_file.exists():
+        if not stats_file.exists() or stats_file.stat().st_size == 0:
             continue
         with open(stats_file) as f:
-            data = json.load(f)
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                continue
         pmu = data.get("pmu", {})
         bc = pmu.get("BlockedCause", {})
         l1i = pmu.get("L1ICache", {})

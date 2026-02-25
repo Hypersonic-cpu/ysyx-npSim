@@ -18,7 +18,7 @@ using trace::MemStore;
 
 Pipeline::Pipeline(const std::string& name, size_t ifq_size,
                    size_t stq_size, BranchUnit* bpu,
-                   tick_t br_mis_pen)
+                   tick_t br_mis_pen, bool wp_drain)
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}
@@ -30,6 +30,7 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size,
     , ifq_size_{ifq_size}
     , fetch_queue_{}
     , ongoing_insts_{0}
+    , wp_drain_{wp_drain}
     , BranchMissPenalty{br_mis_pen} {
   assert(bpu && "BranchUnit must not be null");
 }
@@ -158,12 +159,15 @@ Pipeline::do_fetch_1() {
     return;
   }
   if (ptr->is_wrong_path) {
-    // Wrong-path entry completed: keep it in the queue to occupy
-    // the buffer slot.  In RTL, wrong-path instructions stay in
-    // the FetchStage buffer (consumed by IDU at 1/cycle or killed
-    // by flush).  Keeping them here naturally limits wrong-path
-    // iCache pollution to at most IFQ_SIZE requests.
-    schedule(Fetch, InfTime);
+    if (wp_drain_) {
+      // SoC mode: IDU drains wrong-path entries at 1/cycle,
+      // freeing IFQ slots for new wrong-path fetches.
+      fetch_queue_.pop_front();
+      schedule(Fetch, curr_tick() + 1);
+    } else {
+      // NPC mode: hold wrong-path entries until EX flush.
+      schedule(Fetch, InfTime);
+    }
     return;
   }
   assert(sim_pipe_.at(Fetch) == nullptr);
