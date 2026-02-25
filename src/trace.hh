@@ -40,5 +40,50 @@ private:
   // Order matters (Ctor)
   FILE* file_;
 };
+
+// Trace sanitizer: counts instruction categories for validation.
+// Accumulates per-instruction stats; resettable for stats-windowing.
+struct TraceSanitizer {
+  size_t total = 0;
+  size_t loads = 0;
+  size_t stores = 0;
+  size_t branches = 0;
+  size_t br_taken = 0;
+  size_t br_not_taken = 0;
+  size_t alu = 0;         // non-branch, non-mem
+  size_t has_dst = 0;     // instructions that write a register
+  size_t has_src1 = 0;
+  size_t has_src2 = 0;
+  size_t sys_ops = 0;     // ebreak with sys_op != 0
+  // Sanity checks
+  size_t bad_marker = 0;  // dummy != 0x73 (corrupt record)
+  size_t br_taken_no_target = 0;  // br_taken=1 but mem_addr=0
+
+  void record(const TraceInst& t) {
+    total++;
+    if (t.mem_op == MemLoad) loads++;
+    else if (t.mem_op == MemStore) stores++;
+    if (t.is_branch) {
+      branches++;
+      if (t.br_taken) {
+        br_taken++;
+        if (t.mem_addr == 0) br_taken_no_target++;
+      } else {
+        br_not_taken++;
+      }
+    }
+    if (t.mem_op == MemNone && !t.is_branch) alu++;
+    if (t.dst_reg != 0) has_dst++;
+    if (t.src_reg[0] != 0) has_src1++;
+    if (t.src_reg[1] != 0) has_src2++;
+    if (t.sys_op != SysNone) sys_ops++;
+    if (t.dummy != 0x73) bad_marker++;
+  }
+
+  void reset() { *this = TraceSanitizer{}; }
+
+  void dump() const;
+};
+
 }
 #endif
