@@ -18,7 +18,7 @@ using trace::MemStore;
 
 Pipeline::Pipeline(const std::string& name, size_t ifq_size,
                    size_t stq_size, BranchUnit* bpu,
-                   tick_t br_mis_pen, bool wp_drain)
+                   tick_t br_mis_pen, bool soc_mode)
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}
@@ -30,7 +30,7 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size,
     , ifq_size_{ifq_size}
     , fetch_queue_{}
     , ongoing_insts_{0}
-    , wp_drain_{wp_drain}
+    , soc_mode_{soc_mode}
     , BranchMissPenalty{br_mis_pen} {
   assert(bpu && "BranchUnit must not be null");
 }
@@ -159,13 +159,13 @@ Pipeline::do_fetch_1() {
     return;
   }
   if (ptr->is_wrong_path) {
-    if (wp_drain_) {
-      // SoC mode: IDU drains wrong-path entries at 1/cycle,
+    if (soc_mode_) {
+      // SoC: IDU drains wrong-path entries at 1/cycle,
       // freeing IFQ slots for new wrong-path fetches.
       fetch_queue_.pop_front();
       schedule(Fetch, curr_tick() + 1);
     } else {
-      // NPC mode: hold wrong-path entries until EX flush.
+      // NPC: hold wrong-path entries until EX flush.
       schedule(Fetch, InfTime);
     }
     return;

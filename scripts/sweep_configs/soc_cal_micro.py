@@ -27,10 +27,9 @@ default_conf = {
     "bpu-type":        "none",
     "stbuf-entries":   "0",
     "br-pen":          "1",
-    "mem-lat":         "70",
-    "mem-bstlat":      "23",
+    "sdram-lat":       "55",
+    "sdram-burst-lat": "23",
     "ifq-size":        "3",
     "socmode":         None,
     "sram-lat":        "1",
-    "sdram-single-lat":"52",
 }

@@ -51,16 +51,13 @@ set_global_tick(tick_t t) noexcept {
   g_tick = t;
 }
 
-// Configuration parameters — match RTL defaults
-// RTL PMemBox FSM adds 2 cycles per beat (RECV + HOLD states)
-// DPI-C returns 40/8, effective latency per beat = DPI + 2
-static tint_t mem_latency = 45;
-static tint_t mem_bstlat = 10;
+// Memory latency parameters
+//   NPC mode: SDRAM via PMemBox (DPI-C 40/8 + 2-cycle FSM overhead)
+//   SoC mode: SDRAM via XBar + controller; SRAM is on-chip (fast)
+static tint_t sdram_lat = 45;       // SDRAM first-beat latency
+static tint_t sdram_burst_lat = 10; // SDRAM per-beat burst latency
 static bool soc_mode = false;
-// SoC SRAM single-beat latency (on-chip, fast)
-static tint_t soc_sram_lat = 1;
-// SoC SDRAM single-beat latency (for LSU word accesses, no burst overhead)
-static tint_t soc_sdram_single_lat = 50;
+static tint_t sram_lat = 1;         // SoC: on-chip SRAM latency
 static std::string trace_file;
 // RTL: iCacheConf(32, 1024, 16, 1) → 1KB, 16B line, direct-mapped
 static size_t l1i_size = 1024;
@@ -125,6 +122,8 @@ parse_args(int argc, char* argv[]) {
     {"debug-flags", required_argument, 0, 'd'},
     {"mem-lat", required_argument, 0, 'M'},
     {"mem-bstlat", required_argument, 0, 'm'},
+    {"sdram-lat", required_argument, 0, 'M'},
+    {"sdram-burst-lat", required_argument, 0, 'm'},
     {"outdir", required_argument, 0, 'O'},
     {"dry-run", no_argument, 0, 'D'},
     {"bpu-type", required_argument, 0, 'T'},
@@ -142,7 +141,6 @@ parse_args(int argc, char* argv[]) {
     {"print-none", no_argument, 0, 200U},
     {"socmode", no_argument, 0, 202U},
     {"sram-lat", required_argument, 0, 203U},
-    {"sdram-single-lat", required_argument, 0, 204U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -178,10 +176,10 @@ parse_args(int argc, char* argv[]) {
       debug::set_flags(optarg);
       break;
     case 'M':
-      mem_latency = std::stoul(optarg);
+      sdram_lat = std::stoul(optarg);
       break;
     case 'm':
-      mem_bstlat = std::stoul(optarg);
+      sdram_burst_lat = std::stoul(optarg);
       break;
     case 'O':
       out_dir = optarg;
@@ -233,10 +231,7 @@ parse_args(int argc, char* argv[]) {
       soc_mode = true;
       break;
     case 203:
-      soc_sram_lat = std::stoul(optarg);
-      break;
-    case 204:
-      soc_sdram_single_lat = std::stoul(optarg);
+      sram_lat = std::stoul(optarg);
       break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
@@ -419,9 +414,9 @@ main(int argc, char** argv) {
   pipeSim::Processor* proc = &(*core);
 
   auto sdram = std::make_unique<memSim::RAMArbiter>(
-    "SDRAM", mem_latency, mem_bstlat,
+    "SDRAM", sdram_lat, sdram_burst_lat,
     std::vector<CacheBase*>({icache.get(), dcache.get()}),
-    soc_mode, soc_sram_lat, soc_sdram_single_lat);
+    soc_mode, sram_lat);
   icache->set_mem_port(sdram.get());
   dcache->set_mem_port(sdram.get());
   CpuSideAckReceiver cpu_ack = [proc](auto t) { proc->ack_mem_avail(t); };
