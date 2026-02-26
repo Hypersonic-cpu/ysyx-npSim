@@ -5,6 +5,7 @@
 #include "defines/base.hh"
 #include "defines/interface.hh"
 #include "defines/types.hh"
+#include "defines/mode_ctrl.hh"
 #include <cassert>
 #include <string>
 #include <vector>
@@ -43,13 +44,12 @@ public:
   RAMArbiter(const std::string& name, tint_t sdram_lat,
              tint_t sdram_burst_lat,
              const std::vector<Cache*>& hosts,
-             bool soc_mode = false, tint_t sram_lat = 1)
+             tint_t sram_lat = 1)
       : ClockedObject(name, nullptr)
       , r_serving_id_{(uint16_t)-1}
       , w_serving_id_{(uint16_t)-1}
       , sdram_lat_(sdram_lat)
       , sdram_burst_lat_(sdram_burst_lat)
-      , soc_mode_(soc_mode)
       , sram_lat_(sram_lat)
       , r_busy_until_(InfTime)
       , w_busy_until_(InfTime)
@@ -63,13 +63,12 @@ public:
   config_json() const override {
     json j;
     j["type"] = "RAMArbiter";
-    j["soc_mode"] = soc_mode_;
     j["sdram_lat"] = sdram_lat_;
     j["sdram_burst_lat"] = sdram_burst_lat_;
-    if (soc_mode_)
+    if (g_soc_mode)
       j["sram_lat"] = sram_lat_;
     j["num_hosts"] = hosts_.size();
-    j["area"] = area::comb_only(200.0);
+    j["area"] = area::area_json(200.0);
     return j;
   }
 
@@ -101,7 +100,7 @@ private:
   inline tint_t
   lat_of(MemTrans* req) const {
     assert(req->bst_len >= 1);
-    if (soc_mode_ && (isSRAM(req->addr) || isCLINT(req->addr)))
+    if (g_soc_mode && (isSRAM(req->addr) || isCLINT(req->addr)))
       return sram_lat_;
     return sdram_lat_ + (req->bst_len - 1) * sdram_burst_lat_;
   }
@@ -113,7 +112,6 @@ private:
 
   tint_t const sdram_lat_;
   tint_t const sdram_burst_lat_;
-  bool const soc_mode_;
   tint_t const sram_lat_;
   tick_t r_busy_until_;
   tick_t w_busy_until_;

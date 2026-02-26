@@ -24,13 +24,15 @@ Output goes to `areaout/<mirror_of_simout_path>/area_comp.json`.
 Each `SimObject` in npSim exposes an `"area"` field in its `config_json()`.
 This field has three parts:
 
-- **`timing_area`** — known area from DFF-based structures (e.g., pipeline
-  registers), in um².
+- **`known_area`** — fixed area from RTL synthesis or design estimates (um²),
+  e.g. Pipeline core = 14000 um², BranchUnit combinational wrapper = 500 um².
+- **`timing_bits`** — DFF bit count for register-based structures; area is
+  computed as `timing_bits × 5 um²/bit` (NanGate 45nm DFF_X1).
 - **`comb_percent`** — fraction of total area that is combinational logic
-  (used to scale up: `total = (timing + sram) / (1 - comb_percent)`).
+  (used to scale up: `total = (known_area + dff_area + sram_area) / (1 - comb_percent)`).
 - **`cacti_objs`** — list of SRAM-like structures to estimate via CACTI.
-  Each object specifies `type` (cache or ram), `size`, `block_size`/`word_size`,
-  and `assoc`.
+  Each object specifies `type` (`"sram"`), `size`, and either `block_size`/`assoc`
+  (cache mode) or `word_size` (RAM mode).
 
 The Python script `area_est.py` reads the config JSON, generates CACTI
 input files for each SRAM object, runs CACTI, and aggregates the results.
@@ -40,28 +42,17 @@ input files for each SRAM object, runs CACTI, and aggregates the results.
 The area estimation pipeline has five stages spread across four files.
 Each stage produces an artifact consumed by the next:
 
-```
-scripts/sweep_{a,b,c}.sh   (1. Run simulation)
-        │
-        ▼
-src/main.cc                 (2. Emit conf.json with area descriptors)
-        │
-        ▼
-area/est-json.sh            (3. Shell wrapper: map paths, invoke Python)
-        │
-        ▼
-area/area_est.py            (4. Generate CACTI configs, run CACTI, aggregate)
-        │
-        ▼
-visual/plot_sweeps.py       (5. Load area_comp.json, plot)
-```
+1. Run simulation (`./build/npsim.elf` or `python3 scripts/sweep_2d.py`)
+2. Emit `conf.json` with area descriptors
+3. Shell wrapper `area/est-json.sh`: map paths, invoke Python `area/area_est.py`
+4. Generate CACTI configs, run CACTI, aggregate
+5. Load `area_comp.json`, analyze using `visual/analyze.py`
 
-### Stage 1 — Simulation (`scripts/sweep_{a,b,c}.sh`)
+### Stage 1 — Simulation (`scripts/sweep_2d.py`)
 
-Sweep scripts launch npSim with `--outdir sweep_X/<tag>` across
-parameter combinations (cache size × line size × assoc, BP type ×
-prefetcher, dCache config × supply mode). Each run produces
-`simout/sweep_X/<tag>/{conf,stats}.json`. The `--dry-run` flag can
+`sweep_2d.py` launches npSim across a Cartesian product of two parameter axes
+defined in a config file from `scripts/sweep_configs/`. Each run produces
+`simout/<outdir>/<tag>/{conf,stats}.json`. The `--dry-run` flag can
 skip the simulation loop and emit only `conf.json` for area-only
 experiments.
 
@@ -71,13 +62,14 @@ Before the simulation loop, `collect_config_json(simlist)` calls
 `config_json()` on every SimObject. Each object appends an `"area"`
 sub-object built with helpers from `src/areaSim/AreaEst.hh`:
 
-- `area::comb_only(um2)` — pure-logic components (Pipeline=14000,
-  SDRAM arbiter=200, BranchUnit=500).
-- `area::cacti_cache(label, size, block, assoc)` — cache descriptor
-  forwarded to CACTI in cache mode.
-- `area::cacti_ram(label, size, word)` — RAM descriptor for small
-  tables (BPU counters, BTB entries).
-- `area::dff_area_um2(bits)` — inline DFF area (StoreBuffer).
+- `area::area_json(known_um2)` — pure-logic / STA-fixed components
+  (Pipeline core = 14000 um², SDRAM arbiter = 200 um², BranchUnit = 500 um²).
+- `area::area_json(known_um2, dff_bits, comb_percent)` — components with
+  DFF bit counts (StoreBuffer: `entries × 72` bits).
+- `area::sram_cache(label, size, block, assoc)` — cache SRAM descriptor
+  forwarded to CACTI in cache mode (iCache, dCache).
+- `area::sram_ram(label, size, word)` — RAM descriptor for small tables
+  (BPU counter tables, BTB entries).
 
 The resulting JSON is written to `simout/<outdir>/conf.json`.
 
@@ -91,11 +83,11 @@ invokes `area_est.py --conf-json <path> --outdir <areaout_path>`.
 
 For each component in the config JSON:
 
-1. Extract `area.timing_area`, `area.comb_percent`, and each element
-   of `area.cacti_objs`.
+1. Extract `area.known_area`, `area.timing_bits`, `area.comb_percent`, and each
+   element of `area.cacti_objs`.
 2. For each SRAM object, call `estimate_sram()` which tries methods
    in order (see "CACTI Fallback Chain" below).
-3. Compute total: `(timing_area + sram_total) / (1 - comb_percent)`.
+3. Compute total: `(known_area + timing_bits×5um² + sram_total) / (1 - comb_percent)`.
 4. Write per-component breakdown to `areaout/.../area_comp.json`.
 
 CACTI is invoked as a subprocess from `libs/cacti/cacti` (must be
@@ -104,77 +96,60 @@ outputs data/tag array areas in mm², which the script converts to um².
 The bus width is set to 32 bits for caches (one RV32 word per access)
 and to `word_size × 8` for RAM tables.
 
-### Stage 5 — Visualization (`visual/plot_sweeps.py`)
+### Stage 5 — Visualization (`visual/analyze.py`)
 
-Loads `area_comp.json` files via `load_area(sweep, tag)`. Component
-names from JSON (e.g. `BimodalBP`, `GShareBP`, `BranchUnit`) are
-mapped to plot categories (Core, iCache, BPU, BTB, StBuf/dC,
-Prefetcher, SDRAM) via the `COMP_TO_CAT` dict. Produces heatmaps
-(total area by config), stacked composition bars (component breakdown),
-and timing-vs-area plots.
+Loads `area_comp.json` files from `areaout/` alongside `stats.json`
+from `simout/`. Produces IPC vs area scatter plots, component breakdown
+bars, and sweep comparison tables.
 
 ## Estimation Method per Component
 
 | Component | Method | Details |
 |-----------|--------|---------|
-| Pipeline (Core) | Fixed | 14000 um² from RTL synthesis (comb_percent=0) |
-| iCache / dCache | CACTI cache | Data + tag arrays. comb_percent=0.15 |
-| StoreBuffer | DFF | entries × 72 bits × 5 um²/bit. comb_percent=0.3 |
-| BimodalBP | CACTI ram or DFF | Counter table (entries × 1 byte) |
-| GShareBP | CACTI ram or DFF | Counter table + shift register |
-| TournamentBP | CACTI ram or DFF | Three tables (meta + local + global) |
-| CompressedBTB | CACTI ram or DFF | entries × 9 bytes |
-| BranchUnit | Fixed | 500 um² combinational wrapper |
-| RAMArbiter (SDRAM) | Fixed | 200 um² combinational arbiter |
-| Prefetchers | Fixed | 0 um² (combinational only, negligible) |
+| Pipeline (Core) | Fixed (`known_area`) | 14000 um² from RTL synthesis |
+| iCache / dCache | CACTI cache or analytical | Data + tag arrays. `comb_percent=0.15` |
+| StoreBuffer | DFF (`timing_bits`) | `entries × 72 bits × 5 um²/bit`. `comb_percent=0.3` |
+| BimodalBP | CACTI RAM or analytical | Counter table (`entries × 2 bits`). `comb_percent=0.3` |
+| GShareBP | CACTI RAM or analytical | Counter table + `history_len` DFF bits |
+| TournamentBP | CACTI RAM or analytical | Three 2-bit counter tables (meta + local + global) |
+| CompressedBTB | CACTI RAM or analytical | `entries × 9 bytes`. `comb_percent=0.2` |
+| BranchUnit | Fixed (`known_area`) | 500 um² combinational wrapper |
+| RAMArbiter (SDRAM) | Fixed (`known_area`) | 200 um² combinational arbiter |
+| Prefetchers | Fixed (0 um²) | Combinational only, negligible |
 
 ## CACTI Fallback Chain
 
-For each SRAM object, the script tries four methods in order:
+For each SRAM object, the script tries two approaches in order:
 
-1. **CACTI cache mode** — generates a `.cfg` with the exact cache parameters
-   (size, block size, associativity). Most accurate: CACTI models data and
-   tag arrays together with proper decoder/mux overhead. Requires roughly
-   ≥32 cache lines. Only attempted for `type: "cache"` objects.
+1. **CACTI mode** — generates a `.cfg` with the exact parameters.
+   - **Cache mode** (`block_size` + `assoc` present): models data and tag
+     arrays together. Requires the cache to be ≥ `CACTI_MIN_BYTES` (128 B).
+   - **RAM mode** (`word_size` only): models a flat RAM table. Tries
+     progressively smaller word sizes (word, word/2, word/4, 8B, 4B) until
+     CACTI finds a valid subarray organization (≥16 entries required).
 
-2. **Split data + tag** — when cache mode fails (typically for small caches
-   with large lines, e.g. 1kB/32B = 32 lines), the data array is modeled
-   as a CACTI RAM (word size = 4 bytes) and the tag array is estimated
-   analytically using a 6T SRAM cell model (0.346 um²/cell, 55% array
-   efficiency). This correctly captures the tag overhead difference between
-   line sizes (fewer lines → fewer tags → less area). Only attempted for
-   `type: "cache"` objects.
+2. **Analytical 6T SRAM cell model** — used when CACTI fails or the
+   structure is below `CACTI_MIN_BYTES`.
+   - **Cache objects**: data array + tag array, both estimated with the
+     6T cell model (0.346 um²/cell, 55% array efficiency).
+   - **RAM objects**: data bits only (no tags).
+   This method is marked `"mode": "sram_analytical"` in the output.
 
-3. **CACTI ram mode** — models the structure as a flat RAM. Tries
-   progressively smaller word sizes (block/2, block/4, 8B, 4B) until CACTI
-   finds enough entries. Used for non-cache structures (BPU tables, BTB).
-
-4. **DFF estimate** — last resort for structures smaller than 128 bytes or
-   when all CACTI modes fail. Uses 5 um²/bit, which is accurate for
-   flip-flop-based register files but overestimates for SRAM. Values using
-   this method are marked with `(*)` in plots.
+**DFF area** is not a fallback for SRAM — it is a separate term computed
+from `timing_bits` (register-based structures declared by the component).
+`timing_bits × 5 um²/bit` (NanGate 45nm DFF_X1).
 
 ### When does each method get used?
 
-CACTI needs a minimum number of entries (~16–32) to find a valid
-subarray organization. The cache mode additionally needs enough lines
-for a valid tag array. Key factor: `lines = size / block_size`.
-
-| Cache Config | Lines | Method |
-|-------------|-------|--------|
-| 4kB / 8B–64B line | 64–512 | CACTI cache |
-| 1kB / 8B–16B line | 64–128 | CACTI cache |
-| 1kB / 32B–64B line | 16–32 | Split data+tag (tag too small for CACTI) |
-| 512B / 8B–16B line | 32–64 | CACTI cache |
-| 512B / 32B–64B line | 8–16 | Split data+tag |
-| 256B / any line | 4–32 | Split data+tag |
-| BTB (144B, word=9B) | 16 | CACTI ram (word=4B or 8B) |
-| BPU table (< 128B) | — | DFF (*) |
-
-The split_data_tag method uses CACTI RAM for the data array (accurate)
-and analytical 6T SRAM for the tag array (within ~25% of CACTI).
-
-Structures below `CACTI_MIN_BYTES` (128B) skip CACTI entirely and use DFF.
+| Component / Config | Method |
+|--------------------|--------|
+| iCache / dCache ≥ 128B | CACTI cache (or analytical if CACTI fails) |
+| iCache / dCache < 128B | Analytical 6T SRAM (data + tag) |
+| BTB (e.g. 144B, 9B/entry) | CACTI RAM (word=4B) |
+| BPU counter table ≥ 128B | CACTI RAM |
+| BPU counter table < 128B | Analytical 6T SRAM (data only) |
+| StoreBuffer | DFF: `entries × 72 bits × 5 um²/bit` |
+| Pipeline core | Fixed 14000 um² (from RTL synthesis) |
 
 ## Output Format
 
@@ -182,20 +157,26 @@ Structures below `CACTI_MIN_BYTES` (128B) skip CACTI entirely and use DFF.
 
 ```json
 {
+  "source": "simout/my_run/conf.json",
+  "technology_nm": 45,
+  "model": "CACTI 7.0 (45nm); analytical 6T SRAM fallback; DFF via timing_bits",
   "total_area_um2": 25938.0,
   "total_area_mm2": 0.025938,
   "components": [
     {
       "name": "iCache",
       "total_um2": 8944.0,
-      "timing_area_um2": 0.0,
+      "known_area_um2": 0.0,
+      "dff_area_um2": 0.0,
       "sram_area_um2": 7602.7,
       "comb_area_um2": 1341.3,
       "sram_details": {
         "sram": {
           "data_um2": 6094.4,
           "tag_um2": 1508.3,
-          "total_um2": 7602.7
+          "total_um2": 7602.7,
+          "obj_type": "sram_cache",
+          "mode": "cacti_cache"
         }
       }
     }
@@ -203,10 +184,8 @@ Structures below `CACTI_MIN_BYTES` (128B) skip CACTI entirely and use DFF.
 }
 ```
 
-When ram fallback is used, `sram_details` includes `"mode": "ram_fallback"`.
-When split data+tag is used, it includes `"mode": "split_data_tag"` with
-separate `data_um2` and `tag_um2` (analytical).
-When DFF is used, it includes `"dff_fallback": true`.
+When CACTI fails and the analytical model is used, `sram_details` includes
+`"mode": "sram_analytical"` with separate `data_um2` and `tag_um2` fields.
 
 ## Files
 

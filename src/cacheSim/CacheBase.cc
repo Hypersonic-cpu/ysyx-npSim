@@ -121,7 +121,7 @@ PipeCache::config_json() const {
 
   json ar;
   ar["comb_percent"] = 0.15;
-  ar["timing_area"] = 0.0;
+  ar["known_area"] = 0.0;
   ar["timing_bits"] = 0;
   ar["cacti_objs"] = json::array({
     area::sram_cache("sram", size(), blksize(), assoc())

@@ -18,7 +18,7 @@ using trace::MemStore;
 
 Pipeline::Pipeline(const std::string& name, size_t ifq_size,
                    size_t stq_size, BranchUnit* bpu,
-                   tick_t br_mis_pen, bool soc_mode)
+                   tick_t br_mis_pen)
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}
@@ -30,7 +30,6 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size,
     , ifq_size_{ifq_size}
     , fetch_queue_{}
     , ongoing_insts_{0}
-    , soc_mode_{soc_mode}
     , BranchMissPenalty{br_mis_pen} {
   assert(bpu && "BranchUnit must not be null");
 }
@@ -49,7 +48,7 @@ Pipeline::update_impl() {
       std::invoke(stage_handler_.at(i), this);
     }
   }
-  try_issue_fetch();
+  do_fetch_0();
   calc_sched();
 }
 
@@ -73,7 +72,7 @@ Pipeline::update_impl() {
 //  T+2+penalty: First correct-path fetch issues to iCache.
 //
 void
-Pipeline::try_issue_fetch() {
+Pipeline::do_fetch_0() {
   while (imem->is_ready().first
          && fetch_queue_.size() < ifq_size_) {
     TransPtr candidate = nullptr;
@@ -159,7 +158,7 @@ Pipeline::do_fetch_1() {
     return;
   }
   if (ptr->is_wrong_path) {
-    if (soc_mode_) {
+    if (g_soc_mode) {
       // SoC: IDU drains wrong-path entries at 1/cycle,
       // freeing IFQ slots for new wrong-path fetches.
       fetch_queue_.pop_front();

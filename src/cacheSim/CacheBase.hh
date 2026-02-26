@@ -13,10 +13,8 @@
 #include <bit>
 #include <cassert>
 #include <cstddef>
-#include <filesystem>
 #include <list>
 #include <memory>
-#include <queue>
 #include <utility>
 #include <vector>
 
@@ -297,7 +295,7 @@ public:
     json j;
     j["type"] = "NoCache";
     j["size"] = 0;
-    j["area"] = area::comb_only(0.0);
+    j["area"] = area::area_json(0.0);
     return j;
   }
 
@@ -353,12 +351,12 @@ public:
     j["type"] = "StoreBuffer";
     j["entries"] = entries;
     // Each entry: 32-bit addr + 32-bit data + 8-bit mask = 72 bits → DFF
-    json ar;
-    ar["comb_percent"] = 0.3;
-    ar["timing_area"] = 0.0;
-    ar["timing_bits"] = entries * 72;
-    ar["cacti_objs"] = json::array();
-    j["area"] = ar;
+    j["area"] = area::area_json(0.0, entries * 72, 0.3);
+    // ar["comb_percent"] = 0.3;
+    // ar["known_area"] = 0.0;
+    // ar["timing_bits"] = entries * 72;
+    // ar["cacti_objs"] = json::array();
+     // = ar;
     return j;
   }
 

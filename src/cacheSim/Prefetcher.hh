@@ -53,7 +53,7 @@ public:
 
   json
   config_json() const override {
-    return json{{"area", area::comb_only(0.0)}};
+    return json{{"area", area::area_json(0.0)}};
   }
 };
 
