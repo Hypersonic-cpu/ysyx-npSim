@@ -122,22 +122,41 @@ PipeCache::config_json() const {
   json ar;
   ar["comb_percent"] = 0.15;
   ar["known_area"] = 0.0;
-  ar["timing_bits"] = 0;
-  ar["cacti_objs"] = json::array({
-    area::sram_cache("sram", size(), blksize(), assoc())
-  });
+
+  if (sram_dff_) {
+    size_t data_bits = size() * 8;
+    size_t idx_bits = floorLog2(sets_);
+    size_t tag_bits = 32 - offsetBits_ - idx_bits;
+    size_t tagv_per_line = tag_bits + 1;
+    size_t total_tagv = sets_ * assoc_ * tagv_per_line;
+    ar["timing_bits"] = data_bits + total_tagv;
+    ar["cacti_objs"] = json::array();
+  } else {
+    ar["timing_bits"] = 0;
+    ar["cacti_objs"] = json::array({
+      area::sram_cache("sram", size(), blksize(), assoc())
+    });
+  }
+
   j["area"] = ar;
   return j;
 }
 
 void
-PipeCache::handle_hit(const PipePtr& bk) {
+PipeCache::handle_hit(const PipePtr& bk, bool immediate) {
   auto is_read = bk->mop == Read;
   word_t& dt =
     is_read ? bk->line->atAligned(offsetOf(bk->addr)) : bk->wrdata;
   blocked_until_ = curr_tick() + 1;
   if (is_read) {
-    cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
+    if (immediate) {
+      // Fill replay: respond now (RTL missServe bypasses C3 mux)
+      cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
+    } else {
+      // Normal hit: defer 1 cycle (RTL C3 word-select stage)
+      sched_hit_time_ = curr_tick() + 1;
+      sched_hit_resp_ = {bk->addr, dt, cache_id_, Read};
+    }
   } else {
     auto mask = CacheBase::strbExtend(bk->wrstrb);
     dt = (~mask & dt) | (mask & bk->wrdata);
@@ -167,47 +186,61 @@ PipeCache::recv_mem_resp(MemTransPtr trans) {
 
 void
 PipeCache::update_impl() {
+  // Deliver deferred hit response (C3 word-select delay)
+  if (sched_hit_time_ <= curr_tick()) {
+    cpu_resp_recv_(sched_hit_resp_);
+    sched_hit_time_ = InfTime;
+  }
+
   // NOTE: Memory response must come before cache update
   // is_waiting_ is cleared on mem resp
   // Serve target
   if (const auto& bk = pipe_.back()) {
-    // Deferred tag lookup: do access() here instead of at read_req
-    // to match RTL SyncReadMem timing and avoid pipe-aliasing false
-    // misses.
+    bool spec_miss = false;
     if (bk->line == nullptr) {
-      bk->line = access(bk->addr);
-    }
-    // NOTE: Control whether write back or not using `dirty` but not valid.
-    // Is replay -> valid
-    assert(!is_replay_ || bk->line->isValid());
-    bool was_miss = is_replay_;
-    is_replay_ = false;
-    if (bk->line->isValid()) {
-      handle_hit(bk);
-      // Trigger prefetch after access (only reads, and only if no
-      // outstanding memory request)
-      if (bk->mop == Read && !r_waiting_) {
-        handle_prefetch(bk->addr, !was_miss);
+      if (bk->speculative && !probe(bk->addr)) {
+        // Speculative (wrong-path): miss without allocation.
+        // Respond immediately; do not fill from memory.
+        // No cache stall — wrong-path misses don't block the pipe.
+        ++stats.accesses;
+        ++stats.misses;
+        cpu_resp_recv_({bk->addr, 0, cache_id_, Read});
+        spec_miss = true;
+      } else {
+        bk->line = access(bk->addr);
       }
+    }
+    if (spec_miss) {
+      pipe_.back().reset();
     } else {
-      // Model RTL flowing→memreq state transition: the AXI AR
-      // request fires one cycle after the miss is detected.
-      if (!pending_fill_req_) {
-        pending_fill_req_ = true;
-        blocked_until_ = curr_tick() + 1;
+      assert(!is_replay_ || bk->line->isValid());
+      bool was_miss = is_replay_;
+      is_replay_ = false;
+      if (bk->line->isValid()) {
+        handle_hit(bk, was_miss);
+        if (bk->mop == Read && !r_waiting_) {
+          handle_prefetch(bk->addr, !was_miss);
+        }
+      } else {
+        // Model RTL flowing→memreq state transition: the AXI AR
+        // request fires one cycle after the miss is detected.
+        if (!pending_fill_req_) {
+          pending_fill_req_ = true;
+          blocked_until_ = curr_tick() + 1;
+          return;
+        }
+        pending_fill_req_ = false;
+        mem_side_->recv_req(std::make_unique<MemTrans>(
+          Req, Read, bk->addr, cache_id_,
+          static_cast<uint16_t>(lineBytes_ / sizeof(word_t))));
+
+        if (bk->line->isDirty()) {
+          // Dirty eviction: write-back not yet implemented
+        }
+        r_waiting_ = true;
+        is_replay_ = true;
         return;
       }
-      pending_fill_req_ = false;
-      mem_side_->recv_req(std::make_unique<MemTrans>(
-        Req, Read, bk->addr, cache_id_,
-        static_cast<uint16_t>(lineBytes_ / sizeof(word_t))));
-
-      if (bk->line->isDirty()) {
-        // Dirty eviction: write-back not yet implemented
-      }
-      r_waiting_ = true;
-      is_replay_ = true;
-      return;
     }
   }
   // Flush cache, next cycle available
@@ -235,11 +268,19 @@ PipeCache::update_impl() {
   // (willShift block) + T+2 (access+pending) + T+3 (AR) = 1 extra.
   if (pipe_.back() && pipe_.back()->line == nullptr
       && !probe(pipe_.back()->addr)) {
-    // Do the full tag lookup now (same cycle as RTL's tag compare)
-    pipe_.back()->line = access(pipe_.back()->addr);
-    pending_fill_req_ = true;
-    blocked_until_ = curr_tick() + 1;
-    return;
+    if (pipe_.back()->speculative) {
+      // Speculative miss: respond immediately, don't allocate
+      // No cache stall — wrong-path misses don't block the pipe.
+      ++stats.accesses;
+      ++stats.misses;
+      cpu_resp_recv_({pipe_.back()->addr, 0, cache_id_, Read});
+      pipe_.back().reset();
+    } else {
+      pipe_.back()->line = access(pipe_.back()->addr);
+      pending_fill_req_ = true;
+      blocked_until_ = curr_tick() + 1;
+      return;
+    }
   }
 
   is_shifted_ = true;
@@ -284,14 +325,22 @@ PipeCache::handle_prefetch(addr_t addr, bool is_hit) {
 
 void
 PipeCache::read_req(addr_t addr) {
-  // A single CPU-side port should never issue 2 requests in the same cycle
-  // Also not allowed when pipe is not shifted
   DPRINTF(Cache, "Recv READ Req @ %u", addr);
   assert(is_shifted_);
   assert(pipe_.front() == nullptr);
-  // Defer tag lookup to when entry reaches pipe back (matches RTL
-  // SyncReadMem timing and avoids pipe-aliasing false misses).
   auto req = std::make_unique<CachePipeEntry>(addr, nullptr, Read);
+  pipe_.front() = std::move(req);
+  blocked_until_ = curr_tick() + 1;
+  is_shifted_ = false;
+}
+
+void
+PipeCache::read_req_speculative(addr_t addr) {
+  DPRINTF(Cache, "Recv READ Req (spec) @ %u", addr);
+  assert(is_shifted_);
+  assert(pipe_.front() == nullptr);
+  auto req = std::make_unique<CachePipeEntry>(addr, nullptr, Read);
+  req->speculative = true;
   pipe_.front() = std::move(req);
   blocked_until_ = curr_tick() + 1;
   is_shifted_ = false;
@@ -322,6 +371,18 @@ PipeCache::flush_all() {
   pending_flush_ = true;
 }
 
+size_t
+PipeCache::flush_speculative() {
+  size_t count = 0;
+  for (auto& entry : pipe_) {
+    if (entry && entry->speculative) {
+      entry.reset();
+      ++count;
+    }
+  }
+  return count;
+}
+
 void
 PipeCache::handle_flush() {
   DPRINTF(Cache, "Flush All");
@@ -340,6 +401,7 @@ PipeCache::handle_flush() {
   w_waiting_ = false;
   pending_flush_ = false;
   pending_fill_req_ = false;
+  sched_hit_time_ = InfTime;
   blocked_until_ = curr_tick() + 1;
 }
 

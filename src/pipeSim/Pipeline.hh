@@ -182,7 +182,7 @@ public:
     json j;
     j["BranchPenaltyCycles"] = BranchMissPenalty;
     j["IFQSize"] = ifq_size_;
-    j["area"] = area::area_json(14000.0);
+    j["area"] = area::area_json(15917.0);
     return j;
   }
 
@@ -315,11 +315,23 @@ private:
   StallCause stall_cause_{NoInst};
   tick_t reset_tick_{0};
   bool in_br_recovery_{false};
+  tick_t brmiss_attr_end_{0};
 
   void
   flush_stall_cycles(tick_t until) {
     if (until <= last_attr_tick_)
       return;
+    if (stall_cause_ == BrMispred
+        && until > brmiss_attr_end_
+        && brmiss_attr_end_ > last_attr_tick_) {
+      auto gap1 = brmiss_attr_end_ - last_attr_tick_;
+      stats.brmiss_stall += gap1;
+      auto gap2 = until - brmiss_attr_end_;
+      stats.noinst += gap2;
+      stall_cause_ = NoInst;
+      last_attr_tick_ = until;
+      return;
+    }
     auto gap = until - last_attr_tick_;
     switch (stall_cause_) {
     case LsuStall:
@@ -328,11 +340,11 @@ private:
     case RAW:
       stats.raw_stall += gap;
       break;
+    case BrMispred:
+      stats.brmiss_stall += gap;
+      break;
     default:
-      if (in_br_recovery_)
-        stats.brmiss_stall += gap;
-      else
-        stats.noinst += gap;
+      stats.noinst += gap;
       break;
     }
     last_attr_tick_ = until;

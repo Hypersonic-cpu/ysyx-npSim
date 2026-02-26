@@ -33,6 +33,7 @@ class CacheBase : public ClockedObject {
     return (x != 0) && ((x & (x - 1)) == 0);
   }
 
+protected:
   inline static size_t
   floorLog2(size_t x) {
     assert(x > 0);
@@ -123,10 +124,11 @@ public:
   // Read / write channel ready
   virtual auto is_ready() const -> std::pair<bool, bool> = 0;
   virtual void flush_all() = 0;
+  virtual size_t flush_speculative() { return 0; }
   virtual void read_req(addr_t addr) = 0;
+  virtual void read_req_speculative(addr_t addr) { read_req(addr); }
   virtual void write_req(addr_t addr, word_t data, uint8_t mask) = 0;
   virtual void recv_mem_resp(MemTransPtr trans) = 0;
-  // virtual void memw_resp(addr_t addr) = 0;
 
   void
   set_cpu_side_handlers(CpuSideMRespReceiver recv, CpuSideAckReceiver ack) {
@@ -198,11 +200,12 @@ public:
   explicit PipeCache(const std::string& name, CPU* host, size_t pipe_depth,
                      size_t size_bytes, size_t line_bytes, size_t assoc = 1,
                      std::shared_ptr<Prefetcher> prefetcher = nullptr,
-                     uint16_t cache_id = 0)
+                     uint16_t cache_id = 0, bool sram_dff = true)
       : CacheBase(name, host, size_bytes, line_bytes, assoc, prefetcher,
                   cache_id)
       , pipe_(pipe_depth)
       , pipe_depth_{pipe_depth}
+      , sram_dff_{sram_dff}
       , r_waiting_{false}
       , w_waiting_{false}
       , is_shifted_{true}
@@ -219,10 +222,12 @@ public:
 
   bool handle_prefetch(addr_t addr, bool is_hit) override;
   void read_req(addr_t addr) override;
+  void read_req_speculative(addr_t addr) override;
   void write_req(addr_t addr, word_t data, uint8_t mask) override;
   void recv_mem_resp(MemTransPtr trans) override;
 
   void flush_all() override;
+  size_t flush_speculative() override;
 
   // SimObject interface
   json config_json() const override;
@@ -230,8 +235,8 @@ public:
   tick_t
   next_update() const override {
     if (r_waiting_ && !pending_fill_req_)
-      return InfTime;
-    return blocked_until_;
+      return sched_hit_time_;  // may still need to deliver deferred hit
+    return std::min(blocked_until_, sched_hit_time_);
   }
   void update_impl() override;
 
@@ -243,14 +248,16 @@ protected:
     MemRWOpt mop;
     uint8_t wrstrb;
     word_t wrdata;
+    bool speculative{false};
   };
   using PipePtr = std::unique_ptr<CachePipeEntry>;
 
-  void handle_hit(const PipePtr& req);
+  void handle_hit(const PipePtr& req, bool immediate = false);
   void handle_flush();
 
   std::vector<PipePtr> pipe_;
   size_t pipe_depth_;
+  bool sram_dff_;
   bool r_waiting_;
   bool w_waiting_;
   bool is_shifted_;
@@ -259,6 +266,9 @@ protected:
   // Model RTL flowing→memreq state: defer memory request by 1 cycle
   bool pending_fill_req_{false};
   tick_t blocked_until_;
+  // Deferred hit response (models RTL C3 word-select stage)
+  tick_t sched_hit_time_{InfTime};
+  CpuTrans sched_hit_resp_{};
 };
 
 /**
