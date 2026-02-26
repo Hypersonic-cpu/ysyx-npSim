@@ -85,6 +85,7 @@ static size_t stbuf_entries = 2;
 static tick_t br_mis_pen = 1; // Cycles from EX flush until first fetch
 static std::string ipf_type = "none"; // iCache prefetcher type
 static std::string dpf_type = "none"; // dCache prefetcher type
+static bool sram_dff = true;          // Area model: DFF or SRAM macro
 
 // Dummy physical memory stubs (active mode: caches don't read data)
 void
@@ -137,6 +138,8 @@ parse_args(int argc, char* argv[]) {
     {"print-none", no_argument, 0, 200U},
     {"npc-mode", no_argument, 0, 202U},
     {"sram-lat", required_argument, 0, 203U},
+    {"sram-dff", no_argument, 0, 204U},
+    {"sram-lib", no_argument, 0, 205U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -223,6 +226,12 @@ parse_args(int argc, char* argv[]) {
       break;
     case 203:
       sram_lat = std::stoul(optarg);
+      break;
+    case 204:
+      sram_dff = true;
+      break;
+    case 205:
+      sram_dff = false;
       break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
@@ -375,8 +384,8 @@ main(int argc, char** argv) {
   auto icache = std::make_unique<cacheSim::PipeCache>(
     "iCache",
     /* host */ core.get(),
-    /* pipe depth */ 2, l1i_size, l1i_blksize, l1i_assoc, ipf,
-    /* cache ID */ 0);
+    /* pipe depth */ 3, l1i_size, l1i_blksize, l1i_assoc, ipf,
+    /* cache ID */ 0, sram_dff);
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
     std::shared_ptr<cacheSim::Prefetcher> dpf = nullptr;
@@ -391,7 +400,7 @@ main(int argc, char** argv) {
       "dCache",
       /* host */ core.get(),
       /* pipe depth */ 2, l1d_size, l1d_blksize, l1d_assoc, dpf,
-      /* cache ID */ 1);
+      /* cache ID */ 1, sram_dff);
   } else {
     if (stbuf_entries == 0) {
       dcache = std::make_unique<cacheSim::NoCache>("dNoCache",

@@ -19,8 +19,8 @@ CACTI_BIN = CACTI_DIR / "cacti"
 TECH_UM = 0.045
 TECH_NM = 45
 
-# NanGate 45nm DFF_X1: ~5 um² per bit
-DFF_PER_BIT = 5.0
+# NanGate 45nm DFF_X1: calibrated against yosys-sta synthesis
+DFF_PER_BIT = 5.226
 
 # 6T SRAM cell model at 45nm (analytical fallback when CACTI is unavailable)
 SRAM_CELL_UM2 = 0.346   # 6T cell area

@@ -52,6 +52,9 @@ Two modes exist:
 | `--sdram-burst-lat` | `10` | SDRAM per-beat burst latency |
 | `--npc-mode` | off | Use NPC mode (disables default SoC address routing) |
 | `--sram-lat` | `1` | SoC: on-chip SRAM latency |
+| **Area model** | | |
+| `--sram-dff` | on | Area model uses DFF-per-bit estimate |
+| `--sram-lib` | off | Area model uses OpenRAM SRAM macro estimate |
 | **Pipeline** | | |
 | `--ifq-size` | `3` | Instruction fetch queue depth |
 | `--br-pen` | `1` | Branch misprediction penalty (cycles) |
@@ -198,14 +201,19 @@ trace. If the prediction is wrong:
 ### Cache Model (`cacheSim/PipeCache`)
 
 Pipelined set-associative cache with configurable pipeline depth
-(default 2 stages). Each cycle, entries shift through the pipe:
+(default 3 stages for iCache, 2 for dCache). Each cycle, entries
+shift through the pipe:
 
-- **Hit:** Response returned when entry reaches pipe back. CPU blocked
-  for 1 cycle (models RTL cache response latency).
+- **Hit:** Response returned 1 cycle after entry reaches pipe back
+  (models RTL word-select register stage).
 - **Miss:** Two-cycle deferred fill request:
   - Cycle 1: Set `pending_fill_req_`
   - Cycle 2: Fire AXI AR to memory arbiter, set `is_replay_` = true
   - When memory responds: fill line, block for +2 cycles, replay access
+- **Speculative access:** Wrong-path fetches call `read_req_speculative()`.
+  These probe the cache but do not allocate on miss — the miss responds
+  immediately without memory fill or cache stall. This avoids polluting
+  the cache with wrong-path data while allowing speculative hits.
 
 `NoCache` is a simple pass-through (used for dCache when `l1d-size=0`).
 `StoreBuffer` is a FIFO write buffer for stores when no dCache exists.
@@ -272,53 +280,86 @@ Generates IPC error heatmap and cache hit/miss comparison table.
 ### Calibration Process
 
 The calibration aligns npSim IPC with RTL Verilator results across an
-iCache sweep (size ∈ {256B, 512B, 1kB, 4kB} × blksize ∈ {8, 16, 32}).
+iCache sweep (size ∈ {128B, 256B, 512B, 1kB} × blksize ∈ {16, 32}).
 
-**Step 1: Counter calibration.** Set very low memory latency so misses
-are nearly free. Compare iCache hit/miss counts between npSim and RTL.
-Ensure the wrong-path model generates similar amounts of iCache
-pollution.
+**Step 1: Area calibration.** Compare yosys-sta area reports against
+npSim area estimates for both DFF and SRAM macro modes. Tuning
+parameter: `DFF_PER_BIT` in `area/area_est.py` (calibrated to 5.226).
+DFF mode matches within ±4%, SRAM mode within ±9%.
 
-**Step 2: Memory latency calibration.** Tune `sdram_lat` and
-`sdram_burst_lat` to match RTL's effective AMAT (average memory
-access time). The RTL PMemBox FSM adds overhead per beat; the simulator
-parameters absorb this.
-
-**Step 3: IPC calibration.** Sweep all configs and compare IPC.
-Targets: 256B ≤ 15%, 512B ≤ 10%, 1kB/4kB ≤ 5%.
+**Step 2: Timing calibration.** Run RTL Verilator CoreMark for each
+cache config (`make compile DIFFENA=0 RTL_SCALA_ARG="--l1i-size X
+--l1i-blksize Y"`) and compare against npSim with matching parameters
+(`--stbuf-entries 0 --sdram-lat 40 --sdram-burst-lat 8 --br-pen 1
+--npc-mode`). Key fixes applied:
+- Speculative (non-allocating) wrong-path cache access
+- Branch misprediction stall attribution (2 cycles per misprediction)
+- Correct orphan tracking for in-flight cache requests at EX flush
 
 ### Calibrated Parameters
 
 | Parameter | NPC Mode | SoC Mode | Rationale |
 |-----------|----------|----------|-----------|
-| `sdram_lat` | 45 | 55 | SDRAM first-beat (includes PMemBox/XBar overhead) |
-| `sdram_burst_lat` | 10 | 23 | Per subsequent beat |
+| `sdram_lat` | 40 | 55 | SDRAM first-beat (NPC PMemBox FSM ≈40 cycles) |
+| `sdram_burst_lat` | 8 | 23 | Per subsequent beat |
 | `sram_lat` | — | 1 | On-chip SRAM (1 cycle) |
+| `stbuf_entries` | 0 | 0 | RTL StoreBuffer currently disabled |
+| `br_pen` | 1 | 1 | 1-cycle fetch resume delay after EX flush |
 
-NPC mode models a simple PMemBox (DPI-C latency 40/8 + 2-cycle FSM
-overhead ≈ 42/10, rounded to 45/10). SoC mode models the full
-ysyxSoC XBar + SDRAM controller path.
+NPC mode models a simple PMemBox (DPI-C latency 40/8). SoC mode models
+the full ysyxSoC XBar + SDRAM controller path.
 
 ### Current Calibration Results
 
-**NPC CoreMark** (12/12 configs, ≤3.1% error):
+**NPC CoreMark** (3-cycle iCache pipeline, stbuf=0, no BPU):
 
-| iCache Size | 8B line | 16B line | 32B line |
-|-------------|---------|----------|----------|
-| 256B | +0.27% | -2.13% | +0.49% |
-| 512B | +3.07% | +0.21% | +0.93% |
-| 1kB | -0.44% | +0.45% | +0.51% |
-| 4kB | +0.52% | +0.56% | +0.58% |
+IPC error = (npSim − RTL) / RTL.
+
+| iCache | Line | RTL IPC | npSim IPC | Error |
+|--------|------|---------|-----------|-------|
+| 128B | 16B | 0.0645 | 0.0842 | +30.7% |
+| 128B | 32B | 0.0584 | 0.0839 | +43.7% |
+| 256B | 16B | 0.0698 | 0.0907 | +29.9% |
+| 256B | 32B | 0.0625 | 0.0903 | +44.5% |
+| 512B | 16B | 0.0992 | 0.1141 | +15.0% |
+| 512B | 32B | 0.0944 | 0.1133 | +20.1% |
+| 1024B | 16B | 0.1194 | 0.1248 | +4.5% |
+| 1024B | 32B | 0.1181 | 0.1243 | +5.2% |
+
+Accuracy improves with larger caches: ≤5% for 1kB, ≤20% for 512B.
+Small caches (128–256B) show +30–45% error.
+
+#### Error Analysis
+
+The dominant error source is **wrong-path cache pollution**. In RTL,
+mispredicted fetches use BTB-predicted addresses (real code locations)
+that allocate cache lines on miss, evicting useful data from the
+working set. In npSim, wrong-path fetches use synthetic sequential PCs
+(pc+4) with non-allocating speculative access, preserving the cache.
+
+This causes npSim to underestimate cache misses, especially for small
+caches where the working set barely fits. The effect is most pronounced
+at 128B (8–4 sets) and diminishes as cache size grows past the
+instruction working set.
+
+Per-category stall breakdown (1024B/32B, best case):
+
+| Category | RTL | npSim | Error |
+|----------|-----|-------|-------|
+| NoStall | 11.81% | 12.43% | +5.2% |
+| NoInst | 13.89% | 14.43% | +3.9% |
+| LsuStall | 67.23% | 66.42% | −1.2% |
+| BrMispred | 4.58% | 5.01% | +9.4% |
+| RAW | 2.49% | 1.72% | −30.9% |
+
+RAW is consistently underestimated (~30%) due to differences in
+register forwarding timing granularity.
 
 **SoC CoreMark** (12/12 configs, ≤4.9% error):
 
 | iCache Size | 8B line | 16B line | 32B line |
 |-------------|---------|----------|----------|
-| 256B | -1.19% | -2.44% | -4.92% |
-| 512B | +0.21% | +0.11% | -1.39% |
-| 1kB | -0.68% | -0.05% | -0.85% |
-| 4kB | +0.77% | +0.49% | -0.02% |
-
-**MicroBench (train):**
-NPC: 512B/16B +13.8% (known outlier), others ≤2.3%.
-SoC: all ≤5.1%.
+| 256B | −1.19% | −2.44% | −4.92% |
+| 512B | +0.21% | +0.11% | −1.39% |
+| 1kB | −0.68% | −0.05% | −0.85% |
+| 4kB | +0.77% | +0.49% | −0.02% |

@@ -139,7 +139,10 @@ Pipeline::do_fetch_0() {
     // Send iCache read request
     [[maybe_unused]] auto const [rdy, _] = imem->is_ready();
     assert(rdy);
-    imem->read_req(candidate->trace_inst.pc);
+    if (candidate->is_wrong_path)
+      imem->read_req_speculative(candidate->trace_inst.pc);
+    else
+      imem->read_req(candidate->trace_inst.pc);
     fetch_queue_.emplace_back(std::move(candidate));
   }
 }
@@ -266,8 +269,10 @@ Pipeline::do_execute() {
         }
       }
       fetch_queue_.clear();
-      // Clear wrong-path state
       in_wrong_path_ = false;
+      // Speculative entries still in the cache pipe won't respond;
+      // subtract them from orphan count.
+      orphan_icache_resps_ -= imem->flush_speculative();
       // Keep input_buffer_ — it holds a valid trace instruction
       // that should be re-fetched after the recovery stall.
 
@@ -275,10 +280,9 @@ Pipeline::do_execute() {
       // redirect and issue first correct-path fetch
       fetch_resume_tick_ = curr_tick() + BranchMissPenalty;
 
-      // End branch-recovery attribution at EX flush.  RTL only
-      // counts the flush+redirect cycles as BranchMispred; any
-      // subsequent iCache stall is NoInst.
-      flush_stall_cycles(curr_tick() + BranchMissPenalty);
+      // Stall attribution: the actual BranchMispred cycles appear
+      // when the branch commits at WB (see do_writeback).
+      flush_stall_cycles(curr_tick());
       in_br_recovery_ = false;
     }
   }
@@ -385,10 +389,17 @@ Pipeline::do_writeback() {
   flush_stall_cycles(curr_tick());
   stats.nostall++;
   last_attr_tick_ = curr_tick() + 1;
-  if (sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem)
+
+  auto* trans = sim_pipe_.at(Memory).get();
+  if (trans->br_mispred) {
+    stall_cause_ = BrMispred;
+    brmiss_attr_end_ = curr_tick() + 1 + 2;
+  } else if (sim_pipe_.at(Execute)
+             && sim_pipe_.at(Execute)->wait_mem) {
     stall_cause_ = LsuStall;
-  else
+  } else {
     stall_cause_ = NoInst;
+  }
 
   stats.insts++;
   stats.cycles = curr_tick() - reset_tick_;
