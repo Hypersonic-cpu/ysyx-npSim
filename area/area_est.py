@@ -2,7 +2,7 @@
 """Parse npSim config JSON, estimate area, output area composition.
 
 SRAM area is estimated via CACTI (NanGate 45nm) or analytical 6T cell model.
-DFF (timing_bits) and STA (timing_area) use the NanGate 45nm DFF_X1 constant.
+DFF (timing_bits) and STA (known_area) use the NanGate 45nm DFF_X1 constant.
 """
 
 import argparse
@@ -148,20 +148,6 @@ def run_cacti(cfg_path):
     }
 
 
-def _tag_area_analytical(size, block, assoc):
-    # Kept for potential future use; not called by estimate_sram any more.
-    SRAM_CELL_UM2 = 0.346
-    SRAM_EFFICIENCY = 0.55
-    num_sets = size // (block * assoc)
-    num_lines = size // block
-    off_bits = int(math.log2(block)) if block > 1 else 0
-    idx_bits = int(math.log2(num_sets)) if num_sets > 1 else 0
-    tag_bits_per_line = max(32 - off_bits - idx_bits, 1) + 2
-    total_tag_bits = num_lines * tag_bits_per_line
-    area = total_tag_bits * SRAM_CELL_UM2 / SRAM_EFFICIENCY
-    return round(area, 1), total_tag_bits
-
-
 def estimate_sram(name, label, obj, outdir):
     """Estimate SRAM area for one cacti_obj descriptor.
 
@@ -242,9 +228,9 @@ def estimate_component(name, conf, outdir):
     if area_conf is None:
         return {"name": name, "total_um2": 0.0}
 
-    timing_area = area_conf.get("timing_area", 0.0)
+    known_area = area_conf.get("known_area", 0.0)
     # timing_bits: DFF bit count emitted by C++ (process-agnostic).
-    # Backward compat: old JSONs have DFF area baked into timing_area already,
+    # Backward compat: old JSONs have DFF area baked into known_area already,
     # so timing_bits defaults to 0 and has no effect on old-format files.
     timing_bits = area_conf.get("timing_bits", 0)
     dff_area = timing_bits * DFF_PER_BIT
@@ -260,7 +246,7 @@ def estimate_component(name, conf, outdir):
         sram_details[label] = detail
         sram_total += area_um2
 
-    seq_total = timing_area + dff_area  # all sequential/logic area
+    seq_total = known_area + dff_area  # all sequential/logic area
     total = seq_total + sram_total
     if comb_pct > 0 and total > 0:
         total = total / (1.0 - comb_pct)
@@ -268,7 +254,7 @@ def estimate_component(name, conf, outdir):
     return {
         "name": name,
         "total_um2": round(total, 1),
-        "timing_area_um2": round(timing_area, 1),
+        "known_area_um2": round(known_area, 1),
         "dff_area_um2": round(dff_area, 1),
         "sram_area_um2": round(sram_total, 1),
         "comb_area_um2": round(total - seq_total - sram_total, 1),

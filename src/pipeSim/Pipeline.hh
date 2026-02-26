@@ -15,7 +15,6 @@
 #include <cstdint>
 #include <list>
 #include <memory>
-#include <queue>
 #include <string>
 #include <utility>
 
@@ -176,14 +175,14 @@ public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
                     size_t stq_size, BranchUnit* bpu,
-                    tick_t br_mis_pen = 1, bool soc_mode = false);
+                    tick_t br_mis_pen = 1);
 
   json
   config_json() const override {
     json j;
     j["BranchPenaltyCycles"] = BranchMissPenalty;
     j["IFQSize"] = ifq_size_;
-    j["area"] = area::comb_only(14000.0);
+    j["area"] = area::area_json(14000.0);
     return j;
   }
 
@@ -216,7 +215,7 @@ public:
     input_buffer_ = std::move(trans);
     DPRINTF(Pipeline, "FeedInst PC=0x%08x Remain %lu", inst.pc,
             ongoing_insts_);
-    try_issue_fetch();
+    do_fetch_0();
   }
 
   bool
@@ -269,8 +268,8 @@ protected:
 
   using stage_t = void (Pipeline::*)();
 
-  void try_issue_fetch();
-  void do_fetch_1(); // IFQ → Decode
+  void do_fetch_0();
+  void do_fetch_1();
   void do_decode();
   void do_execute();
   void do_memory();
@@ -278,8 +277,7 @@ protected:
 
   void handle_lsu_resp();
   void handle_ifu_resp();
-  void send_lsu_req(addr_t addr, word_t data, uint8_t strb,
-                    bool is_write);
+  void send_lsu_req(addr_t addr, word_t data, uint8_t strb, bool is_write);
   void update_reg_time(uint8_t rd, tick_t when);
 
   void
@@ -324,8 +322,12 @@ private:
       return;
     auto gap = until - last_attr_tick_;
     switch (stall_cause_) {
-    case LsuStall: stats.lsu_stall += gap; break;
-    case RAW: stats.raw_stall += gap; break;
+    case LsuStall:
+      stats.lsu_stall += gap;
+      break;
+    case RAW:
+      stats.raw_stall += gap;
+      break;
     default:
       if (in_br_recovery_)
         stats.brmiss_stall += gap;
@@ -353,7 +355,7 @@ private:
   // wrong-path PCs until the branch reaches EX (flush_at_tick_).
   // At that tick, the IFQ is flushed and IFU redirects.
   bool in_wrong_path_{false};
-  addr_t wrong_path_pc_{0};  // Next wrong-path PC to fetch
+  addr_t wrong_path_pc_{0}; // Next wrong-path PC to fetch
 
   // SoC mode: IDU drains completed wrong-path IFQ entries at
   // 1/cycle, freeing slots for new wrong-path fetches.  This
@@ -363,7 +365,6 @@ private:
   // NPC mode (soc_mode_=false): wrong-path entries stay in IFQ
   // until EX flushes, limiting total wrong-path fetches to
   // IFQ_SIZE.  This matches NPC RTL's lower memory latency.
-  bool soc_mode_;
 
   // After EX flush, IFU needs BranchMissPenalty cycles before
   // issuing the first correct-path fetch.

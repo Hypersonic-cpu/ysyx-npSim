@@ -56,7 +56,6 @@ set_global_tick(tick_t t) noexcept {
 //   SoC mode: SDRAM via XBar + controller; SRAM is on-chip (fast)
 static tint_t sdram_lat = 45;       // SDRAM first-beat latency
 static tint_t sdram_burst_lat = 10; // SDRAM per-beat burst latency
-static bool soc_mode = false;
 static tint_t sram_lat = 1;         // SoC: on-chip SRAM latency
 static std::string trace_file;
 // RTL: iCacheConf(32, 1024, 16, 1) → 1KB, 16B line, direct-mapped
@@ -80,6 +79,7 @@ static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
 static size_t ifq_size = 3; // RTL FetchStage PipeDepth=3
+// FIXME: Remove this. NoCache means no buffer
 static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 2;
 static tick_t br_mis_pen = 1; // Cycles from EX flush until first fetch
@@ -120,8 +120,6 @@ parse_args(int argc, char* argv[]) {
     {"max-insts", required_argument, 0, 'n'},
     {"max-ticks", required_argument, 0, 'N'},
     {"debug-flags", required_argument, 0, 'd'},
-    {"mem-lat", required_argument, 0, 'M'},
-    {"mem-bstlat", required_argument, 0, 'm'},
     {"sdram-lat", required_argument, 0, 'M'},
     {"sdram-burst-lat", required_argument, 0, 'm'},
     {"outdir", required_argument, 0, 'O'},
@@ -131,15 +129,13 @@ parse_args(int argc, char* argv[]) {
     {"btb-size", required_argument, 0, 't'},
     {"use-ras", no_argument, 0, 'R'},
     {"ifq-size", required_argument, 0, 'q'},
-    {"stq-size", required_argument, 0, 'w'},
     {"stbuf-entries", required_argument, 0, 'Z'},
     {"br-pen", required_argument, 0, 'X'},
-    {"pf-count", required_argument, 0, 'Y'},
-    {"ipf", required_argument, 0, 'P'},
-    {"dpf", required_argument, 0, 'p'},
+    {"l1i-pref", required_argument, 0, 'P'},
+    {"l1d-pref", required_argument, 0, 'p'},
     {"print-brief", no_argument, 0, 201U},
     {"print-none", no_argument, 0, 200U},
-    {"socmode", no_argument, 0, 202U},
+    {"npc-mode", no_argument, 0, 202U},
     {"sram-lat", required_argument, 0, 203U},
     {0, 0, 0, 0}};
 
@@ -204,17 +200,12 @@ parse_args(int argc, char* argv[]) {
     case 'q':
       ifq_size = std::stoul(optarg);
       break;
-    case 'w':
-      stq_size = std::stoul(optarg);
-      break;
     case 'Z':
       stbuf_entries = std::stoul(optarg);
       break;
     case 'X':
       br_mis_pen = std::stoul(optarg);
       break;
-    case 'Y':
-      break; // reserved (was pf_count)
     case 'P':
       ipf_type = optarg;
       break;
@@ -228,7 +219,7 @@ parse_args(int argc, char* argv[]) {
       print_mode = 0;
       break;
     case 202:
-      soc_mode = true;
+      g_soc_mode = false;
       break;
     case 203:
       sram_lat = std::stoul(optarg);
@@ -367,10 +358,10 @@ main(int argc, char** argv) {
 
   // When dCache exists, no need for store queue (write-through)
   // Only use store queue when NoCache (need buffering for SDRAM)
+  // FIXME:
   size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
-    "Core", ifq_size, actual_stq_size, branch_unit.get(), br_mis_pen,
-    soc_mode);
+    "Core", ifq_size, actual_stq_size, branch_unit.get(), br_mis_pen);
 
   std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
   if (ipf_type == "nextline") {
@@ -415,8 +406,7 @@ main(int argc, char** argv) {
 
   auto sdram = std::make_unique<memSim::RAMArbiter>(
     "SDRAM", sdram_lat, sdram_burst_lat,
-    std::vector<CacheBase*>({icache.get(), dcache.get()}),
-    soc_mode, sram_lat);
+    std::vector<CacheBase*>({icache.get(), dcache.get()}), sram_lat);
   icache->set_mem_port(sdram.get());
   dcache->set_mem_port(sdram.get());
   CpuSideAckReceiver cpu_ack = [proc](auto t) { proc->ack_mem_avail(t); };
@@ -446,8 +436,8 @@ main(int argc, char** argv) {
   }
 
   TraceReader reader(trace_file.c_str());
-  TraceSanitizer sanitizer;  // windowed (resets with SysResetStats)
-  TraceSanitizer sanitizer_all;  // cumulative (never resets)
+  TraceSanitizer sanitizer;     // windowed (resets with SysResetStats)
+  TraceSanitizer sanitizer_all; // cumulative (never resets)
 
   // NOTE: Bottom-up order. Mem -> Cache -> CPU
   const std::vector<ClockedObject*> devlist{sdram.get(), dcache.get(),

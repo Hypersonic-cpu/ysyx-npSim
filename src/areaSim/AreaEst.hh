@@ -7,14 +7,24 @@ namespace area {
 using json = nlohmann::ordered_json;
 
 /** Build an area JSON node for a component whose area comes entirely from
-    STA (timing_area_um2) and has no SRAM macros or explicit DFF counts.
-    timing_bits defaults to 0 and timing_area is process-calibrated from STA. */
+    STA (known_area_um2) and has no SRAM macros or explicit DFF counts.
+    timing_bits defaults to 0 and known_area is process-calibrated from STA. */
 inline json
-comb_only(double timing_area_um2) {
+area_json(double known_um2) {
   json j;
+  j["known_area"] = known_um2;
   j["comb_percent"] = 0.0;
-  j["timing_area"] = timing_area_um2;
   j["timing_bits"] = 0;
+  j["cacti_objs"] = json::array();
+  return j;
+}
+
+inline json
+area_json(double known_um2, size_t dff_bits, double comb_percent) {
+  json j;
+  j["known_area"] = known_um2;
+  j["comb_percent"] = comb_percent;
+  j["timing_bits"] = dff_bits;
   j["cacti_objs"] = json::array();
   return j;
 }

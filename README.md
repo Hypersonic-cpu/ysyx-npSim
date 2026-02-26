@@ -5,6 +5,12 @@ cache hierarchy, branch predictor, and memory model. It produces
 cycle-approximate performance metrics (IPC, miss rates, stall breakdowns)
 calibrated against the NPC RTL within a few percent.
 
+TODOs:
+- [x] Calibrate SoC mode with RTL on Microbench and CoreMark.
+- [ ] Manual stats check (cache access, mispred etc) with RTL.
+- [ ] Remove ACTIVE_MODE compile option. Isolate from npc/.
+- [ ] Fix false `NoCache` logic.
+
 ## Building
 
 Requires **clang++-22** with **libc++** and C++23 support.
@@ -44,7 +50,7 @@ Two modes exist:
 | **Memory** | | |
 | `--sdram-lat` | `45` | SDRAM first-beat latency (cycles) |
 | `--sdram-burst-lat` | `10` | SDRAM per-beat burst latency |
-| `--socmode` | off | Enable SoC mode (address-based latency routing) |
+| `--npc-mode` | off | Use NPC mode (disables default SoC address routing) |
 | `--sram-lat` | `1` | SoC: on-chip SRAM latency |
 | **Pipeline** | | |
 | `--ifq-size` | `3` | Instruction fetch queue depth |
@@ -54,24 +60,31 @@ Two modes exist:
 | `--max-ticks` | ∞ | Stop after N ticks |
 | `--debug-flags` | — | Comma-separated debug flags |
 
-### NPC Mode (default)
+### SoC Mode (default)
 
-```bash
-./build/npsim.elf tests/coremark-npc-cal2.nptr.zst \
-  --l1i-size 1kB --l1i-blksize 16 --l1i-assoc 1 \
-  --l1d-size 0 --bpu-type none --stbuf-entries 0 --br-pen 1 \
-  --sdram-lat 45 --sdram-burst-lat 10 --ifq-size 3 \
-  --outdir my-run
-```
-
-### SoC Mode
+SoC mode is enabled by default. It routes memory requests through
+address-based latency classification (SRAM vs SDRAM), matching the
+ysyxSoC XBar + SDRAM controller path.
 
 ```bash
 ./build/npsim.elf tests/coremark-soc-cal.nptr.zst \
   --l1i-size 1kB --l1i-blksize 16 --l1i-assoc 1 \
   --l1d-size 0 --bpu-type none --stbuf-entries 0 --br-pen 1 \
   --sdram-lat 55 --sdram-burst-lat 23 --sram-lat 1 \
-  --socmode --ifq-size 3 --outdir my-soc-run
+  --ifq-size 3 --outdir my-soc-run
+```
+
+### NPC Mode
+
+Pass `--npc-mode` to disable SoC address routing and use a flat SDRAM
+latency model, matching the NPC Verilator setup (PMemBox backend).
+
+```bash
+./build/npsim.elf tests/coremark-npc-cal2.nptr.zst \
+  --l1i-size 1kB --l1i-blksize 16 --l1i-assoc 1 \
+  --l1d-size 0 --bpu-type none --stbuf-entries 0 --br-pen 1 \
+  --sdram-lat 45 --sdram-burst-lat 10 --ifq-size 3 \
+  --npc-mode --outdir my-run
 ```
 
 ## Generating Traces
@@ -81,11 +94,14 @@ containing PC, memory address, register indices, branch outcome, and
 system-ops (reset/dump stats).
 
 ```bash
-cd $AM_HOME/../benchmarks/coremark
-make ARCH=riscv32e-nemu mainargs="" NEMUFLAGS="-b --nptr $(pwd)/build/coremark.nptr.zst" run
+cd $AM_BENCH/coremark
+# Use the same binary as RTL.
+make ARCH=riscv32e-ysyxsoc mainargs="" insert-arg
+# Emulate with proper device config. (-b must go first)
+$NEMU_HOME/build/riscv32-nemu-interpreter -b IMAGE_FILE_PATH --nptr OUTPUT_FILE.nptr.zst
 ```
 
-For MicroBench, set `mainargs="train"` (or `"test"`).
+For MicroBench, set `mainargs="train"` (or `"test"`). For NPC mode, use `ARCH=riscv32e-npc`.
 
 ## Module Layout
 
@@ -104,8 +120,9 @@ src/
 ├── branchSim/
 │   ├── BranchPred.hh        BranchUnit + predictor variants
 │   └── BranchPred.cc        Bimodal, GShare, Tournament, NoBPU, …
-├── areaSim/AreaEst.hh       Chip area estimation helpers
+├── areaSim/AreaEst.hh       area_json() / sram_cache() / sram_ram() helpers
 └── defines/
+    ├── mode_ctrl.{cc,hh}    g_soc_mode global (default: true = SoC)
     ├── base.hh              SimObject / ClockedObject base classes
     ├── types.hh             addr_t, word_t, tick_t, tint_t
     ├── interface.hh         CpuTrans, AckTrans, MemTrans
@@ -205,10 +222,13 @@ Higher-indexed hosts have higher priority (dCache > iCache).
 For a single-beat access (e.g., LSU word load), burst_len = 1, so
 total = `sdram_lat`.
 
-In **SoC mode**, addresses are classified:
+In **SoC mode** (default), addresses are classified:
 - `isSRAM(addr)`: 0x0f000000–0x0fffffff → `sram_lat` (1 cycle)
 - `isCLINT(addr)`: 0x02000000–0x0200ffff → `sram_lat` (1 cycle)
 - Everything else (SDRAM): standard burst formula
+
+**NPC mode** (`--npc-mode`) disables address routing; all accesses use
+the SDRAM burst formula regardless of address.
 
 ### Memory Port Contention
 

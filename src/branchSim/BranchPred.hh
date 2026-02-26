@@ -37,10 +37,10 @@ public:
     // Each entry: pc_tag(32) + target(32) + valid(1) + type(2) = 67 bits ≈ 9B
     size_t entry_bytes = 9;
     size_t total = table_.size() * entry_bytes;
-    json ar;
-    ar["comb_percent"] = 0.2;
-    ar["timing_area"] = 0.0;
-    ar["timing_bits"] = 0;
+    json ar = area::area_json(0.0, 0, 0.2);
+    // ar["comb_percent"] = 0.2;
+    // ar["known_area"] = 0.0;
+    // ar["timing_bits"] = 0;
     ar["cacti_objs"] = json::array({
       area::sram_ram("btb", total, entry_bytes)
     });
@@ -161,7 +161,7 @@ public:
                      addr_t tar_pred);
   json
   config_json() const override {
-    return json{{"area", area::comb_only(0.0)}};
+    return json{{"area", area::area_json(0.0)}};
   }
 };
 
@@ -182,7 +182,7 @@ public:
     size_t total_bytes = (table_.size() * 2 + 7) / 8;
     json ar;
     ar["comb_percent"] = 0.3;
-    ar["timing_area"] = 0.0;
+    ar["known_area"] = 0.0;
     ar["timing_bits"] = 0;
     ar["cacti_objs"] = json::array({
       area::sram_ram("bpu_table", total_bytes, 1)
@@ -261,7 +261,7 @@ public:
     size_t total_bytes = (table_.size() * 2 + 7) / 8;
     json ar;
     ar["comb_percent"] = 0.3;
-    ar["timing_area"] = 0.0;
+    ar["known_area"] = 0.0;
     ar["timing_bits"] = history_len_;  // global history shift register = DFF
     ar["cacti_objs"] = json::array({
       area::sram_ram("bpu_table", total_bytes, 1)
@@ -298,7 +298,7 @@ public:
     size_t total_bytes = (table_bits + 7) / 8;
     json ar;
     ar["comb_percent"] = 0.3;
-    ar["timing_area"] = 0.0;
+    ar["known_area"] = 0.0;
     ar["timing_bits"] = history_len_;  // global history shift register = DFF
     ar["cacti_objs"] = json::array({
       area::sram_ram("bpu_table", total_bytes, 1)
@@ -334,7 +334,7 @@ public:
 
   json
   config_json() const override {
-    return json{{"entries", 0}, {"area", area::comb_only(0.0)}};
+    return json{{"entries", 0}, {"area", area::area_json(0.0)}};
   }
 
   addr_t
@@ -467,7 +467,7 @@ public:
     j["bpu_config"] = bpu_->config_json();
     j["btb"] = btb_->name();
     j["btb_config"] = btb_->config_json();
-    j["area"] = area::comb_only(500.0);
+    j["area"] = area::area_json(500.0);
     return j;
   }
 
