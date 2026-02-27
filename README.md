@@ -292,46 +292,44 @@ DFF mode and SRAM mode both match within ±2.1%.
 
 **Step 2: Timing calibration.** Run RTL Verilator CoreMark for each
 cache config (`make compile DIFFENA=0 RTL_SCALA_ARG="--l1i-size X
---l1i-blksize Y"`) and compare against npSim with matching parameters
-(`--stbuf-entries 0 --sdram-lat 42 --sdram-burst-lat 10 --br-pen 1
---ifq-size 9 --npc-mode`). Key fixes applied:
+--l1i-blksize Y"`) and compare against npSim with matching parameters.
+Key model behaviors:
 - Allocating wrong-path cache access (matches RTL iCache behavior)
 - No iCache pipe flush on branch misprediction (wrong-path fills complete)
-- IFQ size 9 calibrates effective wrong-path pollution budget
-- PMemBox FSM overhead: +2 cycles per beat (sdram_lat=42, burst_lat=10)
+- IFQ size matches RTL FetchStage PipeDepth+1
 
 ### Calibrated Parameters
 
 | Parameter | NPC Mode | SoC Mode | Rationale |
 |-----------|----------|----------|-----------|
-| `sdram_lat` | 42 | 55 | PMemBox: MemLatency(40) + 2 FSM cycles |
-| `sdram_burst_lat` | 10 | 23 | PMemBox: MemBstLat(8) + 2 FSM cycles |
+| `sdram_lat` | 43 | 51 | Calibrated to match RTL CoreMark IPC |
+| `sdram_burst_lat` | 16 | 24 | Calibrated to match RTL CoreMark IPC |
 | `sram_lat` | — | 1 | On-chip SRAM (1 cycle) |
 | `stbuf_entries` | 0 | 0 | RTL StoreBuffer currently disabled |
 | `br_pen` | 1 | 1 | 1-cycle fetch resume delay after EX flush |
-| `ifq_size` | 9 | 3 | Wrong-path pollution budget (NPC) / pipe depth (SoC) |
+| `ifq_size` | 4 | 3 | RTL FetchStage PipeDepth+1 |
 
-NPC mode models a simple PMemBox (DPI-C latency 40/8 + 2-cycle FSM
-overhead per beat). SoC mode models the ysyxSoC XBar + SDRAM path.
+NPC mode models a simple PMemBox (DPI-C memory). SoC mode models
+the ysyxSoC XBar + SDRAM controller path.
 
 ### Current Calibration Results
 
-**NPC CoreMark IPC** (3-cycle iCache, stbuf=0, no BPU, sdram=42/10, ifq=9):
+**NPC CoreMark IPC** (3-cycle iCache, stbuf=0, no BPU, sdram=43/16, ifq=4):
 
 IPC error = (npSim − RTL) / RTL.
 
 | iCache | Line | RTL IPC | npSim IPC | Error |
 |--------|------|---------|-----------|-------|
-| 128B | 16B | 0.0645 | 0.0621 | −3.6% |
-| 128B | 32B | 0.0584 | 0.0576 | −1.4% |
-| 256B | 16B | 0.0698 | 0.0698 | −0.1% |
-| 256B | 32B | 0.0625 | 0.0655 | +4.8% |
-| 512B | 16B | 0.0992 | 0.0975 | −1.7% |
-| 512B | 32B | 0.0944 | 0.0936 | −0.8% |
-| 1024B | 16B | 0.1194 | 0.1182 | −1.0% |
-| 1024B | 32B | 0.1181 | 0.1172 | −0.7% |
+| 128B | 16B | 0.0645 | 0.0632 | −2.0% |
+| 128B | 32B | 0.0584 | 0.0589 | +0.9% |
+| 256B | 16B | 0.0698 | 0.0700 | +0.3% |
+| 256B | 32B | 0.0625 | 0.0647 | +3.4% |
+| 512B | 16B | 0.0992 | 0.0993 | +0.1% |
+| 512B | 32B | 0.0944 | 0.0956 | +1.2% |
+| 1024B | 16B | 0.1194 | 0.1170 | −2.0% |
+| 1024B | 32B | 0.1181 | 0.1150 | −2.6% |
 
-All 8 configs within ±4.8%.
+All 8 configs within ±3.4%.
 
 **NPC Area** (DFF mode, `--sram-dff`):
 
@@ -381,17 +379,23 @@ The dominant IPC error source is **wrong-path cache pollution**. In RTL,
 mispredicted fetches go through the real iCache pipeline, allocate cache
 lines on miss, and are NOT flushed from the iCache pipe on branch
 misprediction. npSim models this with allocating wrong-path accesses
-(IFQ size 9 calibrates the effective pollution budget).
+(IFQ size matches RTL FetchStage PipeDepth+1).
 
-The 256B/32B config shows the highest error (+4.8%) because with only
-8 sets, wrong-path entries at sequential PCs mostly HIT within the same
-32B line, causing less pollution than RTL's actual wrong-path behavior.
+The 256B/32B config shows the highest NPC error (+3.4%) because with
+only 8 sets, wrong-path entries at sequential PCs mostly HIT within
+the same 32B line, causing less pollution than RTL's actual behavior.
 
-**SoC CoreMark** (12/12 configs, ≤4.9% error):
+**SoC CoreMark IPC** (sdram=51/24, sram=1, ifq=3):
 
-| iCache Size | 8B line | 16B line | 32B line |
-|-------------|---------|----------|----------|
-| 256B | −1.19% | −2.44% | −4.92% |
-| 512B | +0.21% | +0.11% | −1.39% |
-| 1kB | −0.68% | −0.05% | −0.85% |
-| 4kB | +0.77% | +0.49% | −0.02% |
+| iCache | Line | RTL IPC | npSim IPC | Error |
+|--------|------|---------|-----------|-------|
+| 128B | 16B | 0.0516 | 0.0501 | −2.8% |
+| 128B | 32B | 0.0468 | 0.0469 | +0.3% |
+| 256B | 16B | 0.0582 | 0.0568 | −2.4% |
+| 256B | 32B | 0.0526 | 0.0544 | +3.3% |
+| 512B | 16B | 0.1025 | 0.1012 | −1.3% |
+| 512B | 32B | 0.0943 | 0.0914 | −3.0% |
+| 1024B | 16B | 0.1267 | 0.1244 | −1.8% |
+| 1024B | 32B | 0.1197 | 0.1163 | −2.8% |
+
+All 8 configs within ±3.3%.
