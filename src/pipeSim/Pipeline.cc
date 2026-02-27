@@ -140,7 +140,7 @@ Pipeline::do_fetch_0() {
     [[maybe_unused]] auto const [rdy, _] = imem->is_ready();
     assert(rdy);
     if (candidate->is_wrong_path)
-      imem->read_req_speculative(candidate->trace_inst.pc);
+      imem->read_req(candidate->trace_inst.pc);
     else
       imem->read_req(candidate->trace_inst.pc);
     fetch_queue_.emplace_back(std::move(candidate));
@@ -272,7 +272,9 @@ Pipeline::do_execute() {
       in_wrong_path_ = false;
       // Speculative entries still in the cache pipe won't respond;
       // subtract them from orphan count.
-      orphan_icache_resps_ -= imem->flush_speculative();
+      // RTL iCache pipe is NOT flushed on branch misprediction.
+      // Wrong-path entries continue processing (fills allocate).
+      // orphan_icache_resps_ -= imem->flush_speculative();
       // Keep input_buffer_ — it holds a valid trace instruction
       // that should be re-fetched after the recovery stall.
 

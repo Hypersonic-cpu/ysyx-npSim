@@ -151,17 +151,26 @@ def run_cacti(cfg_path):
 def estimate_sram(name, label, obj, outdir):
     """Estimate SRAM area for one cacti_obj descriptor.
 
-    Supports two type values (and legacy names for backward compatibility):
+    Supports three type values:
+      "sram_macro"  →  hard macro with known bit dimensions; area computed
+                       directly via analytical 6T cell model (matches .lib).
       "sram" / "cache" / "ram"  →  SRAM macro (SyncReadMem in RTL)
         - has block_size + assoc  → CACTI cache mode
         - has word_size only      → CACTI RAM mode
         Falls back to analytical 6T SRAM cell model if CACTI unavailable.
-        Never falls back to DFF (DFF is only for explicitly declared timing_bits).
-
-    The CACTI minimum is CACTI_MIN_BYTES; below that, CACTI is skipped and
-    the analytical model is used directly.
     """
     t = obj.get("type", "sram")
+
+    if t == "sram_macro":
+        total_bits = obj["total_bits"]
+        area = total_bits * SRAM_CELL_UM2 / SRAM_EFFICIENCY
+        return area, {
+            "obj_type": "sram_macro",
+            "mode": "analytical_6T",
+            "bits": total_bits,
+            "area_um2": round(area, 1),
+        }
+
     size = obj["size"]
     if size < 1:
         return 0.0, {}
@@ -246,10 +255,13 @@ def estimate_component(name, conf, outdir):
         sram_details[label] = detail
         sram_total += area_um2
 
-    seq_total = known_area + dff_area  # all sequential/logic area
-    total = seq_total + sram_total
-    if comb_pct > 0 and total > 0:
-        total = total / (1.0 - comb_pct)
+    seq_total = known_area + dff_area
+    if comb_pct > 0 and seq_total > 0:
+        logic_total = seq_total / (1.0 - comb_pct)
+    else:
+        logic_total = seq_total
+    comb_area = logic_total - seq_total
+    total = logic_total + sram_total
 
     return {
         "name": name,
@@ -257,7 +269,7 @@ def estimate_component(name, conf, outdir):
         "known_area_um2": round(known_area, 1),
         "dff_area_um2": round(dff_area, 1),
         "sram_area_um2": round(sram_total, 1),
-        "comb_area_um2": round(total - seq_total - sram_total, 1),
+        "comb_area_um2": round(comb_area, 1),
         "sram_details": sram_details,
     }
 
