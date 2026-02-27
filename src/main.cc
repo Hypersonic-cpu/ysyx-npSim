@@ -54,8 +54,8 @@ set_global_tick(tick_t t) noexcept {
 // Memory latency parameters
 //   NPC mode: SDRAM via PMemBox (DPI-C 40/8 + 2-cycle FSM overhead)
 //   SoC mode: SDRAM via XBar + controller; SRAM is on-chip (fast)
-static tint_t sdram_lat = 45;       // SDRAM first-beat latency
-static tint_t sdram_burst_lat = 10; // SDRAM per-beat burst latency
+static tint_t sdram_lat = 42;       // PMemBox: MemLatency(40) + 2 FSM cycles
+static tint_t sdram_burst_lat = 10; // PMemBox: MemBstLat(8) + 2 FSM cycles
 static tint_t sram_lat = 1;         // SoC: on-chip SRAM latency
 static std::string trace_file;
 // RTL: iCacheConf(32, 1024, 16, 1) → 1KB, 16B line, direct-mapped
@@ -78,10 +78,10 @@ static bool use_ras = false;
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
-static size_t ifq_size = 3; // RTL FetchStage PipeDepth=3
+static size_t ifq_size = 9; // Wrong-path pollution budget (calibrated)
 // FIXME: Remove this. NoCache means no buffer
 static size_t stq_size = 8; // Only used when dCache is NoCache
-static size_t stbuf_entries = 2;
+static size_t stbuf_entries = 0;
 static tick_t br_mis_pen = 1; // Cycles from EX flush until first fetch
 static std::string ipf_type = "none"; // iCache prefetcher type
 static std::string dpf_type = "none"; // dCache prefetcher type

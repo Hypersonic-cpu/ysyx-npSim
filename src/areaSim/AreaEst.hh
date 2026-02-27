@@ -56,4 +56,16 @@ sram_ram(const std::string& label, size_t size_bytes,
   return j;
 }
 
+/** Build a SRAM descriptor for a hard macro with known bit dimensions.
+    Python computes area directly using the analytical 6T cell model,
+    matching the gen_sram_lib.py formula used by the .lib file for STA. */
+inline json
+sram_macro(const std::string& label, size_t total_bits) {
+  json j;
+  j["label"] = label;
+  j["type"] = "sram_macro";
+  j["total_bits"] = total_bits;
+  return j;
+}
+
 } // namespace area

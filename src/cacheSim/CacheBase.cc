@@ -121,7 +121,8 @@ PipeCache::config_json() const {
 
   json ar;
   ar["comb_percent"] = 0.15;
-  ar["known_area"] = 0.0;
+  size_t line_words = lineBytes_ / sizeof(word_t);
+  ar["known_area"] = 575.0 + 264.0 * line_words;
 
   if (sram_dff_) {
     size_t data_bits = size() * 8;
@@ -132,9 +133,14 @@ PipeCache::config_json() const {
     ar["timing_bits"] = data_bits + total_tagv;
     ar["cacti_objs"] = json::array();
   } else {
-    ar["timing_bits"] = 0;
+    size_t idx_bits = floorLog2(sets_);
+    size_t tag_bits = 32 - offsetBits_ - idx_bits;
+    size_t tag_macro_bits = tag_bits * sets_;
+    size_t data_macro_bits = (lineBytes_ * 8) * sets_;
+    ar["timing_bits"] = (size_t)sets_;
     ar["cacti_objs"] = json::array({
-      area::sram_cache("sram", size(), blksize(), assoc())
+      area::sram_macro("tag_sram", tag_macro_bits),
+      area::sram_macro("data_sram", data_macro_bits)
     });
   }
 
