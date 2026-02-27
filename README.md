@@ -2,7 +2,7 @@
 
 Replays NEMU instruction traces through a configurable pipeline,
 cache, and memory model. Calibrated against NPC RTL (≤3.4% IPC,
-≤2% area error across 128B–1kB iCache sweep).
+≤0.65% area error across 128B–1kB iCache sweep).
 
 ## Quick Reference
 
@@ -85,11 +85,11 @@ $NEMU_HOME/build/riscv32-nemu-interpreter -b IMAGE --nptr OUTPUT.nptr.zst
 
 ### Area results (DFF and SRAM modes)
 
-**DFF** (`--sram-dff`): max ±2.0%.
-**SRAM** (`--sram-lib`): max ±2.0%.
+**DFF** (`--sram-dff`): max ±0.65%.
+**SRAM** (`--sram-lib`): max ±0.65%.
 
-Area model: Core=15630µm², iCache=575+264×line_words µm² (control),
-DFF=5.226µm²/bit, SRAM=0.346/0.55 µm²/bit, comb=15% (logic only).
+Area model: Core=14730µm², iCache=575+264×line_words µm² (control),
+DFF=5.226µm²/bit, comb=15%. SRAM=0.346/0.55 µm²/bit, comb=31%.
 
 ### Reproduce
 

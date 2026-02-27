@@ -182,7 +182,7 @@ public:
     json j;
     j["BranchPenaltyCycles"] = BranchMissPenalty;
     j["IFQSize"] = ifq_size_;
-    j["area"] = area::area_json(15630.0);
+    j["area"] = area::area_json(14730.0);
     return j;
   }
 

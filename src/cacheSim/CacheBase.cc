@@ -120,11 +120,11 @@ PipeCache::config_json() const {
   j["latency"] = pipe_depth_;
 
   json ar;
-  ar["comb_percent"] = 0.15;
   size_t line_words = lineBytes_ / sizeof(word_t);
   ar["known_area"] = 575.0 + 264.0 * line_words;
 
   if (sram_dff_) {
+    ar["comb_percent"] = 0.15;
     size_t data_bits = size() * 8;
     size_t idx_bits = floorLog2(sets_);
     size_t tag_bits = 32 - offsetBits_ - idx_bits;
@@ -133,6 +133,7 @@ PipeCache::config_json() const {
     ar["timing_bits"] = data_bits + total_tagv;
     ar["cacti_objs"] = json::array();
   } else {
+    ar["comb_percent"] = 0.31;
     size_t idx_bits = floorLog2(sets_);
     size_t tag_bits = 32 - offsetBits_ - idx_bits;
     size_t tag_macro_bits = tag_bits * sets_;
