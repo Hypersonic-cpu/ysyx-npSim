@@ -54,8 +54,8 @@ set_global_tick(tick_t t) noexcept {
 // Memory latency parameters
 //   NPC mode: SDRAM via PMemBox (DPI-C 40/8 + 2-cycle FSM overhead)
 //   SoC mode: SDRAM via XBar + controller; SRAM is on-chip (fast)
-static tint_t sdram_lat = 42;       // PMemBox: MemLatency(40) + 2 FSM cycles
-static tint_t sdram_burst_lat = 10; // PMemBox: MemBstLat(8) + 2 FSM cycles
+static tint_t sdram_lat = 43;       // NPC: calibrated (PMemBox ~40 + overhead)
+static tint_t sdram_burst_lat = 16; // NPC: calibrated (PMemBox ~8 + overhead)
 static tint_t sram_lat = 1;         // SoC: on-chip SRAM latency
 static std::string trace_file;
 // RTL: iCacheConf(32, 1024, 16, 1) → 1KB, 16B line, direct-mapped
@@ -78,7 +78,7 @@ static bool use_ras = false;
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
-static size_t ifq_size = 9; // Wrong-path pollution budget (calibrated)
+static size_t ifq_size = 4; // RTL FetchStage PipeDepth+1
 // FIXME: Remove this. NoCache means no buffer
 static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 0;
