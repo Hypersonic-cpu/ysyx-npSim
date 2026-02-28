@@ -249,7 +249,9 @@ Pipeline::do_execute() {
   if (inst.is_branch) {
     bool real_taken = inst.br_taken != 0;
     addr_t real_target = real_taken ? inst.mem_addr : 0;
-    bpu->update(inst.pc, real_taken, real_target);
+    bool is_call = (inst.dst_reg == 1);
+    bool is_ret  = (inst.src_reg[0] == 1 && inst.dst_reg == 0);
+    bpu->update(inst.pc, real_taken, real_target, is_call, is_ret);
 
     if (trans->br_mispred) {
       // ─── EX-stage flush ──────────────────────────────────

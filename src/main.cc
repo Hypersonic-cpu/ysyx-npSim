@@ -74,7 +74,7 @@ static bool dry_run = false;
 static std::string bpu_type = "";
 static size_t bpu_entries_pow2 = 4; // 16
 static size_t btb_entries_pow2 = 4;
-static bool use_ras = false;
+static size_t ras_depth = 0;
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
@@ -128,7 +128,7 @@ parse_args(int argc, char* argv[]) {
     {"bpu-type", required_argument, 0, 'T'},
     {"bpu-size", required_argument, 0, 'e'},
     {"btb-size", required_argument, 0, 't'},
-    {"use-ras", no_argument, 0, 'R'},
+    {"ras-size", required_argument, 0, 'R'},
     {"ifq-size", required_argument, 0, 'q'},
     {"stbuf-entries", required_argument, 0, 'Z'},
     {"br-pen", required_argument, 0, 'X'},
@@ -198,7 +198,7 @@ parse_args(int argc, char* argv[]) {
         std::log2(static_cast<double>(std::stoul(optarg)) + 0.5);
       break;
     case 'R':
-      use_ras = true;
+      ras_depth = std::stoul(optarg);
       break;
     case 'q':
       ifq_size = std::stoul(optarg);
@@ -286,7 +286,7 @@ std::unique_ptr<BranchUnit>
 create_branch_unit() {
   auto bpu = create_bpu_core();
   auto btb = create_btb();
-  return std::make_unique<BranchUnit>(std::move(bpu), std::move(btb));
+  return std::make_unique<BranchUnit>(std::move(bpu), std::move(btb), ras_depth);
 }
 
 using json = nlohmann::ordered_json;

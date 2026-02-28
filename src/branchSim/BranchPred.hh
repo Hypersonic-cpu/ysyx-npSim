@@ -34,22 +34,26 @@ public:
   }
   json
   config_json() const override {
-    // Each entry: pc_tag(32) + target(32) + valid(1) + type(2) = 67 bits ≈ 9B
-    size_t entry_bytes = 9;
-    size_t total = table_.size() * entry_bytes;
-    json ar = area::area_json(0.0, 0, 0.2);
-    // ar["comb_percent"] = 0.2;
-    // ar["known_area"] = 0.0;
-    // ar["timing_bits"] = 0;
-    ar["cacti_objs"] = json::array({
-      area::sram_ram("btb", total, entry_bytes)
-    });
-    return json{{"entries", table_.size()}, {"area", ar}};
+    size_t n = table_.size();
+    size_t idx_bits = n > 1 ? static_cast<size_t>(std::log2(n)) : 0;
+    size_t tag_bits = 32 - idx_bits;
+    size_t entry_bits = tag_bits + 32 + 1;
+    size_t total_bits = n * entry_bits;
+    json ar = area::area_json(0.0, total_bits, 0.10);
+    return json{{"entries", n}, {"area", ar}};
   }
   void
   reset_stats() override {}
   void
   dump_stats(std::ostream& os = std::cout) const override {}
+
+  size_t num_entries() const { return table_.size(); }
+  uint8_t entry_type(size_t idx) const {
+    return idx < table_.size() ? table_[idx].type : 0;
+  }
+  void set_entry_type(size_t idx, uint8_t t) {
+    if (idx < table_.size()) table_[idx].type = t;
+  }
 
 protected:
   std::vector<BTBEntry> table_;
@@ -178,15 +182,10 @@ public:
   config_json() const override {
     json j;
     j["entries"] = table_.size();
-    // 2-bit counters packed: ceil(entries*2/8) bytes; always SRAM
-    size_t total_bytes = (table_.size() * 2 + 7) / 8;
     json ar;
-    ar["comb_percent"] = 0.3;
+    ar["comb_percent"] = 0.30;
     ar["known_area"] = 0.0;
-    ar["timing_bits"] = 0;
-    ar["cacti_objs"] = json::array({
-      area::sram_ram("bpu_table", total_bytes, 1)
-    });
+    ar["timing_bits"] = static_cast<int>(table_.size() * 2);
     j["area"] = ar;
     return j;
   }
@@ -348,6 +347,38 @@ public:
   }
 };
 
+class ReturnAddrStack {
+  std::vector<addr_t> stack_;
+  size_t tos_ = 0;
+  size_t cnt_ = 0;
+  size_t depth_;
+
+public:
+  explicit ReturnAddrStack(size_t depth)
+      : stack_(depth, 0), depth_(depth) {}
+
+  void push(addr_t addr) {
+    tos_ = (tos_ + 1) % depth_;
+    stack_[tos_] = addr;
+    if (cnt_ < depth_) cnt_++;
+  }
+
+  addr_t pop() {
+    if (cnt_ == 0) return 0;
+    addr_t val = stack_[tos_];
+    tos_ = (tos_ == 0) ? depth_ - 1 : tos_ - 1;
+    cnt_--;
+    return val;
+  }
+
+  addr_t top() const {
+    return cnt_ > 0 ? stack_[tos_] : 0;
+  }
+
+  bool valid() const { return cnt_ > 0; }
+  size_t depth() const { return depth_; }
+};
+
 // Branch prediction result
 struct BranchResult {
   bool pred_taken;    // BPU direction prediction
@@ -355,7 +386,7 @@ struct BranchResult {
   bool will_redirect; // pred_taken && btb_hit (actual redirect)
 };
 
-// BranchUnit: Combines BPU (direction) + BTB (target) into unified interface
+// BranchUnit: Combines BPU (direction) + BTB (target) + RAS into unified interface
 class BranchUnit : public SimObject {
 public:
   BPStatsBase stats;
@@ -363,10 +394,12 @@ public:
 private:
   std::unique_ptr<BranchPred> bpu_;
   std::unique_ptr<BTBBase> btb_;
+  std::unique_ptr<ReturnAddrStack> ras_;
 
 public:
   explicit BranchUnit(std::unique_ptr<BranchPred> bpu,
-                      std::unique_ptr<BTBBase> btb)
+                      std::unique_ptr<BTBBase> btb,
+                      size_t ras_depth = 0)
       : SimObject("BranchUnit", &this->stats)
       , stats("BranchUnit")
       , bpu_(std::move(bpu))
@@ -375,50 +408,62 @@ public:
     if (!btb_) {
       btb_ = std::make_unique<NoBTB>();
     }
+    if (ras_depth > 0) {
+      ras_ = std::make_unique<ReturnAddrStack>(ras_depth);
+    }
   }
 
-  // Predict: called in IF/ID stage
-  // Returns direction prediction and BTB target
   BranchResult
   predict(addr_t pc) {
     stats.accesses++;
     addr_t btb_target = btb_->lookup(pc);
     bool btb_hit = (btb_target != 0);
     bool pred_taken = bpu_->predict(pc, btb_target);
-    // Can only redirect if BPU says taken AND BTB provides target
-    bool will_redirect = pred_taken && btb_hit;
+
+    // RAS override: if BTB marks entry as return type, use RAS
+    addr_t target = btb_target;
+    if (btb_hit && ras_) {
+      auto idx = (pc >> 2) & (btb_->num_entries() - 1);
+      if (btb_->entry_type(idx) == 1 && ras_->valid()) {
+        target = ras_->top();
+        pred_taken = true;
+      }
+    }
+
+    bool will_redirect = pred_taken && (target != 0);
     DPRINTF(BranchPred,
-            "BranchUnit Predict: PC=0x%08x pred_taken=%d btb_target=0x%08x "
+            "BranchUnit Predict: PC=0x%08x pred_taken=%d target=0x%08x "
             "redirect=%d",
-            pc, pred_taken, btb_target, will_redirect);
-    return {pred_taken, btb_target, will_redirect};
+            pc, pred_taken, target, will_redirect);
+    return {pred_taken, target, will_redirect};
   }
 
-  // Update: called in EX stage when branch resolves
-  // Updates both BPU and BTB based on actual outcome
   void
-  update(addr_t pc, bool taken, addr_t target) {
+  update(addr_t pc, bool taken, addr_t target,
+         bool is_call = false, bool is_ret = false) {
     bpu_->update(pc, taken);
     if (taken) {
       btb_->update(pc, target);
+      auto idx = (pc >> 2) & (btb_->num_entries() - 1);
+      btb_->set_entry_type(idx, is_ret ? 1 : 0);
+    }
+    if (ras_) {
+      if (is_call) ras_->push(pc + 4);
+      if (is_ret) ras_->pop();
     }
     DPRINTF(BranchPred,
             "BranchUnit Update: PC=0x%08x taken=%d target=0x%08x", pc, taken,
             target);
   }
 
-  // Judge: check if prediction was correct, update stats
-  // Returns true if prediction was accurate (no penalty needed)
   bool
   judge(bool real_taken, addr_t real_target, const BranchResult& pred) {
     stats.notify++;
     bool accurate = true;
 
     if (!real_taken && !pred.will_redirect) {
-      // Both not redirecting - correct
       accurate = true;
     } else if (real_taken && pred.will_redirect) {
-      // Both redirecting - check target
       if (pred.pred_target == real_target) {
         accurate = true;
       } else {
@@ -429,20 +474,15 @@ public:
                 real_target, pred.pred_target);
       }
     } else if (real_taken && !pred.will_redirect) {
-      // Should have redirected but didn't
       accurate = false;
       if (pred.pred_taken) {
-        // BPU said taken but BTB missed
         stats.no_target++;
         DPRINTF(BranchPred, "BranchUnit Mispred: no_target (BTB miss)");
       } else {
-        // BPU said not-taken
         stats.bad_pred++;
         DPRINTF(BranchPred, "BranchUnit Mispred: bad_pred (predicted NT)");
       }
     } else {
-      // !real_taken && pred.will_redirect
-      // Redirected but shouldn't have
       accurate = false;
       stats.bad_pred++;
       DPRINTF(BranchPred, "BranchUnit Mispred: bad_pred (predicted T)");
@@ -454,7 +494,6 @@ public:
     return accurate;
   }
 
-  // SimObject interface
   json
   stats_json() const override {
     return stats.gen_json();
@@ -467,7 +506,16 @@ public:
     j["bpu_config"] = bpu_->config_json();
     j["btb"] = btb_->name();
     j["btb_config"] = btb_->config_json();
-    j["area"] = area::area_json(500.0);
+    size_t rd = ras_ ? ras_->depth() : 0;
+    size_t ras_stack = rd * 32;
+    size_t tos_bits  = rd > 1 ? static_cast<size_t>(std::ceil(std::log2(rd))) : 0;
+    size_t cnt_bits  = rd > 0 ? static_cast<size_t>(std::ceil(std::log2(rd + 1))) : 0;
+    size_t type_bits = rd > 0 ? btb_->num_entries() : 0;
+    size_t byp_bits  = rd > 0 ? 2 : 0;
+    size_t total = ras_stack + tos_bits + cnt_bits + type_bits + byp_bits;
+    json ar = area::area_json(500.0, total, 0.3);
+    j["ras_depth"] = rd;
+    j["area"] = ar;
     return j;
   }
 
