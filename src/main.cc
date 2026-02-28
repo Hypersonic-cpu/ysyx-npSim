@@ -279,7 +279,8 @@ create_btb() {
   if (btb_entries_pow2 == 0) {
     return std::make_unique<branchSim::NoBTB>();
   }
-  return std::make_unique<branchSim::CompressedBTB>("BTB", btb_entries_pow2);
+  return std::make_unique<branchSim::CompressedBTB>(
+    "BTB", btb_entries_pow2, 10, 20, sram_dff);
 }
 
 std::unique_ptr<BranchUnit>

@@ -37,6 +37,28 @@ RTL_AREA = {
     ("btfnt", 256, 0): 168313, ("btfnt", 256, 4): 170057,
 }
 
+RTL_AREA_SRAM = {
+    ("bimodal", 32, 0): 30432, ("bimodal", 32, 4): 31761,
+    ("bimodal", 64, 0): 32593, ("bimodal", 64, 4): 34284,
+    ("bimodal", 128, 0): 36742, ("bimodal", 128, 4): 39366,
+    ("bimodal", 256, 0): 45194, ("bimodal", 256, 4): 49116,
+    ("btfnt", 32, 0): 29963, ("btfnt", 32, 4): 31347,
+    ("btfnt", 64, 0): 31424, ("btfnt", 64, 4): 33040,
+    ("btfnt", 128, 0): 34289, ("btfnt", 128, 4): 36694,
+    ("btfnt", 256, 0): 40072, ("btfnt", 256, 4): 43939,
+}
+
+NPSIM_AREA_SRAM = {
+    ("bimodal", 32, 0): 31409, ("bimodal", 32, 4): 32656,
+    ("bimodal", 64, 0): 33406, ("bimodal", 64, 4): 34892,
+    ("bimodal", 128, 0): 37360, ("bimodal", 128, 4): 39323,
+    ("bimodal", 256, 0): 45186, ("bimodal", 256, 4): 48105,
+    ("btfnt", 32, 0): 30932, ("btfnt", 32, 4): 32178,
+    ("btfnt", 64, 0): 32450, ("btfnt", 64, 4): 33936,
+    ("btfnt", 128, 0): 35448, ("btfnt", 128, 4): 37412,
+    ("btfnt", 256, 0): 41364, ("btfnt", 256, 4): 44283,
+}
+
 
 def load_rtl():
     with open(RTL_RESULTS) as f:
@@ -237,7 +259,7 @@ def plot_cali_area(npsim_areas):
     ax1.plot([mn, mx], [mn, mx], "k--", alpha=0.5, linewidth=0.8)
     ax1.set_xlabel("RTL Area (×1000 µm²)")
     ax1.set_ylabel("npSim Area (×1000 µm²)")
-    ax1.set_title("Area: RTL vs npSim")
+    ax1.set_title("DFF Area: RTL vs npSim")
     ax1.set_xlim(mn, mx)
     ax1.set_ylim(mn, mx)
     ax1.set_aspect("equal")
@@ -250,13 +272,99 @@ def plot_cali_area(npsim_areas):
     ax2.set_xticklabels([l.replace("_", "\n") for l in labels],
                          fontsize=5, rotation=45, ha="right")
     ax2.set_ylabel("Area Error (%)")
-    ax2.set_title("Area Calibration Error")
+    ax2.set_title("DFF Area Calibration Error")
     ax2.legend(fontsize=8)
     ax2.set_ylim(0, 6)
     ax2.grid(axis="y", alpha=0.3)
 
     fig.tight_layout()
     fig.savefig(CALI_DIR / "area_calibration.png", dpi=150)
+    plt.close(fig)
+
+
+def plot_cali_area_sram():
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4.5))
+
+    rtl_vals, sim_vals, labels, colors = [], [], [], []
+    errs = []
+    for bp in BP_TYPES:
+        for btb in BTB_SIZES:
+            for ras in RAS_SIZES:
+                key = (bp, btb, ras)
+                if key in RTL_AREA_SRAM and key in NPSIM_AREA_SRAM:
+                    rv = RTL_AREA_SRAM[key]
+                    sv = NPSIM_AREA_SRAM[key]
+                    rtl_vals.append(rv / 1000)
+                    sim_vals.append(sv / 1000)
+                    err = abs(sv - rv) / rv * 100
+                    errs.append(err)
+                    labels.append(f"{bp}_btb{btb}_ras{ras}")
+                    colors.append(COLORS[bp])
+
+    ax1.scatter(rtl_vals, sim_vals, c=colors, s=40, zorder=5)
+    mn = min(rtl_vals + sim_vals) * 0.95
+    mx = max(rtl_vals + sim_vals) * 1.05
+    ax1.plot([mn, mx], [mn, mx], "k--", alpha=0.5, linewidth=0.8)
+    ax1.set_xlabel("RTL Area (×1000 µm²)")
+    ax1.set_ylabel("npSim Area (×1000 µm²)")
+    ax1.set_title("SRAM Area: RTL vs npSim")
+    ax1.set_xlim(mn, mx)
+    ax1.set_ylim(mn, mx)
+    ax1.set_aspect("equal")
+    ax1.grid(alpha=0.3)
+
+    x = np.arange(len(errs))
+    ax2.bar(x, errs, color=colors, edgecolor="black", linewidth=0.5)
+    ax2.axhline(y=5, color="red", linestyle="--", alpha=0.7, label="5% target")
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([l.replace("_", "\n") for l in labels],
+                         fontsize=5, rotation=45, ha="right")
+    ax2.set_ylabel("Area Error (%)")
+    ax2.set_title("SRAM Area Calibration Error")
+    ax2.legend(fontsize=8)
+    ax2.set_ylim(0, 6)
+    ax2.grid(axis="y", alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(CALI_DIR / "area_calibration_sram.png", dpi=150)
+    plt.close(fig)
+
+
+def plot_dff_vs_sram_area():
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(len(BTB_SIZES))
+    w = 0.1
+    offsets = {
+        ("bimodal", 0, "dff"): -3.5, ("bimodal", 0, "sram"): -2.5,
+        ("bimodal", 4, "dff"): -1.5, ("bimodal", 4, "sram"): -0.5,
+        ("btfnt", 0, "dff"): 0.5, ("btfnt", 0, "sram"): 1.5,
+        ("btfnt", 4, "dff"): 2.5, ("btfnt", 4, "sram"): 3.5,
+    }
+    for bp in BP_TYPES:
+        for ras in RAS_SIZES:
+            dff_vals = [RTL_AREA[(bp, btb, ras)] / 1000
+                        for btb in BTB_SIZES]
+            sram_vals = [RTL_AREA_SRAM[(bp, btb, ras)] / 1000
+                         for btb in BTB_SIZES]
+            off_d = offsets[(bp, ras, "dff")]
+            off_s = offsets[(bp, ras, "sram")]
+            ax.bar(x + off_d * w, dff_vals, w,
+                   color=COLORS[bp], alpha=0.4,
+                   edgecolor="black", linewidth=0.5,
+                   label=f"{bp} R{ras} DFF" if ras == 0 else "")
+            ax.bar(x + off_s * w, sram_vals, w,
+                   color=COLORS[bp], alpha=0.9,
+                   hatch="//", edgecolor="black", linewidth=0.5,
+                   label=f"{bp} R{ras} SRAM" if ras == 0 else "")
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(s) for s in BTB_SIZES])
+    ax.set_xlabel("BTB Entries")
+    ax.set_ylabel("Area (×1000 µm²)")
+    ax.set_title("DFF vs SRAM Area (RTL, 1kB iCache)")
+    ax.legend(fontsize=7, ncol=2)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(PERF_DIR / "dff_vs_sram_area.png", dpi=150)
     plt.close(fig)
 
 
@@ -302,8 +410,10 @@ def main():
     plot_rtl_bp_accuracy(rtl_data)
     plot_rtl_mispred_breakdown(rtl_data)
     plot_rtl_area_vs_ipc(rtl_data)
+    plot_dff_vs_sram_area()
     plot_cali_ipc(cali_data, rtl_data)
     plot_cali_area(npsim_areas)
+    plot_cali_area_sram()
 
     print("Generated plots:")
     for d in [PERF_DIR, CALI_DIR]:

@@ -22,9 +22,11 @@ public:
     uint8_t type = 0;
   };
 
-  explicit BTBBase(const std::string& name, size_t entries_pow2)
+  explicit BTBBase(const std::string& name, size_t entries_pow2,
+                   bool sram_dff = true)
       : SimObject(name, nullptr)
-      , table_(1 << entries_pow2) {}
+      , table_(1 << entries_pow2)
+      , sram_dff_(sram_dff) {}
   virtual ~BTBBase() = default;
   virtual addr_t lookup(addr_t pc) const = 0;
   virtual void update(addr_t pc, addr_t target) = 0;
@@ -37,9 +39,18 @@ public:
     size_t n = table_.size();
     size_t idx_bits = n > 1 ? static_cast<size_t>(std::log2(n)) : 0;
     size_t tag_bits = 32 - idx_bits;
-    size_t entry_bits = tag_bits + 32 + 1;
-    size_t total_bits = n * entry_bits;
-    json ar = area::area_json(0.0, total_bits, 0.10);
+    if (sram_dff_) {
+      size_t entry_bits = tag_bits + 32 + 1;
+      size_t total_bits = n * entry_bits;
+      json ar = area::area_json(0.0, total_bits, 0.10);
+      return json{{"entries", n}, {"area", ar}};
+    }
+    size_t valid_type_bits = n * 2;
+    json ar = area::area_json(0.0, valid_type_bits, 0.10);
+    ar["cacti_objs"] = json::array({
+      area::sram_macro("btb_tag", n * tag_bits),
+      area::sram_macro("btb_target", n * 32)
+    });
     return json{{"entries", n}, {"area", ar}};
   }
   void
@@ -57,6 +68,7 @@ public:
 
 protected:
   std::vector<BTBEntry> table_;
+  bool sram_dff_;
 };
 
 // Directly mapped
@@ -73,8 +85,9 @@ private:
 
 public:
   explicit CompressedBTB(const std::string& name, size_t entries_pow2,
-                         size_t tag_bits = 10, size_t target_bits = 20)
-      : BTBBase(name, entries_pow2)
+                         size_t tag_bits = 10, size_t target_bits = 20,
+                         bool sram_dff = true)
+      : BTBBase(name, entries_pow2, sram_dff)
       , tag_bits_(tag_bits)
       , tag_mask_((1 << tag_bits) - 1)
       , target_bits_(target_bits)
