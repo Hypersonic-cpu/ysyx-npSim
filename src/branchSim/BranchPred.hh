@@ -80,19 +80,24 @@ private:
   }
   auto
   masked_tag(addr_t pc) const {
-    return (pc >> (2 + index_bits_)) & tag_mask_;
+    return (pc >> tag_shift_) & tag_mask_;
   }
 
 public:
+  // tag_shift_override: if > 0, tag = pc >> tag_shift_override
+  // (matches RTL where tag uses BHT index bits, not BTB index bits)
   explicit CompressedBTB(const std::string& name, size_t entries_pow2,
                          size_t tag_bits = 10, size_t target_bits = 20,
-                         bool sram_dff = true)
+                         bool sram_dff = true, size_t tag_shift_override = 0)
       : BTBBase(name, entries_pow2, sram_dff)
       , tag_bits_(tag_bits)
       , tag_mask_((1 << tag_bits) - 1)
       , target_bits_(target_bits)
       , index_mask_((1 << entries_pow2) - 1)
-      , index_bits_(entries_pow2) {}
+      , index_bits_(entries_pow2)
+      , tag_shift_(tag_shift_override > 0
+                       ? tag_shift_override
+                       : 2 + entries_pow2) {}
 
   addr_t lookup(addr_t pc) const override;
   void update(addr_t pc, addr_t target) override;
@@ -103,6 +108,7 @@ private:
   size_t index_bits_;
   addr_t index_mask_;
   size_t target_bits_;
+  size_t tag_shift_;
 };
 
 struct BPStatsBase : public StatsBase {
@@ -117,6 +123,9 @@ struct BPStatsBase : public StatsBase {
   size_t no_target = 0;
   size_t bad_target = 0;
   size_t bad_pred = 0;
+  // Non-branch BTB aliasing (false hits on non-branch insts)
+  size_t nonbr_mispred = 0;
+  size_t br_accesses = 0;
 
   double
   miss_rate() const {
@@ -132,6 +141,8 @@ struct BPStatsBase : public StatsBase {
     j["miss_no_target"] = no_target;
     j["miss_bad_pred"] = bad_pred;
     j["miss_bad_target"] = bad_target;
+    j["nonbr_mispred"] = nonbr_mispred;
+    j["br_accesses"] = br_accesses;
     j["miss_rate"] = miss_rate();
     if (notify != accesses) {
       std::cerr << std::format(ANSI_BG_RED
@@ -160,6 +171,8 @@ struct BPStatsBase : public StatsBase {
     no_target = 0;
     bad_target = 0;
     bad_pred = 0;
+    nonbr_mispred = 0;
+    br_accesses = 0;
   }
 };
 
@@ -453,8 +466,12 @@ public:
 
   void
   update(addr_t pc, bool taken, addr_t target,
-         bool is_call = false, bool is_ret = false) {
-    bpu_->update(pc, taken);
+         bool is_call = false, bool is_ret = false,
+         bool btb_hit = true) {
+    // RTL only updates BHT when btbHit || taken
+    if (btb_hit || taken) {
+      bpu_->update(pc, taken);
+    }
     if (taken) {
       btb_->update(pc, target);
       auto idx = (pc >> 2) & (btb_->num_entries() - 1);

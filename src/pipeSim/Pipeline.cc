@@ -18,7 +18,7 @@ using trace::MemStore;
 
 Pipeline::Pipeline(const std::string& name, size_t ifq_size,
                    size_t stq_size, BranchUnit* bpu,
-                   tick_t br_mis_pen)
+                   tick_t br_mis_pen, tick_t mmio_lat)
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}
@@ -30,7 +30,8 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size,
     , ifq_size_{ifq_size}
     , fetch_queue_{}
     , ongoing_insts_{0}
-    , BranchMissPenalty{br_mis_pen} {
+    , BranchMissPenalty{br_mis_pen}
+    , mmio_lat_{mmio_lat} {
   assert(bpu && "BranchUnit must not be null");
 }
 
@@ -38,6 +39,8 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size,
 void
 Pipeline::update_impl() {
   DPRINTF(Event, "Update Pipeline:");
+  // MMIO timer — currently unused, reserved for future use
+  (void)mmio_resp_tick_;
   for (int i = Num_PipeStage - 1; i >= 0; i--) {
     if (sim_pipe_.at(i) == nullptr
         && (!i || sim_pipe_.at(i - 1) != nullptr)
@@ -105,6 +108,8 @@ Pipeline::do_fetch_0() {
       auto accurate = bpu->judge(real_taken, real_target, pred);
       candidate->br_pred = pred;
       candidate->br_mispred = !accurate;
+      if (inst.is_branch) bpu->stats.br_accesses++;
+      if (!accurate && !inst.is_branch) bpu->stats.nonbr_mispred++;
 
       if (!accurate) {
         // Misprediction detected at IF. Enter wrong-path mode.
@@ -140,7 +145,7 @@ Pipeline::do_fetch_0() {
     [[maybe_unused]] auto const [rdy, _] = imem->is_ready();
     assert(rdy);
     if (candidate->is_wrong_path)
-      imem->read_req(candidate->trace_inst.pc);
+      imem->read_req_speculative(candidate->trace_inst.pc);
     else
       imem->read_req(candidate->trace_inst.pc);
     fetch_queue_.emplace_back(std::move(candidate));
@@ -251,7 +256,9 @@ Pipeline::do_execute() {
     addr_t real_target = real_taken ? inst.mem_addr : 0;
     bool is_call = (inst.dst_reg == 1);
     bool is_ret  = (inst.src_reg[0] == 1 && inst.dst_reg == 0);
-    bpu->update(inst.pc, real_taken, real_target, is_call, is_ret);
+    bool btb_hit = (trans->br_pred.pred_target != 0);
+    bpu->update(inst.pc, real_taken, real_target, is_call, is_ret,
+                btb_hit);
 
     if (trans->br_mispred) {
       // ─── EX-stage flush ──────────────────────────────────
@@ -291,7 +298,26 @@ Pipeline::do_execute() {
     }
   }
 
-  DPRINTF(Pipeline, " EX -> PC=0x%08x", inst.pc);
+  // Non-branch misprediction: BTB aliasing can predict a non-branch
+  // as taken. RTL EXU flushes in this case. Handle it here.
+  if (!inst.is_branch && trans->br_mispred) {
+    DPRINTF(Pipeline,
+            " EX NonBr Flush PC=0x%08x (false BTB hit)",
+            inst.pc);
+    for (auto& fq_entry : fetch_queue_) {
+      if (fq_entry) {
+        if (fq_entry->wait_mem)
+          orphan_icache_resps_++;
+        if (!fq_entry->is_wrong_path)
+          ongoing_insts_--;
+      }
+    }
+    fetch_queue_.clear();
+    in_wrong_path_ = false;
+    fetch_resume_tick_ = curr_tick() + BranchMissPenalty;
+    flush_stall_cycles(curr_tick());
+    in_br_recovery_ = false;
+  }
 
   // Register forwarding — matches RTL:
   // EXU: gprFw=false (no forwarding from EX)
@@ -317,9 +343,39 @@ Pipeline::do_memory() {
   const auto& trans = sim_pipe_.at(Execute);
   const auto& inst = trans->trace_inst;
 
+  // SoC MMIO: second pass after latency elapsed
+  if (trans->wait_mem && g_soc_mode && inst.mem_op != MemNone) {
+    uint8_t top = (inst.mem_addr >> 28) & 0xf;
+    bool cacheable = (top == 0x3 || top == 0x8 ||
+                      top == 0x9 || top == 0xa ||
+                      top == 0xb);
+    if (!cacheable) {
+      sim_pipe_.at(Execute)->wait_mem = false;
+      if (inst.mem_op == MemLoad)
+        update_reg_time(inst.dst_reg, curr_tick() + 1);
+      schedule(Memory, curr_tick() + 1);
+      sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
+      return;
+    }
+  }
+
   if (trans->wait_mem) {
     schedule(Memory, InfTime);
     return;
+  }
+
+  // SoC MMIO: first pass — block pipeline for mmio_lat_ cycles
+  if (g_soc_mode && inst.mem_op != MemNone) {
+    uint8_t top = (inst.mem_addr >> 28) & 0xf;
+    bool cacheable = (top == 0x3 || top == 0x8 ||
+                      top == 0x9 || top == 0xa ||
+                      top == 0xb);
+    if (!cacheable) {
+      set_stall(LsuStall);
+      sim_pipe_.at(Execute)->wait_mem = true;
+      schedule(Memory, curr_tick() + mmio_lat_);
+      return;
+    }
   }
 
   if (inst.mem_op == MemLoad) {
@@ -435,9 +491,13 @@ Pipeline::ack_mem_avail(AckTrans ack) {
   auto id = ack.id;
   if (id == 0)
     async_schedule(Fetch, curr_tick());
-  else if (id == 1)
-    async_schedule(Memory, curr_tick());
-  else
+  else if (id == 1) {
+    // Only reschedule Memory if there's a pending memory op at Execute
+    auto& ex = sim_pipe_.at(Execute);
+    if (ex && !ex->wait_mem
+        && ex->trace_inst.mem_op != MemNone)
+      async_schedule(Memory, curr_tick());
+  } else
     assert(false && "No such ID");
 }
 

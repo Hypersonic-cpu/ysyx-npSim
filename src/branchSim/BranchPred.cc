@@ -9,8 +9,7 @@ addr_t
 CompressedBTB::lookup(addr_t pc) const {
   auto idx = index(pc);
   const auto& ent = table_.at(idx);
-  // Use full tag (no masking) to avoid aliasing in large BTBs
-  auto pc_tag = pc >> (2 + index_bits_);
+  auto pc_tag = pc >> tag_shift_;
   auto hit = (ent.valid && ent.pc_tag == pc_tag);
   if (hit) {
     DPRINTF(BranchPred, "BTB Hit: PC=0x%x Idx=0x%x Tag=0x%x Target=0x%x", pc,
@@ -27,8 +26,7 @@ void
 CompressedBTB::update(addr_t pc, addr_t target) {
   auto idx = index(pc);
   auto& ent = table_.at(idx);
-  // Use full tag (no masking)
-  ent.pc_tag = pc >> (2 + index_bits_);
+  ent.pc_tag = pc >> tag_shift_;
   ent.target = target;
   ent.valid = true;
   DPRINTF(BranchPred, "BTB Update: PC=0x%x Idx=0x%x Tag=0x%x Target=0x%x",

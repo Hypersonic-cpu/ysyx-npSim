@@ -64,6 +64,8 @@ public:
       j["hits"] = hits;
       j["misses"] = misses;
       j["miss_rate"] = miss_rate();
+      j["spec_accesses"] = spec_accesses;
+      j["spec_misses"] = spec_misses;
       return j;
     }
 
@@ -81,7 +83,12 @@ public:
       accesses = 0;
       hits = 0;
       misses = 0;
+      spec_accesses = 0;
+      spec_misses = 0;
     }
+    // Speculative (wrong-path) stats — tracked separately
+    size_t spec_accesses = 0;
+    size_t spec_misses = 0;
   } stats;
 
 public:
@@ -169,7 +176,7 @@ protected:
   strbExtend(uint8_t strb) {
     word_t mask = 0;
     mask |= (strb & 0x1) ? 0x000000ff : 0;
-    mask |= (strb & 0x3) ? 0x0000ff00 : 0;
+    mask |= (strb & 0x2) ? 0x0000ff00 : 0;
     mask |= (strb & 0x4) ? 0x00ff0000 : 0;
     mask |= (strb & 0x8) ? 0xff000000 : 0;
     return mask;
@@ -200,12 +207,14 @@ public:
   explicit PipeCache(const std::string& name, CPU* host, size_t pipe_depth,
                      size_t size_bytes, size_t line_bytes, size_t assoc = 1,
                      std::shared_ptr<Prefetcher> prefetcher = nullptr,
-                     uint16_t cache_id = 0, bool sram_dff = true)
+                     uint16_t cache_id = 0, bool sram_dff = true,
+                     bool write_back = false)
       : CacheBase(name, host, size_bytes, line_bytes, assoc, prefetcher,
                   cache_id)
       , pipe_(pipe_depth)
       , pipe_depth_{pipe_depth}
       , sram_dff_{sram_dff}
+      , write_back_{write_back}
       , r_waiting_{false}
       , w_waiting_{false}
       , is_shifted_{true}
@@ -216,8 +225,10 @@ public:
   auto
   is_ready() const -> std::pair<bool, bool> override {
     auto r = is_shifted_ && !pending_flush_;
-    // Writes block only when SDRAM write channel busy
-    return {r, !pending_flush_ && !w_waiting_};
+    // Write-back: writes go through pipe (same readiness as reads)
+    // Write-through: writes block when SDRAM write channel busy
+    auto w = write_back_ ? r : (!pending_flush_ && !w_waiting_);
+    return {r, w};
   }
 
   bool handle_prefetch(addr_t addr, bool is_hit) override;
@@ -254,10 +265,13 @@ protected:
 
   void handle_hit(const PipePtr& req, bool immediate = false);
   void handle_flush();
+  // Write-back: save victim line's dirty data before access() invalidates
+  void save_evict_info(addr_t req_addr);
 
   std::vector<PipePtr> pipe_;
   size_t pipe_depth_;
   bool sram_dff_;
+  bool write_back_;
   bool r_waiting_;
   bool w_waiting_;
   bool is_shifted_;
@@ -265,6 +279,10 @@ protected:
   bool pending_flush_;
   // Model RTL flowing→memreq state: defer memory request by 1 cycle
   bool pending_fill_req_{false};
+  // Write-back eviction state (saved before access() invalidates)
+  bool pending_evict_{false};
+  addr_t evict_addr_{0};
+  std::vector<word_t> evict_data_;
   tick_t blocked_until_;
   // Deferred hit response (models RTL C3 word-select stage)
   tick_t sched_hit_time_{InfTime};

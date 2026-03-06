@@ -175,12 +175,14 @@ public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
                     size_t stq_size, BranchUnit* bpu,
-                    tick_t br_mis_pen = 1);
+                    tick_t br_mis_pen = 1,
+                    tick_t mmio_lat = 1);
 
   json
   config_json() const override {
     json j;
     j["BranchPenaltyCycles"] = BranchMissPenalty;
+    j["MmioLatency"] = mmio_lat_;
     j["IFQSize"] = ifq_size_;
     j["area"] = area::area_json(19570.0);
     return j;
@@ -299,6 +301,7 @@ protected:
       if (elem > curr_tick())
         mins = std::min(mins, elem);
     }
+    mins = std::min(mins, mmio_resp_tick_);
     calc_nxtupd_ = mins;
   }
 
@@ -385,6 +388,10 @@ private:
   // Count of in-flight iCache requests that should be ignored
   // (their fetch_queue_ entries were flushed by EX).
   size_t orphan_icache_resps_{0};
+
+  // MMIO response timer (SoC non-cacheable accesses)
+  tick_t mmio_resp_tick_{InfTime};
+  tick_t mmio_lat_;
 };
 
 } // namespace pipeSim

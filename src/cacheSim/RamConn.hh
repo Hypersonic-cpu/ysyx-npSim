@@ -44,13 +44,15 @@ public:
   RAMArbiter(const std::string& name, tint_t sdram_lat,
              tint_t sdram_burst_lat,
              const std::vector<Cache*>& hosts,
-             tint_t sram_lat = 1)
+             tint_t sram_lat = 1,
+             tint_t sdram_ovhd = 0)
       : ClockedObject(name, nullptr)
       , r_serving_id_{(uint16_t)-1}
       , w_serving_id_{(uint16_t)-1}
       , sdram_lat_(sdram_lat)
       , sdram_burst_lat_(sdram_burst_lat)
       , sram_lat_(sram_lat)
+      , sdram_ovhd_(sdram_ovhd)
       , r_busy_until_(InfTime)
       , w_busy_until_(InfTime)
       , hosts_{hosts}
@@ -65,6 +67,7 @@ public:
     j["type"] = "RAMArbiter";
     j["sdram_lat"] = sdram_lat_;
     j["sdram_burst_lat"] = sdram_burst_lat_;
+    j["sdram_ovhd"] = sdram_ovhd_;
     if (g_soc_mode)
       j["sram_lat"] = sram_lat_;
     j["num_hosts"] = hosts_.size();
@@ -94,15 +97,16 @@ public:
 
 private:
   // Total latency for a memory request.
-  //   Single beat:  sdram_lat
-  //   Multi-beat:   sdram_lat + (burst_len - 1) * sdram_burst_lat
+  //   Single beat:  sdram_ovhd + sdram_lat
+  //   Multi-beat:   sdram_ovhd + sdram_lat + (burst_len - 1) * sdram_burst_lat
   //   SRAM/CLINT:   sram_lat  (SoC mode only)
   inline tint_t
   lat_of(MemTrans* req) const {
     assert(req->bst_len >= 1);
     if (g_soc_mode && (isSRAM(req->addr) || isCLINT(req->addr)))
       return sram_lat_;
-    return sdram_lat_ + (req->bst_len - 1) * sdram_burst_lat_;
+    return sdram_ovhd_ + sdram_lat_
+           + (req->bst_len - 1) * sdram_burst_lat_;
   }
 
   // Read channel state
@@ -113,6 +117,7 @@ private:
   tint_t const sdram_lat_;
   tint_t const sdram_burst_lat_;
   tint_t const sram_lat_;
+  tint_t const sdram_ovhd_;
   tick_t r_busy_until_;
   tick_t w_busy_until_;
   std::vector<Cache*> const hosts_;

@@ -118,6 +118,7 @@ PipeCache::config_json() const {
   j["assoc"] = assoc();
   j["blkSize"] = blksize();
   j["latency"] = pipe_depth_;
+  j["write_back"] = write_back_;
 
   json ar;
   size_t line_words = lineBytes_ / sizeof(word_t);
@@ -156,11 +157,11 @@ PipeCache::handle_hit(const PipePtr& bk, bool immediate) {
     is_read ? bk->line->atAligned(offsetOf(bk->addr)) : bk->wrdata;
   blocked_until_ = curr_tick() + 1;
   if (is_read) {
-    if (immediate) {
-      // Fill replay: respond now (RTL missServe bypasses C3 mux)
+    if (immediate || write_back_) {
+      // Fill replay or write-back dCache: respond immediately
       cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
     } else {
-      // Normal hit: defer 1 cycle (RTL C3 word-select stage)
+      // Normal iCache hit: defer 1 cycle (RTL C3 word-select stage)
       sched_hit_time_ = curr_tick() + 1;
       sched_hit_resp_ = {bk->addr, dt, cache_id_, Read};
     }
@@ -184,11 +185,14 @@ PipeCache::recv_mem_resp(MemTransPtr trans) {
   wait = false;
   if (is_read) {
     handle_fill(pipe_.back()->line, trans->addr, trans->data);
+    // RTL fillFinish = RegNext(...): 1 extra blocking cycle after the
+    // last beat before willShift can go high.  Total = +2 from last beat.
+    blocked_until_ = curr_tick() + 2;
+  } else if (!write_back_) {
+    // Write-through: unblock after SDRAM write completes
+    blocked_until_ = curr_tick() + 2;
   }
-  // Write responses are fire-and-forget (already acked to CPU)
-  // RTL fillFinish = RegNext(...): 1 extra blocking cycle after the
-  // last beat before willShift can go high.  Total = +2 from last beat.
-  blocked_until_ = curr_tick() + 2;
+  // Write-back eviction response: nothing extra needed
 }
 
 void
@@ -209,11 +213,17 @@ PipeCache::update_impl() {
         // Speculative (wrong-path): miss without allocation.
         // Respond immediately; do not fill from memory.
         // No cache stall — wrong-path misses don't block the pipe.
-        ++stats.accesses;
-        ++stats.misses;
+        ++stats.spec_accesses;
+        ++stats.spec_misses;
         cpu_resp_recv_({bk->addr, 0, cache_id_, Read});
         spec_miss = true;
+      } else if (bk->speculative) {
+        // Speculative hit: track separately, respond immediately
+        ++stats.spec_accesses;
+        cpu_resp_recv_({bk->addr, 0, cache_id_, Read});
+        spec_miss = true; // reuse flag to reset pipe entry
       } else {
+        save_evict_info(bk->addr);
         bk->line = access(bk->addr);
       }
     }
@@ -228,6 +238,7 @@ PipeCache::update_impl() {
         if (bk->mop == Read && !r_waiting_) {
           handle_prefetch(bk->addr, !was_miss);
         }
+        pipe_.back().reset();  // Clear processed entry
       } else {
         // Model RTL flowing→memreq state transition: the AXI AR
         // request fires one cycle after the miss is detected.
@@ -236,14 +247,32 @@ PipeCache::update_impl() {
           blocked_until_ = curr_tick() + 1;
           return;
         }
+        // Dirty eviction: write-back before fill (RTL: evict→fill)
+        if (pending_evict_) {
+          if (w_waiting_) {
+            // Previous eviction write still pending, wait
+            blocked_until_ = curr_tick() + 1;
+            return;
+          }
+          mem_side_->recv_req(std::make_unique<MemTrans>(
+            Req, Write, evict_addr_, cache_id_,
+            static_cast<uint16_t>(evict_data_.size()),
+            std::move(evict_data_)));
+          w_waiting_ = true;
+          pending_evict_ = false;
+          // Wait for eviction to complete before fill
+          blocked_until_ = curr_tick() + 1;
+          return;
+        }
+        // Wait for eviction write to complete before sending fill
+        if (w_waiting_) {
+          blocked_until_ = curr_tick() + 1;
+          return;
+        }
         pending_fill_req_ = false;
         mem_side_->recv_req(std::make_unique<MemTrans>(
           Req, Read, bk->addr, cache_id_,
           static_cast<uint16_t>(lineBytes_ / sizeof(word_t))));
-
-        if (bk->line->isDirty()) {
-          // Dirty eviction: write-back not yet implemented
-        }
         r_waiting_ = true;
         is_replay_ = true;
         return;
@@ -278,11 +307,12 @@ PipeCache::update_impl() {
     if (pipe_.back()->speculative) {
       // Speculative miss: respond immediately, don't allocate
       // No cache stall — wrong-path misses don't block the pipe.
-      ++stats.accesses;
-      ++stats.misses;
+      ++stats.spec_accesses;
+      ++stats.spec_misses;
       cpu_resp_recv_({pipe_.back()->addr, 0, cache_id_, Read});
       pipe_.back().reset();
     } else {
+      save_evict_info(pipe_.back()->addr);
       pipe_.back()->line = access(pipe_.back()->addr);
       pending_fill_req_ = true;
       blocked_until_ = curr_tick() + 1;
@@ -355,22 +385,31 @@ PipeCache::read_req_speculative(addr_t addr) {
 
 void
 PipeCache::write_req(addr_t addr, word_t data, uint8_t mask) {
-  // Write-through, no-allocate for dCache
-  // Writes don't go through the pipe — fire-and-forget to SDRAM
   DPRINTF(Cache, "Recv WRITE Req @ %08x data=%08x strb=%x", addr, data, mask);
-  auto blk = probe(addr) ? access(addr) : nullptr;
-  if (blk && blk->isValid()) {
-    auto wm = CacheBase::strbExtend(mask);
-    auto& w = blk->atAligned(offsetOf(addr));
-    w = (~wm & w) | (wm & data);
+  if (write_back_) {
+    // Write-back: route through pipe like a read
+    assert(is_shifted_);
+    assert(pipe_.front() == nullptr);
+    auto req = std::make_unique<CachePipeEntry>(addr, nullptr, Write);
+    req->wrdata = data;
+    req->wrstrb = mask;
+    pipe_.front() = std::move(req);
+    blocked_until_ = curr_tick() + 1;
+    is_shifted_ = false;
+  } else {
+    // Write-through, no-allocate
+    auto blk = probe(addr) ? access(addr) : nullptr;
+    if (blk && blk->isValid()) {
+      auto wm = CacheBase::strbExtend(mask);
+      auto& w = blk->atAligned(offsetOf(addr));
+      w = (~wm & w) | (wm & data);
+    }
+    mem_side_->recv_req(std::make_unique<MemTrans>(
+      Req, Write, addr, cache_id_, static_cast<uint16_t>(1),
+      std::vector<word_t>({data}), std::vector<uint8_t>({mask})));
+    w_waiting_ = true;
+    cpu_resp_recv_({addr, 0, cache_id_, Write});
   }
-  // Write-through: send to SDRAM in background
-  mem_side_->recv_req(std::make_unique<MemTrans>(
-    Req, Write, addr, cache_id_, static_cast<uint16_t>(1),
-    std::vector<word_t>({data}), std::vector<uint8_t>({mask})));
-  w_waiting_ = true;
-  // Immediately acknowledge write to CPU
-  cpu_resp_recv_({addr, 0, cache_id_, Write});
 }
 
 void
@@ -408,8 +447,30 @@ PipeCache::handle_flush() {
   w_waiting_ = false;
   pending_flush_ = false;
   pending_fill_req_ = false;
+  pending_evict_ = false;
   sched_hit_time_ = InfTime;
   blocked_until_ = curr_tick() + 1;
+}
+
+void
+PipeCache::save_evict_info(addr_t req_addr) {
+  pending_evict_ = false;
+  if (!write_back_) return;
+  size_t si = setIndexOf(req_addr);
+  auto& set = setsArr_.at(si);
+  // Same LRU victim selection as access()
+  auto it = std::min_element(set.begin(), set.end(),
+    [](const CacheLine& a, const CacheLine& b) {
+      return a.stamp < b.stamp;
+    });
+  if (it->isValid() && it->isDirty()) {
+    pending_evict_ = true;
+    evict_addr_ = it->getTag();  // blockAddrOf — already aligned
+    size_t nwords = lineBytes_ / sizeof(word_t);
+    evict_data_.resize(nwords);
+    for (size_t i = 0; i < nwords; ++i)
+      evict_data_[i] = it->atAligned(i * sizeof(word_t));
+  }
 }
 
 // NoCache implementation - direct memory access without caching

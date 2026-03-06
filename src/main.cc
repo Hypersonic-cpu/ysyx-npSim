@@ -1,5 +1,6 @@
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -83,6 +84,9 @@ static size_t ifq_size = 4; // RTL FetchStage PipeDepth+1
 static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 0;
 static tick_t br_mis_pen = 1; // Cycles from EX flush until first fetch
+static tick_t mmio_lat = 3;  // MMIO access latency (SoC mode only)
+static int freq_mhz = 0;    // CPU frequency in MHz (0 = raw cycles)
+static tint_t sdram_ovhd = 0; // Fixed AXI overhead cycles (not scaled)
 static std::string ipf_type = "none"; // iCache prefetcher type
 static std::string dpf_type = "none"; // dCache prefetcher type
 static bool sram_dff = true;          // Area model: DFF or SRAM macro
@@ -140,6 +144,9 @@ parse_args(int argc, char* argv[]) {
     {"sram-lat", required_argument, 0, 203U},
     {"sram-dff", no_argument, 0, 204U},
     {"sram-lib", no_argument, 0, 205U},
+    {"mmio-lat", required_argument, 0, 206U},
+    {"freq-mhz", required_argument, 0, 207U},
+    {"sdram-ovhd", required_argument, 0, 208U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -233,6 +240,15 @@ parse_args(int argc, char* argv[]) {
     case 205:
       sram_dff = false;
       break;
+    case 206:
+      mmio_lat = std::stoul(optarg);
+      break;
+    case 207:
+      freq_mhz = std::stoi(optarg);
+      break;
+    case 208:
+      sdram_ovhd = std::stoul(optarg);
+      break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
       return 1;
@@ -246,6 +262,18 @@ parse_args(int argc, char* argv[]) {
               << "  --dry-run   Dump config/area without simulation\n"
               << "  --outdir=DIR  Output to simout/DIR/{conf,stats}.json\n";
     return 1;
+  }
+
+  // When --freq-mhz is specified, treat sdram_lat and sdram_burst_lat
+  // as nanosecond values and convert to cycles based on CPU frequency.
+  // At 1 GHz (1000 MHz), 1 ns = 1 cycle, so values are unchanged.
+  if (freq_mhz > 0) {
+    auto ns_to_cyc = [](tint_t ns, int mhz) -> tint_t {
+      return std::max<tint_t>(1,
+        static_cast<tint_t>(std::ceil(ns * mhz / 1000.0)));
+    };
+    sdram_lat = ns_to_cyc(sdram_lat, freq_mhz);
+    sdram_burst_lat = ns_to_cyc(sdram_burst_lat, freq_mhz);
   }
   return 0;
 }
@@ -279,8 +307,10 @@ create_btb() {
   if (btb_entries_pow2 == 0) {
     return std::make_unique<branchSim::NoBTB>();
   }
+  // RTL uses BHT index bits (not BTB index bits) for tag shift
+  size_t tag_shift = 2 + bpu_entries_pow2;
   return std::make_unique<branchSim::CompressedBTB>(
-    "BTB", btb_entries_pow2, 10, 20, sram_dff);
+    "BTB", btb_entries_pow2, 10, 20, sram_dff, tag_shift);
 }
 
 std::unique_ptr<BranchUnit>
@@ -371,7 +401,8 @@ main(int argc, char** argv) {
   // FIXME:
   size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
-    "Core", ifq_size, actual_stq_size, branch_unit.get(), br_mis_pen);
+    "Core", ifq_size, actual_stq_size, branch_unit.get(),
+    br_mis_pen, mmio_lat);
 
   std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
   if (ipf_type == "nextline") {
@@ -400,8 +431,9 @@ main(int argc, char** argv) {
     dcache = std::make_unique<cacheSim::PipeCache>(
       "dCache",
       /* host */ core.get(),
-      /* pipe depth */ 2, l1d_size, l1d_blksize, l1d_assoc, dpf,
-      /* cache ID */ 1, sram_dff);
+      /* pipe depth */ 1, l1d_size, l1d_blksize, l1d_assoc, dpf,
+      /* cache ID */ 1, sram_dff,
+      /* write_back */ true);
   } else {
     if (stbuf_entries == 0) {
       dcache = std::make_unique<cacheSim::NoCache>("dNoCache",
@@ -416,7 +448,8 @@ main(int argc, char** argv) {
 
   auto sdram = std::make_unique<memSim::RAMArbiter>(
     "SDRAM", sdram_lat, sdram_burst_lat,
-    std::vector<CacheBase*>({icache.get(), dcache.get()}), sram_lat);
+    std::vector<CacheBase*>({icache.get(), dcache.get()}), sram_lat,
+    sdram_ovhd);
   icache->set_mem_port(sdram.get());
   dcache->set_mem_port(sdram.get());
   CpuSideAckReceiver cpu_ack = [proc](auto t) { proc->ack_mem_avail(t); };
