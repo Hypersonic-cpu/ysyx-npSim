@@ -52,12 +52,17 @@ set_global_tick(tick_t t) noexcept {
   g_tick = t;
 }
 
-// Memory latency parameters
-//   NPC mode: SDRAM via PMemBox (DPI-C 40/8 + 2-cycle FSM overhead)
+// Memory latency parameters (microsecond-based, converted to cycles
+// via freq_mhz: cycles = ceil(lat_us * freq_mhz))
+//   NPC mode: SDRAM via PMemBox (DPI-C ~40ns + overhead)
 //   SoC mode: SDRAM via XBar + controller; SRAM is on-chip (fast)
-static tint_t sdram_lat = 43;       // NPC: calibrated (PMemBox ~40 + overhead)
-static tint_t sdram_burst_lat = 16; // NPC: calibrated (PMemBox ~8 + overhead)
-static tint_t sram_lat = 1;         // SoC: on-chip SRAM latency
+static double sdram_lat_us = 0.043;   // NPC default: 43ns = 0.043μs
+static double sdram_burst_us = 0.016; // NPC default: 16ns = 0.016μs
+static tint_t axi_ovhd_cyc = 0;      // Fixed AXI protocol overhead (cycles)
+static tint_t sram_lat = 1;          // SoC: on-chip SRAM latency (cycles)
+// Derived (set by parse_args from sdram_*_us × freq_mhz)
+static tint_t sdram_lat_cyc = 0;
+static tint_t sdram_burst_cyc = 0;
 static std::string trace_file;
 // RTL: iCacheConf(32, 1024, 16, 1) → 1KB, 16B line, direct-mapped
 static size_t l1i_size = 1024;
@@ -83,12 +88,11 @@ static size_t ifq_size = 4; // RTL FetchStage PipeDepth+1
 // FIXME: Remove this. NoCache means no buffer
 static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 0;
-static tick_t br_mis_pen = 1; // Cycles from EX flush until first fetch
-static tick_t mmio_lat = 3;  // MMIO access latency (SoC mode only)
-static int freq_mhz = 0;    // CPU frequency in MHz (0 = raw cycles)
-static tint_t sdram_ovhd = 0; // Fixed AXI overhead cycles (not scaled)
-static std::string ipf_type = "none"; // iCache prefetcher type
-static std::string dpf_type = "none"; // dCache prefetcher type
+static tick_t br_mis_pen = 1; // Branch misprediction penalty (cycles)
+static tick_t mmio_lat = 3;  // MMIO access latency (cycles, SoC only)
+static int freq_mhz = 1000;  // CPU frequency in MHz (default 1 GHz)
+static std::string l1i_pref_type = "none"; // iCache prefetcher type
+static std::string l1d_pref_type = "none"; // dCache prefetcher type
 static bool sram_dff = true;          // Area model: DFF or SRAM macro
 
 // Dummy physical memory stubs (active mode: caches don't read data)
@@ -125,8 +129,8 @@ parse_args(int argc, char* argv[]) {
     {"max-insts", required_argument, 0, 'n'},
     {"max-ticks", required_argument, 0, 'N'},
     {"debug-flags", required_argument, 0, 'd'},
-    {"sdram-lat", required_argument, 0, 'M'},
-    {"sdram-burst-lat", required_argument, 0, 'm'},
+    {"sdram-lat-us", required_argument, 0, 'M'},
+    {"sdram-burst-us", required_argument, 0, 'm'},
     {"outdir", required_argument, 0, 'O'},
     {"dry-run", no_argument, 0, 'D'},
     {"bpu-type", required_argument, 0, 'T'},
@@ -146,7 +150,7 @@ parse_args(int argc, char* argv[]) {
     {"sram-lib", no_argument, 0, 205U},
     {"mmio-lat", required_argument, 0, 206U},
     {"freq-mhz", required_argument, 0, 207U},
-    {"sdram-ovhd", required_argument, 0, 208U},
+    {"axi-ovhd-cyc", required_argument, 0, 208U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -182,10 +186,10 @@ parse_args(int argc, char* argv[]) {
       debug::set_flags(optarg);
       break;
     case 'M':
-      sdram_lat = std::stoul(optarg);
+      sdram_lat_us = std::stod(optarg);
       break;
     case 'm':
-      sdram_burst_lat = std::stoul(optarg);
+      sdram_burst_us = std::stod(optarg);
       break;
     case 'O':
       out_dir = optarg;
@@ -217,10 +221,10 @@ parse_args(int argc, char* argv[]) {
       br_mis_pen = std::stoul(optarg);
       break;
     case 'P':
-      ipf_type = optarg;
+      l1i_pref_type = optarg;
       break;
     case 'p':
-      dpf_type = optarg;
+      l1d_pref_type = optarg;
       break;
     case 201:
       print_mode = 1;
@@ -247,7 +251,7 @@ parse_args(int argc, char* argv[]) {
       freq_mhz = std::stoi(optarg);
       break;
     case 208:
-      sdram_ovhd = std::stoul(optarg);
+      axi_ovhd_cyc = std::stoul(optarg);
       break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
@@ -264,17 +268,16 @@ parse_args(int argc, char* argv[]) {
     return 1;
   }
 
-  // When --freq-mhz is specified, treat sdram_lat and sdram_burst_lat
-  // as nanosecond values and convert to cycles based on CPU frequency.
-  // At 1 GHz (1000 MHz), 1 ns = 1 cycle, so values are unchanged.
-  if (freq_mhz > 0) {
-    auto ns_to_cyc = [](tint_t ns, int mhz) -> tint_t {
-      return std::max<tint_t>(1,
-        static_cast<tint_t>(std::ceil(ns * mhz / 1000.0)));
-    };
-    sdram_lat = ns_to_cyc(sdram_lat, freq_mhz);
-    sdram_burst_lat = ns_to_cyc(sdram_burst_lat, freq_mhz);
-  }
+  // Convert microsecond latencies to cycle counts.
+  //   cycles = ceil(lat_us * freq_mhz)
+  // At 1 GHz: 0.051 μs × 1000 = 51 cycles.
+  auto us_to_cyc = [](double us, int mhz) -> tint_t {
+    return std::max<tint_t>(
+      1, static_cast<tint_t>(std::ceil(us * mhz)));
+  };
+  sdram_lat_cyc = us_to_cyc(sdram_lat_us, freq_mhz);
+  sdram_burst_cyc = us_to_cyc(sdram_burst_us, freq_mhz);
+
   return 0;
 }
 
@@ -405,11 +408,11 @@ main(int argc, char** argv) {
     br_mis_pen, mmio_lat);
 
   std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
-  if (ipf_type == "nextline") {
+  if (l1i_pref_type == "nextline") {
     ipf = std::make_shared<cacheSim::NextLinePrefetcher>("iCache");
-  } else if (ipf_type == "stride") {
+  } else if (l1i_pref_type == "stride") {
     ipf = std::make_shared<cacheSim::StridePrefetcher>("iCache");
-  } else if (ipf_type == "tagged") {
+  } else if (l1i_pref_type == "tagged") {
     ipf = std::make_shared<cacheSim::TaggedPrefetcher>("iCache");
   }
 
@@ -421,11 +424,11 @@ main(int argc, char** argv) {
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
     std::shared_ptr<cacheSim::Prefetcher> dpf = nullptr;
-    if (dpf_type == "stride") {
+    if (l1d_pref_type == "stride") {
       dpf = std::make_shared<cacheSim::StridePrefetcher>("dCache");
-    } else if (dpf_type == "nextline") {
+    } else if (l1d_pref_type == "nextline") {
       dpf = std::make_shared<cacheSim::NextLinePrefetcher>("dCache");
-    } else if (dpf_type == "tagged") {
+    } else if (l1d_pref_type == "tagged") {
       dpf = std::make_shared<cacheSim::TaggedPrefetcher>("dCache");
     }
     dcache = std::make_unique<cacheSim::PipeCache>(
@@ -447,9 +450,9 @@ main(int argc, char** argv) {
   pipeSim::Processor* proc = &(*core);
 
   auto sdram = std::make_unique<memSim::RAMArbiter>(
-    "SDRAM", sdram_lat, sdram_burst_lat,
+    "SDRAM", sdram_lat_cyc, sdram_burst_cyc,
     std::vector<CacheBase*>({icache.get(), dcache.get()}), sram_lat,
-    sdram_ovhd);
+    axi_ovhd_cyc);
   icache->set_mem_port(sdram.get());
   dcache->set_mem_port(sdram.get());
   CpuSideAckReceiver cpu_ack = [proc](auto t) { proc->ack_mem_avail(t); };

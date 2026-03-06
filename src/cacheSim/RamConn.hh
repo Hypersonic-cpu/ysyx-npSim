@@ -22,9 +22,9 @@ using enum MemRWOpt;
 // SDRAM arbiter: separate R/W channels, larger-id higher-priority.
 // Matches RTL AXIArbiter with independent read and write arbiters.
 //
-// Memory latency model:
-//   SDRAM burst: sdram_lat + (burst_len - 1) * sdram_burst_lat
-//   In SoC mode, SRAM/CLINT addresses use sram_lat instead.
+// Memory latency model (all values in CPU clock cycles):
+//   SDRAM: axi_ovhd + sdram_lat + (burst_len - 1) * sdram_burst
+//   SRAM/CLINT: sram_lat  (SoC mode only)
 
 // Address classification helpers (mirrors rvCore.scala memory map)
 inline bool
@@ -41,18 +41,18 @@ class RAMArbiter : public ClockedObject {
 
 public:
   // The order in hosts_ matters. The later one has higher priority
-  RAMArbiter(const std::string& name, tint_t sdram_lat,
-             tint_t sdram_burst_lat,
+  RAMArbiter(const std::string& name,
+             tint_t sdram_lat, tint_t sdram_burst,
              const std::vector<Cache*>& hosts,
              tint_t sram_lat = 1,
-             tint_t sdram_ovhd = 0)
+             tint_t axi_ovhd = 0)
       : ClockedObject(name, nullptr)
       , r_serving_id_{(uint16_t)-1}
       , w_serving_id_{(uint16_t)-1}
       , sdram_lat_(sdram_lat)
-      , sdram_burst_lat_(sdram_burst_lat)
+      , sdram_burst_(sdram_burst)
       , sram_lat_(sram_lat)
-      , sdram_ovhd_(sdram_ovhd)
+      , axi_ovhd_(axi_ovhd)
       , r_busy_until_(InfTime)
       , w_busy_until_(InfTime)
       , hosts_{hosts}
@@ -65,9 +65,9 @@ public:
   config_json() const override {
     json j;
     j["type"] = "RAMArbiter";
-    j["sdram_lat"] = sdram_lat_;
-    j["sdram_burst_lat"] = sdram_burst_lat_;
-    j["sdram_ovhd"] = sdram_ovhd_;
+    j["sdram_lat_cyc"] = sdram_lat_;
+    j["sdram_burst_cyc"] = sdram_burst_;
+    j["axi_ovhd_cyc"] = axi_ovhd_;
     if (g_soc_mode)
       j["sram_lat"] = sram_lat_;
     j["num_hosts"] = hosts_.size();
@@ -96,17 +96,16 @@ public:
   void update_impl() override;
 
 private:
-  // Total latency for a memory request.
-  //   Single beat:  sdram_ovhd + sdram_lat
-  //   Multi-beat:   sdram_ovhd + sdram_lat + (burst_len - 1) * sdram_burst_lat
-  //   SRAM/CLINT:   sram_lat  (SoC mode only)
+  // Total latency for a memory request (in CPU clock cycles).
+  //   SDRAM:      axi_ovhd + sdram_lat + (burst_len - 1) * sdram_burst
+  //   SRAM/CLINT: sram_lat  (SoC mode only)
   inline tint_t
   lat_of(MemTrans* req) const {
     assert(req->bst_len >= 1);
     if (g_soc_mode && (isSRAM(req->addr) || isCLINT(req->addr)))
       return sram_lat_;
-    return sdram_ovhd_ + sdram_lat_
-           + (req->bst_len - 1) * sdram_burst_lat_;
+    return axi_ovhd_ + sdram_lat_
+           + (req->bst_len - 1) * sdram_burst_;
   }
 
   // Read channel state
@@ -115,9 +114,9 @@ private:
   uint16_t w_serving_id_;
 
   tint_t const sdram_lat_;
-  tint_t const sdram_burst_lat_;
+  tint_t const sdram_burst_;
   tint_t const sram_lat_;
-  tint_t const sdram_ovhd_;
+  tint_t const axi_ovhd_;
   tick_t r_busy_until_;
   tick_t w_busy_until_;
   std::vector<Cache*> const hosts_;
