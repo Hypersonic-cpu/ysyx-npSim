@@ -44,11 +44,11 @@ NPC_TIMING_FIXED = {
 
 # SoC mode timing (calibrated for RV32IM)
 SOC_TIMING = {
-    "sdram-lat-us":           "0.060",
-    "sdram-burst-us":         "0.020",
-    "icache-sdram-extra-us":  "0.039",
-    "sram-lat":               "1",
-    "stbuf-entries":          "2",
+    "sdram-lat-us":          "0.060",
+    "sdram-burst-us":        "0.020",
+    "sdram-icache-ovhd-us":  "0.040",
+    "sram-lat":              "1",
+    "stbuf-entries":         "2",
 }
 
 # Sweep dimensions

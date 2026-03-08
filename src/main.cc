@@ -56,17 +56,15 @@ set_global_tick(tick_t t) noexcept {
 // via freq_mhz: cycles = ceil(lat_us * freq_mhz))
 //   NPC mode: SDRAM via PMemBox (DPI-C ~40ns + overhead)
 //   SoC mode: SDRAM via XBar + controller; SRAM is on-chip (fast)
-static double sdram_lat_us = 0.043;      // NPC default: 43ns = 0.043us
-static double sdram_burst_us = 0.016;    // NPC default: 16ns = 0.016us
-static double sdram_rowconf_us = 0.0;    // SDRAM row conflict extra (us)
-static double icache_sdram_extra_us = 0.0; // iCache SDRAM extra lat (us)
-static tint_t axi_ovhd_cyc = 0;         // Fixed AXI protocol overhead (cycles)
-static tint_t sram_lat = 1;             // SoC: on-chip SRAM latency (cycles)
+static double sdram_lat_us = 0.043;           // NPC default: 43ns = 0.043us
+static double sdram_burst_us = 0.016;         // NPC default: 16ns = 0.016us
+static double sdram_icache_extra_us = 0.0;   // iCache per-fill SDRAM overhead (us)
+static tint_t axi_ovhd_cyc = 0;              // Fixed AXI protocol overhead (cycles)
+static tint_t sram_lat = 1;                  // SoC: on-chip SRAM latency (cycles)
 // Derived (set by parse_args from sdram_*_us x freq_mhz)
 static tint_t sdram_lat_cyc = 0;
 static tint_t sdram_burst_cyc = 0;
-static tint_t sdram_rowconf_cyc = 0;
-static tint_t icache_sdram_extra_cyc = 0;
+static tint_t sdram_icache_extra_cyc = 0;
 static std::string trace_file;
 // RTL: iCacheConf(32, 1024, 16, 1) -- 1KB, 16B line, direct-mapped
 static size_t l1i_size = 1024;
@@ -155,8 +153,7 @@ parse_args(int argc, char* argv[]) {
     {"mmio-lat", required_argument, 0, 206U},
     {"freq-mhz", required_argument, 0, 207U},
     {"axi-ovhd-cyc", required_argument, 0, 208U},
-    {"sdram-rowconf-us", required_argument, 0, 209U},
-    {"icache-sdram-extra-us", required_argument, 0, 210U},
+    {"sdram-icache-ovhd-us", required_argument, 0, 209U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -260,10 +257,7 @@ parse_args(int argc, char* argv[]) {
       axi_ovhd_cyc = std::stoul(optarg);
       break;
     case 209:
-      sdram_rowconf_us = std::stod(optarg);
-      break;
-    case 210:
-      icache_sdram_extra_us = std::stod(optarg);
+      sdram_icache_extra_us = std::stod(optarg);
       break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
@@ -289,11 +283,8 @@ parse_args(int argc, char* argv[]) {
   };
   sdram_lat_cyc = us_to_cyc(sdram_lat_us, freq_mhz);
   sdram_burst_cyc = us_to_cyc(sdram_burst_us, freq_mhz);
-  if (sdram_rowconf_us > 0)
-    sdram_rowconf_cyc = us_to_cyc(sdram_rowconf_us, freq_mhz);
-  if (icache_sdram_extra_us > 0)
-    icache_sdram_extra_cyc = static_cast<tint_t>(
-        std::round(icache_sdram_extra_us * freq_mhz));
+  if (sdram_icache_extra_us > 0.0)
+    sdram_icache_extra_cyc = us_to_cyc(sdram_icache_extra_us, freq_mhz);
 
   return 0;
 }
@@ -467,7 +458,7 @@ main(int argc, char** argv) {
   auto sdram = std::make_unique<memSim::RAMArbiter>(
     "SDRAM", sdram_lat_cyc, sdram_burst_cyc,
     std::vector<CacheBase*>({icache.get(), dcache.get()}), sram_lat,
-    axi_ovhd_cyc, sdram_rowconf_cyc, icache_sdram_extra_cyc);
+    axi_ovhd_cyc, sdram_icache_extra_cyc);
   icache->set_mem_port(sdram.get());
   dcache->set_mem_port(sdram.get());
   CpuSideAckReceiver cpu_ack = [proc](auto t) { proc->ack_mem_avail(t); };

@@ -24,8 +24,9 @@ using enum MemRWOpt;
 // Matches RTL AXIArbiter with independent read and write arbiters.
 //
 // Memory latency model (all values in CPU clock cycles):
-//   SDRAM: axi_ovhd + sdram_lat + (burst_len - 1) * sdram_burst
-//   SRAM/CLINT: sram_lat  (SoC mode only)
+//   SDRAM (host > 0): axi_ovhd + sdram_lat + (burst_len - 1) * sdram_burst
+//   SDRAM (host 0):   above + icache_extra  (models iCache-specific fill overhead)
+//   SRAM/CLINT:       sram_lat  (SoC mode only)
 
 // Address classification helpers (mirrors rvCore.scala memory map)
 inline bool
@@ -41,14 +42,13 @@ class RAMArbiter : public ClockedObject {
   using MemTransPtr = std::unique_ptr<MemTrans>;
 
 public:
-  // The order in hosts_ matters. The later one has higher priority
+  // The order in hosts_ matters. The later one has higher priority.
   RAMArbiter(const std::string& name,
              tint_t sdram_lat, tint_t sdram_burst,
              const std::vector<Cache*>& hosts,
              tint_t sram_lat = 1,
              tint_t axi_ovhd = 0,
-             tint_t sdram_rowconf = 0,
-             tint_t icache_sdram_extra = 0)
+             tint_t icache_extra = 0)
       : ClockedObject(name, nullptr)
       , r_serving_id_{(uint16_t)-1}
       , w_serving_id_{(uint16_t)-1}
@@ -56,14 +56,11 @@ public:
       , sdram_burst_(sdram_burst)
       , sram_lat_(sram_lat)
       , axi_ovhd_(axi_ovhd)
-      , sdram_rowconf_(sdram_rowconf)
-      , icache_sdram_extra_(icache_sdram_extra)
+      , icache_extra_(icache_extra)
       , r_busy_until_(InfTime)
       , w_busy_until_(InfTime)
       , hosts_{hosts}
       , reqs_(hosts.size())
-      , open_row_{}
-      , bank_active_{}
       , host_sdram_rd_(hosts.size(), 0)
       , host_sdram_wr_(hosts.size(), 0) {}
 
@@ -77,10 +74,8 @@ public:
     j["sdram_lat_cyc"] = sdram_lat_;
     j["sdram_burst_cyc"] = sdram_burst_;
     j["axi_ovhd_cyc"] = axi_ovhd_;
-    if (sdram_rowconf_ > 0)
-      j["sdram_rowconf_cyc"] = sdram_rowconf_;
-    if (icache_sdram_extra_ > 0)
-      j["icache_sdram_extra_cyc"] = icache_sdram_extra_;
+    if (icache_extra_ > 0)
+      j["icache_extra_cyc"] = icache_extra_;
     if (g_soc_mode)
       j["sram_lat"] = sram_lat_;
     j["num_hosts"] = hosts_.size();
@@ -91,10 +86,6 @@ public:
   json
   stats_json() const override {
     json j = config_json();
-    if (sdram_rowconf_ > 0) {
-      j["row_hit"] = row_hit_cnt_;
-      j["row_miss"] = row_miss_cnt_;
-    }
     for (size_t i = 0; i < hosts_.size(); ++i) {
       j["host" + std::to_string(i) + "_sdram_rd"] =
           host_sdram_rd_[i];
@@ -121,20 +112,14 @@ public:
 
 private:
   // Total latency for a memory request (in CPU clock cycles).
-  //   SDRAM:      axi_ovhd + sdram_lat + (burst_len - 1) * sdram_burst
-  //               + sdram_rowconf  (if SDRAM bank has a different row open)
-  //   SRAM/CLINT: sram_lat  (SoC mode only)
-  //
-  // Row buffer model: ysyxSoC SDRAM uses 4 banks with per-bank open row.
-  //   Bank = addr[10:9], Row = addr[23:11] (byte-addressed).
-  //   Row hit: no extra latency.  Row miss: +sdram_rowconf_ cycles
-  //   (models TRP+TRCD precharge/activate overhead).
+  //   SDRAM (host > 0): axi_ovhd + sdram_lat + (burst_len - 1) * sdram_burst
+  //   SDRAM (host 0):   above + icache_extra  (per-read extra for iCache)
+  //   SRAM/CLINT:       sram_lat  (SoC mode only)
   inline tint_t
   lat_of(MemTrans* req) {
     assert(req->bst_len >= 1);
     if (g_soc_mode && (isSRAM(req->addr) || isCLINT(req->addr)))
       return sram_lat_;
-    // Track per-host SDRAM access counts
     if (req->id < host_sdram_rd_.size()) {
       if (req->mop == Read)
         ++host_sdram_rd_[req->id];
@@ -143,23 +128,8 @@ private:
     }
     tint_t lat = axi_ovhd_ + sdram_lat_
                  + (req->bst_len - 1) * sdram_burst_;
-    // iCache (host 0) gets extra per-request SDRAM latency
-    // to model SoC AXI XBar routing overhead on the iCache path.
-    if (icache_sdram_extra_ > 0 && req->id == 0)
-      lat += icache_sdram_extra_;
-    if (sdram_rowconf_ > 0) {
-      unsigned bank = (req->addr >> 9) & 0x3;
-      addr_t row = (req->addr >> 11) & 0x1FFF;
-      bool hit = bank_active_[bank] && open_row_[bank] == row;
-      bank_active_[bank] = true;
-      open_row_[bank] = row;
-      if (!hit) {
-        lat += sdram_rowconf_;
-        ++row_miss_cnt_;
-      } else {
-        ++row_hit_cnt_;
-      }
-    }
+    if (icache_extra_ > 0 && req->id == 0 && req->mop == Read)
+      lat += icache_extra_;
     return lat;
   }
 
@@ -172,8 +142,7 @@ private:
   tint_t const sdram_burst_;
   tint_t const sram_lat_;
   tint_t const axi_ovhd_;
-  tint_t const sdram_rowconf_;
-  tint_t const icache_sdram_extra_;
+  tint_t const icache_extra_;
   tick_t r_busy_until_;
   tick_t w_busy_until_;
   std::vector<Cache*> const hosts_;
@@ -181,11 +150,6 @@ private:
   using HostRWChannel = std::pair<MemTransPtr, MemTransPtr>;
   std::vector<HostRWChannel> reqs_; // pair<Read, Write>
 
-  // Per-bank open row tracking for SDRAM row buffer model
-  std::array<addr_t, 4> open_row_;
-  std::array<bool, 4> bank_active_;
-  mutable size_t row_hit_cnt_ = 0;
-  mutable size_t row_miss_cnt_ = 0;
   // Per-host SDRAM access counters
   mutable std::vector<size_t> host_sdram_rd_;
   mutable std::vector<size_t> host_sdram_wr_;
