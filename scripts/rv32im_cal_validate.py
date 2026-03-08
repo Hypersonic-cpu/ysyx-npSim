@@ -42,11 +42,8 @@ NPC_TIMING_FIXED = {
     "stbuf-entries":  "2",
 }
 
-# SoC mode timing (calibrated for RV32IM)
+# SoC mode timing (SdramModel provides SDRAM latency internally)
 SOC_TIMING = {
-    "sdram-lat-us":          "0.060",
-    "sdram-burst-us":        "0.020",
-    "sdram-icache-ovhd-us":  "0.040",
     "sram-lat":              "1",
     "stbuf-entries":         "2",
 }

@@ -54,17 +54,15 @@ set_global_tick(tick_t t) noexcept {
 
 // Memory latency parameters (microsecond-based, converted to cycles
 // via freq_mhz: cycles = ceil(lat_us * freq_mhz))
-//   NPC mode: SDRAM via PMemBox (DPI-C ~40ns + overhead)
-//   SoC mode: SDRAM via XBar + controller; SRAM is on-chip (fast)
+//   NPC mode: fixed SDRAM latency via PMemBox (DPI-C ~40ns + overhead)
+//   SoC mode: SdramModel (bank-aware row-hit/miss/conflict)
 static double sdram_lat_us = 0.043;           // NPC default: 43ns = 0.043us
 static double sdram_burst_us = 0.016;         // NPC default: 16ns = 0.016us
-static double sdram_icache_extra_us = 0.0;   // iCache per-fill SDRAM overhead (us)
 static tint_t axi_ovhd_cyc = 0;              // Fixed AXI protocol overhead (cycles)
 static tint_t sram_lat = 1;                  // SoC: on-chip SRAM latency (cycles)
 // Derived (set by parse_args from sdram_*_us x freq_mhz)
 static tint_t sdram_lat_cyc = 0;
 static tint_t sdram_burst_cyc = 0;
-static tint_t sdram_icache_extra_cyc = 0;
 static std::string trace_file;
 // RTL: iCacheConf(32, 1024, 16, 1) -- 1KB, 16B line, direct-mapped
 static size_t l1i_size = 1024;
@@ -153,7 +151,6 @@ parse_args(int argc, char* argv[]) {
     {"mmio-lat", required_argument, 0, 206U},
     {"freq-mhz", required_argument, 0, 207U},
     {"axi-ovhd-cyc", required_argument, 0, 208U},
-    {"sdram-icache-ovhd-us", required_argument, 0, 209U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -256,9 +253,6 @@ parse_args(int argc, char* argv[]) {
     case 208:
       axi_ovhd_cyc = std::stoul(optarg);
       break;
-    case 209:
-      sdram_icache_extra_us = std::stod(optarg);
-      break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
       return 1;
@@ -276,15 +270,13 @@ parse_args(int argc, char* argv[]) {
 
   // Convert microsecond latencies to cycle counts.
   //   cycles = ceil(lat_us * freq_mhz)
-  // At 1 GHz: 0.051 us x 1000 = 51 cycles.
+  // At 1 GHz: 0.043 us x 1000 = 43 cycles.
   auto us_to_cyc = [](double us, int mhz) -> tint_t {
     return std::max<tint_t>(
       1, static_cast<tint_t>(std::ceil(us * mhz)));
   };
   sdram_lat_cyc = us_to_cyc(sdram_lat_us, freq_mhz);
   sdram_burst_cyc = us_to_cyc(sdram_burst_us, freq_mhz);
-  if (sdram_icache_extra_us > 0.0)
-    sdram_icache_extra_cyc = us_to_cyc(sdram_icache_extra_us, freq_mhz);
 
   return 0;
 }
@@ -455,10 +447,18 @@ main(int argc, char** argv) {
   core->set_cache_ports(icache.get(), dcache.get());
   pipeSim::Processor* proc = &(*core);
 
+  // SoC mode: bank-aware SDRAM timing model.
+  // NPC mode: fixed-latency (sdram_lat_cyc / sdram_burst_cyc).
+  std::unique_ptr<memSim::SdramModel> sdram_model;
+  if (g_soc_mode) {
+    sdram_model =
+        std::make_unique<memSim::SdramModel>(freq_mhz);
+  }
+
   auto sdram = std::make_unique<memSim::RAMArbiter>(
     "SDRAM", sdram_lat_cyc, sdram_burst_cyc,
     std::vector<CacheBase*>({icache.get(), dcache.get()}), sram_lat,
-    axi_ovhd_cyc, sdram_icache_extra_cyc);
+    axi_ovhd_cyc, sdram_model.get());
   icache->set_mem_port(sdram.get());
   dcache->set_mem_port(sdram.get());
   CpuSideAckReceiver cpu_ack = [proc](auto t) { proc->ack_mem_avail(t); };

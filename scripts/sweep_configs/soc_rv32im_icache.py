@@ -33,10 +33,7 @@ default_conf = {
     "l1d-blksize":    "16",
     "l1d-assoc":      "1",
     "bpu-type":       "none",
-    "stbuf-entries":         "2",
-    "sdram-lat-us":          "0.060",
-    "sdram-burst-us":        "0.020",
-    "sdram-icache-ovhd-us":  "0.040",
-    "sram-lat":              "1",
-    "freq-mhz":              "500",
+    "stbuf-entries":  "2",
+    "sram-lat":       "1",
+    "freq-mhz":       "500",
 }

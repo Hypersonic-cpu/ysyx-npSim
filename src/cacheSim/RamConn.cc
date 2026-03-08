@@ -16,12 +16,11 @@ RAMArbiter::recv_req(MemTransPtr req) {
   bool is_read = req->mop == Read;
   auto& ent = is_read ? reqs_.at(id).first : reqs_.at(id).second;
   assert(ent == nullptr);
-  req->lat = lat_of(req.get());
-  DPRINTF(Mem, "Recv [%s] Req from ID = %d lat %u",
-          is_read ? "Read " : "Write", id, req->lat);
   ent = std::move(req);
+  // Compute latency at service time so SDRAM bank state is correct.
   if (is_read) {
     if (r_busy_until_ == InfTime) {
+      ent->lat = lat_of(ent.get());
       auto start = curr_tick();
       r_busy_until_ = start + ent->lat;
       r_serving_id_ = id;
@@ -29,6 +28,7 @@ RAMArbiter::recv_req(MemTransPtr req) {
     }
   } else {
     if (w_busy_until_ == InfTime) {
+      ent->lat = lat_of(ent.get());
       w_busy_until_ = curr_tick() + ent->lat;
       w_serving_id_ = id;
       DPRINTF(Mem, "W-ch scheduled T@ %lu", w_busy_until_);
@@ -59,7 +59,8 @@ RAMArbiter::update_impl() {
     for (auto it = reqs_.rbegin(); it != reqs_.rend(); ++it) {
       if (it->first != nullptr) {
         r_serving_id_ = it->first->id;
-        // +1: PMemBox HOLD→IDLE transition takes 1 extra cycle
+        it->first->lat = lat_of(it->first.get());
+        // +1: turnaround cycle between consecutive accesses
         auto start = curr_tick() + 1;
         r_busy_until_ = start + it->first->lat;
         DPRINTF(Mem, "R-ch picking [Read] @ %08x until T@ %lu",
@@ -92,7 +93,8 @@ RAMArbiter::update_impl() {
     for (auto it = reqs_.rbegin(); it != reqs_.rend(); ++it) {
       if (it->second != nullptr) {
         w_serving_id_ = it->second->id;
-        // +1: PMemBox HOLD→IDLE transition takes 1 extra cycle
+        it->second->lat = lat_of(it->second.get());
+        // +1: turnaround cycle
         w_busy_until_ = curr_tick() + 1 + it->second->lat;
         DPRINTF(Mem, "W-ch picking [Write] @ %08x until T@ %lu",
                 it->second->addr, w_busy_until_);

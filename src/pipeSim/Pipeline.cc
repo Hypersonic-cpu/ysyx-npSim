@@ -148,7 +148,10 @@ Pipeline::do_fetch_0() {
 
     [[maybe_unused]] auto const [rdy, _] = imem->is_ready();
     assert(rdy);
-    if (candidate->is_wrong_path)
+    // SoC mode: wrong-path fetches allocate in iCache and pollute,
+    // matching RTL behavior (iCache does not know about wrong-path).
+    // NPC mode: speculative (no fill), calibrated with fixed latency.
+    if (!g_soc_mode && candidate->is_wrong_path)
       imem->read_req_speculative(candidate->trace_inst.pc);
     else
       imem->read_req(candidate->trace_inst.pc);
