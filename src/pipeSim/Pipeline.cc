@@ -213,6 +213,23 @@ Pipeline::do_decode() {
 
   bool lsu_active = sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem;
 
+  // M-extension scoreboard: block ALL instructions while MUL or DIV
+  // is in-flight.  Matches RTL Dispatcher which stalls IDU whenever
+  // any scoreboard bit is set (scoreboard.orR).
+  if (sim_pipe_.at(IntMulExt) || sim_pipe_.at(IntDivExt)) {
+    if (!lsu_active)
+      set_stall(RAW);
+    tick_t ready = InfTime;
+    if (sim_pipe_.at(IntMulExt))
+      ready = std::min(ready, mul_ready_tick_);
+    if (sim_pipe_.at(IntDivExt))
+      ready = std::min(ready, div_ready_tick_);
+    schedule(Decode, ready);
+    DPRINTF(Pipeline, " ID M-ext scoreboard stall PC=0x%08x until T@%lu",
+            inst.pc, ready);
+    return;
+  }
+
   // RAW hazard check
   auto ready_time =
     std::max(reg_ready_.at(inst.src_reg[0]), reg_ready_.at(inst.src_reg[1]));
@@ -310,22 +327,7 @@ Pipeline::do_execute() {
 
   // Non-branch misprediction: BTB aliasing predicts a non-branch
   // as taken.  RTL EXU flushes in this case.
-  if (!inst.is_branch && trans->br_mispred) {
-    DPRINTF(Pipeline, " EX NonBr Flush PC=0x%08x (false BTB hit)", inst.pc);
-    for (auto& fq_entry : fetch_queue_) {
-      if (fq_entry) {
-        if (fq_entry->wait_mem)
-          fetch_.orphan_resps++;
-        if (!fq_entry->is_wrong_path)
-          ongoing_insts_--;
-      }
-    }
-    fetch_queue_.clear();
-    fetch_.wrong_path = false;
-    fetch_.resume_tick = curr_tick() + BranchMissPenalty;
-    flush_stall_cycles(curr_tick());
-    stall_.in_br_recovery = false;
-  }
+  flush_false_btb_hit(*trans);
 
   // Register forwarding -- matches RTL:
   // EXU: gprFw=false (no forwarding from EX)
@@ -353,10 +355,12 @@ Pipeline::do_mul_ext() {
   if (!(inst.ext_op == trace::IntMulH || inst.ext_op == trace::IntMulL))
     return;
 
-  constexpr tick_t MulLat = 4;
+  flush_false_btb_hit(*trans);
+
+  constexpr tick_t MulLat = 2;
   mul_ready_tick_ = curr_tick() + MulLat;
-  // Register available after computation + Memory passthrough + WB
-  update_reg_time(inst.dst_reg, curr_tick() + MulLat + 1);
+  // RTL: WBU always forwards; result available when scoreboard clears
+  update_reg_time(inst.dst_reg, curr_tick() + MulLat);
   schedule(IntMulExt, curr_tick() + MulLat);
   async_schedule(Memory, curr_tick() + MulLat);
   sim_pipe_.at(IntMulExt) = std::move(sim_pipe_.at(Decode));
@@ -370,9 +374,12 @@ Pipeline::do_div_ext() {
   if (!(inst.ext_op == trace::IntDiv || inst.ext_op == trace::IntRem))
     return;
 
-  constexpr tick_t DivLat = 32;
+  flush_false_btb_hit(*trans);
+
+  constexpr tick_t DivLat = 33;
   div_ready_tick_ = curr_tick() + DivLat;
-  update_reg_time(inst.dst_reg, curr_tick() + DivLat + 1);
+  // RTL: WBU always forwards; result available when scoreboard clears
+  update_reg_time(inst.dst_reg, curr_tick() + DivLat);
   schedule(IntDivExt, curr_tick() + DivLat);
   async_schedule(Memory, curr_tick() + DivLat);
   sim_pipe_.at(IntDivExt) = std::move(sim_pipe_.at(Decode));
@@ -577,6 +584,29 @@ Pipeline::update_reg_time(uint8_t rd, tick_t when) {
     }
   }
   assert(reg_ready_.at(0) == 0);
+}
+
+// False BTB hit: BPU predicted a non-branch as taken.
+// RTL EXU flushes in this case.  Called from EX and M-ext stages.
+void
+Pipeline::flush_false_btb_hit(const Transaction& trans) {
+  const auto& inst = trans.trace_inst;
+  if (inst.is_branch || !trans.br_mispred)
+    return;
+  DPRINTF(Pipeline, " EX NonBr Flush PC=0x%08x (false BTB hit)", inst.pc);
+  for (auto& fq_entry : fetch_queue_) {
+    if (fq_entry) {
+      if (fq_entry->wait_mem)
+        fetch_.orphan_resps++;
+      if (!fq_entry->is_wrong_path)
+        ongoing_insts_--;
+    }
+  }
+  fetch_queue_.clear();
+  fetch_.wrong_path = false;
+  fetch_.resume_tick = curr_tick() + BranchMissPenalty;
+  flush_stall_cycles(curr_tick());
+  stall_.in_br_recovery = false;
 }
 
 } // namespace pipeSim

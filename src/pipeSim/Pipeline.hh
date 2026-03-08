@@ -273,6 +273,7 @@ protected:
   void handle_ifu_resp();
   void send_lsu_req(addr_t addr, word_t data, uint8_t strb, bool is_write);
   void update_reg_time(uint8_t rd, tick_t when);
+  void flush_false_btb_hit(const Transaction& trans);
 
   void
   schedule(PipeStage stage, tick_t when) {
