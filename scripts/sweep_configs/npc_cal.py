@@ -2,7 +2,15 @@
 # No BPU, no dCache, matching RTL NPC-mode parameters.
 # Run with:
 #   python3 scripts/sweep_2d.py --conf scripts/sweep_configs/npc_cal.py \
-#                               --outdir npc-cal --fig-type heatmap
+#       --prefix coremark --outdir npc-cal --fig-type heatmap
+#
+# RTL reference: $NPC_HOME/ccout/sweep-cache-coremark/
+#   Error heatmap: python3 visual/plot_error_heatmap.py \
+#       --sim-dir simout/npc-cal \
+#       --rtl-dir $NPC_HOME/ccout/sweep-cache-coremark \
+#       --prefix coremark --npc-mode \
+#       --icache scripts/sweep_configs/npc_cal.py \
+#       --outfile visual/plots/npc-cal/error_heatmap.png
 
 trace = "tests/coremark-npc-cal2.nptr.zst"
 
@@ -33,7 +41,7 @@ default_conf = {
     "bpu-type":       "none",
     "stbuf-entries":  "0",
     "br-pen":         "1",
-    "sdram-lat":      "45",
-    "sdram-burst-lat":"10",
+    "sdram-lat-us":   "0.045",
+    "sdram-burst-us": "0.010",
     "ifq-size":       "3",
 }

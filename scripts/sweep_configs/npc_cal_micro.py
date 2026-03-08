@@ -1,5 +1,16 @@
 # NPC-mode calibration sweep for MicroBench (train)
 # Matches RTL configs in ccout/sweep-microbench-train/
+# Run with:
+#   python3 scripts/sweep_2d.py --conf scripts/sweep_configs/npc_cal_micro.py \
+#       --prefix microbench --outdir npc-cal-micro --fig-type heatmap
+#
+# RTL reference: $NPC_HOME/ccout/sweep-microbench-train/
+#   Error heatmap: python3 visual/plot_error_heatmap.py \
+#       --sim-dir simout/npc-cal-micro \
+#       --rtl-dir $NPC_HOME/ccout/sweep-microbench-train \
+#       --prefix microbench --npc-mode \
+#       --icache scripts/sweep_configs/npc_cal_micro.py \
+#       --outfile visual/plots/npc-cal-micro/error_heatmap.png
 
 trace = "tests/microbench-npc-cal2.nptr.zst"
 
@@ -27,7 +38,7 @@ default_conf = {
     "bpu-type":       "none",
     "stbuf-entries":  "0",
     "br-pen":         "1",
-    "sdram-lat":      "45",
-    "sdram-burst-lat":"10",
+    "sdram-lat-us":   "0.045",
+    "sdram-burst-us": "0.010",
     "ifq-size":       "3",
 }

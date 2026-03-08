@@ -174,8 +174,7 @@ public:
 public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
-                    size_t stq_size, BranchUnit* bpu,
-                    tick_t br_mis_pen = 1,
+                    size_t stq_size, BranchUnit* bpu, tick_t br_mis_pen = 1,
                     tick_t mmio_lat = 1);
 
   json
@@ -233,13 +232,15 @@ protected:
     Fetch = 0,
     Decode,
     Execute,
+    IntMulExt,
+    IntDivExt,
     Memory,
     WriteBack,
     Num_PipeStage
   };
 
   static constexpr std::array<std::string, Num_PipeStage> StageName{
-    "Fetch", "Decode", "Execute", "Memory", "WrBack"};
+    "Fetch", "Decode", "Execute", "M-Mul", "M-Div", "Memory", "WrBack"};
 
   // A single instruction flowing through the pipeline
   struct Transaction {
@@ -274,6 +275,8 @@ protected:
   void do_fetch_1();
   void do_decode();
   void do_execute();
+  void do_mul_ext();
+  void do_div_ext();
   void do_memory();
   void do_writeback();
 
@@ -313,6 +316,9 @@ private:
   size_t ongoing_insts_;
   tick_t calc_nxtupd_;
 
+  // LSU Serve Sel
+  PipeStage lsu_serving;
+
   // ── Stall attribution ──────────────────────────────────────────
   tick_t last_attr_tick_{0};
   StallCause stall_cause_{NoInst};
@@ -320,12 +326,43 @@ private:
   bool in_br_recovery_{false};
   tick_t brmiss_attr_end_{0};
 
+  bool
+  prev_stage_valid(PipeStage curr) const noexcept {
+    // (!i || sim_pipe_.at(i - 1) != nullptr)
+    switch (curr) {
+    case Fetch:
+      return true;
+    case Decode:
+      return sim_pipe_.at(Fetch) != nullptr;
+    case Execute:
+      return sim_pipe_.at(Decode) != nullptr;
+    case IntMulExt:
+      return sim_pipe_.at(Decode) != nullptr;
+    case IntDivExt:
+      return sim_pipe_.at(Decode) != nullptr;
+    case Memory:
+      return (sim_pipe_.at(Execute) != nullptr
+              || sim_pipe_.at(IntMulExt) != nullptr
+              || sim_pipe_.at(IntDivExt) != nullptr);
+    case WriteBack:
+      return sim_pipe_.at(Memory) != nullptr;
+    // case Memory:
+    //   return sim_pipe_.at(Execute) != nullptr;
+    // case WriteBack:
+    //   return (sim_pipe_.at(Memory) != nullptr
+    //           || sim_pipe_.at(IntMulExt) != nullptr
+    //           || sim_pipe_.at(IntDivExt) != nullptr);
+    default:
+      assert(false);
+      return false;
+    }
+  }
+
   void
   flush_stall_cycles(tick_t until) {
     if (until <= last_attr_tick_)
       return;
-    if (stall_cause_ == BrMispred
-        && until > brmiss_attr_end_
+    if (stall_cause_ == BrMispred && until > brmiss_attr_end_
         && brmiss_attr_end_ > last_attr_tick_) {
       auto gap1 = brmiss_attr_end_ - last_attr_tick_;
       stats.brmiss_stall += gap1;

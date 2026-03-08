@@ -2,7 +2,15 @@
 # No BPU, no dCache, SoC address-based latency routing.
 # Run with:
 #   python3 scripts/sweep_2d.py --conf scripts/sweep_configs/soc_cal.py \
-#                               --outdir soc-cal --fig-type heatmap
+#       --prefix coremark --outdir soc-cal --fig-type heatmap
+#
+# RTL reference: $NPC_HOME/ccout/sweep-cache-coremark-soc/
+#   Error heatmap: python3 visual/plot_error_heatmap.py \
+#       --sim-dir simout/soc-cal \
+#       --rtl-dir $NPC_HOME/ccout/sweep-cache-coremark-soc \
+#       --prefix coremark \
+#       --icache scripts/sweep_configs/soc_cal.py \
+#       --outfile visual/plots/soc-cal/error_heatmap.png
 
 trace = "tests/coremark-soc-cal.nptr.zst"
 
@@ -33,8 +41,8 @@ default_conf = {
     "bpu-type":        "none",
     "stbuf-entries":   "0",
     "br-pen":          "1",
-    "sdram-lat":       "55",
-    "sdram-burst-lat": "23",
+    "sdram-lat-us":    "0.055",
+    "sdram-burst-us":  "0.023",
     "ifq-size":        "3",
     "socmode":         None,
     "sram-lat":        "1",

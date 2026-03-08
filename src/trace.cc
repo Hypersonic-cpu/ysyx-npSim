@@ -46,9 +46,9 @@ TraceSanitizer::dump() const {
                has_src1, 100.0 * has_src1 / total);
   std::println("  Has src2:       {:>10} ({:.2f}%)",
                has_src2, 100.0 * has_src2 / total);
+  std::println("  RV-M ops:       {:>10} ({:.2f}%)", 
+               m_ext_ops, 100.0 * m_ext_ops / total);
   std::println("  Sys ops:        {:>10}", sys_ops);
-  if (bad_marker > 0)
-    std::println("  !! BAD MARKER:  {:>10}", bad_marker);
   if (br_taken_no_target > 0)
     std::println("  !! BR TAKEN NO TARGET: {:>4}", br_taken_no_target);
 }

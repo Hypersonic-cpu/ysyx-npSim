@@ -17,7 +17,7 @@ python3 area/area_est.py --conf-json simout/<dir>/conf.json --outdir simout/<dir
 
 ```bash
 ./build/npsim.elf trace.nptr.zst --npc-mode \
-  --l1i-size 512B --l1i-blksize 16 --sdram-lat 43 --sdram-burst-lat 16 \
+  --l1i-size 512B --l1i-blksize 16 --sdram-lat-us 0.043 --sdram-burst-us 0.016 \
   --ifq-size 4 --stbuf-entries 0 --br-pen 1 -O my-run
 ```
 
@@ -25,7 +25,7 @@ python3 area/area_est.py --conf-json simout/<dir>/conf.json --outdir simout/<dir
 
 ```bash
 ./build/npsim.elf trace.nptr.zst \
-  --l1i-size 512B --l1i-blksize 16 --sdram-lat 51 --sdram-burst-lat 24 \
+  --l1i-size 512B --l1i-blksize 16 --sdram-lat-us 0.051 --sdram-burst-us 0.024 \
   --sram-lat 1 --ifq-size 3 --stbuf-entries 0 --br-pen 1 -O my-run
 ```
 
@@ -55,9 +55,10 @@ $NEMU_HOME/build/riscv32-nemu-interpreter -b IMAGE --nptr OUTPUT.nptr.zst
 | `--l1d-size` | `0` | dCache size (0 = disabled) |
 | `--stbuf-entries` | `0` | StoreBuffer entries |
 | `--bpu-type` | `none` | `bimodal`/`gshare`/`tournament`/`none` |
-| `--sdram-lat` | `43` | SDRAM first-beat latency |
-| `--sdram-burst-lat` | `16` | SDRAM per-beat burst latency |
-| `--sram-lat` | `1` | SoC on-chip SRAM latency |
+| `--sdram-lat-us` | `0.043` | SDRAM first-beat latency (µs; ×1000 = cycles @ 1 GHz) |
+| `--sdram-burst-us` | `0.016` | SDRAM per-beat burst latency (µs) |
+| `--sram-lat` | `1` | SoC on-chip SRAM latency (cycles) |
+| `--freq-mhz` | `1000` | CPU frequency for µs→cycle conversion |
 | `--npc-mode` | off | Flat SDRAM model (no address routing) |
 | `--ifq-size` | `4` | Fetch queue depth (RTL PipeDepth+1) |
 | `--br-pen` | `1` | Branch misprediction penalty |
@@ -72,9 +73,9 @@ $NEMU_HOME/build/riscv32-nemu-interpreter -b IMAGE --nptr OUTPUT.nptr.zst
 
 | Parameter | NPC Mode | SoC Mode |
 |-----------|----------|----------|
-| `sdram_lat` | 43 | 51 |
-| `sdram_burst_lat` | 16 | 24 |
-| `sram_lat` | — | 1 |
+| `sdram-lat-us` | 0.043 | 0.051 |
+| `sdram-burst-us` | 0.016 | 0.024 |
+| `sram-lat` | — | 1 |
 | `ifq_size` | 4 | 3 |
 | `br_pen` | 1 | 1 |
 
@@ -96,12 +97,118 @@ DFF=5.226µm²/bit, comb=15%. SRAM=0.346/0.55 µm²/bit, comb=31%.
 ```bash
 # NPC IPC sweep
 python3 scripts/sweep_2d.py --conf scripts/sweep_configs/npc_cal_feb27.py \
-  --outdir 27Feb-npc --jobs 4 --no-area
+  --prefix coremark --outdir 27Feb-npc --jobs 4 --no-area
 
 # SoC IPC sweep
 python3 scripts/sweep_2d.py --conf scripts/sweep_configs/soc_cal_feb27.py \
-  --outdir 27Feb-soc --jobs 4 --no-area
+  --prefix coremark --outdir 27Feb-soc --jobs 4 --no-area
 ```
+
+## Sweep & Visualization
+
+### Directory naming
+
+Simulation output and RTL reference directories use a canonical format:
+
+```
+{prefix}_l1i-{sz}-b{blk}-a{assoc}[_l1d-{sz}-b{blk}-a{assoc}][_bpu-{type}-h{bht}-t{btb}]
+```
+
+Example: `coremark_l1i-1024-b16-a1_l1d-512-b16-a1_bpu-bimodal-h64-t64`
+
+Sizes are always in bytes (integers). The `--prefix` argument to `sweep_2d.py`
+enables canonical naming; omit for legacy `axis_name-val` format.
+
+### Sweep config format
+
+Sweep configs are Python modules in `scripts/sweep_configs/`. Two formats:
+
+**Classic 2D** (`axis1`, `axis2`, `default_conf`): sweeps a single 2D grid.
+
+**Multi-component** (`icache_axis`, `dcache_axis`, `bpu_axis`, `default_conf`):
+generates the Cartesian product of all enabled components. Each component dict
+has `axis1`, optional `axis2`, and `fixed` (applied to every run).
+
+```python
+# scripts/sweep_configs/example.py
+trace = "tests/coremark-soc-ext.nptr.zst"
+
+icache_axis = {
+    "axis1": {"name": "l1i_size", "vals": [{"l1i-size": "512B"}, {"l1i-size": "1kB"}],
+               "labels": ["512B", "1kB"]},
+    "axis2": {"name": "l1i_blksize", "vals": [{"l1i-blksize": "16"}, {"l1i-blksize": "32"}],
+               "labels": ["16B", "32B"]},
+    "fixed": {"l1i-assoc": "1"},
+}
+dcache_axis = {
+    "axis1": {"name": "l1d_size", "vals": [{"l1d-size": "512B"}, {"l1d-size": "1kB"}],
+               "labels": ["512B", "1kB"]},
+    "fixed": {"l1d-blksize": "16", "l1d-assoc": "1"},
+}
+bpu_axis = {
+    "axis1": {"name": "btb_size",
+               "vals": [{"bpu-type": "bimodal", "bpu-size": "64", "btb-size": "64"},
+                        {"bpu-type": "bimodal", "bpu-size": "128", "btb-size": "128"}],
+               "labels": ["btb64", "btb128"]},
+    "fixed": {},
+}
+default_conf = {
+    "stbuf-entries": "2", "br-pen": "1",
+    "sdram-lat-us": "0.051", "sdram-burst-us": "0.024",
+    "sram-lat": "1", "ifq-size": "3",
+}
+```
+
+### Running a sweep
+
+```bash
+# Multi-component sweep (generates 4×2 × 2 × 3 = 48 dirs)
+python3 scripts/sweep_2d.py \
+    --conf   scripts/sweep_configs/cfg_ext_valid.py \
+    --prefix cfg-ext-valid --outdir cfg-ext-valid \
+    --no-area --jobs 8
+
+# Classic 2D sweep with canonical naming
+python3 scripts/sweep_2d.py \
+    --conf scripts/sweep_configs/soc_cal.py \
+    --prefix coremark --outdir soc-cal --jobs 4
+```
+
+### Plotting
+
+```bash
+# Performance heatmap (all 3 component panels)
+python3 visual/plot_perf.py \
+    --sim-dir simout/cfg-ext-valid --prefix cfg-ext-valid --metric ipc \
+    --icache scripts/sweep_configs/cfg_ext_valid.py \
+    --dcache scripts/sweep_configs/cfg_ext_valid.py \
+    --bpu    scripts/sweep_configs/cfg_ext_valid.py \
+    --outfile visual/plots/cfg-ext-valid/perf_ipc.png
+
+# Error heatmap vs RTL (iCache panel only)
+python3 visual/plot_error_heatmap.py \
+    --sim-dir simout/soc-cal \
+    --rtl-dir $NPC_HOME/ccout/sweep-cache-coremark-soc \
+    --prefix  coremark \
+    --icache  scripts/sweep_configs/soc_cal.py \
+    --outfile visual/plots/soc-cal/error_heatmap.png
+```
+
+When plotting with a multi-component config, non-active components are fixed at
+their **first** axis1 value (+ `fixed` params). Pass all relevant component
+flags to ensure the canonical dir name matches what was simulated.
+
+### Available configs
+
+| Config | Format | Description |
+|--------|--------|-------------|
+| `npc_cal.py` | Classic 2D | NPC-mode iCache calibration (45/10 cycles) |
+| `soc_cal.py` | Classic 2D | SoC-mode iCache calibration (55/23 cycles) |
+| `npc_cal_feb27.py` | Classic 2D | NPC-mode calibration (43/16, ≤3.4% IPC error) |
+| `soc_cal_feb27.py` | Classic 2D | SoC-mode calibration (51/24, ≤3.3% IPC error) |
+| `cfg_ext_valid.py` | Multi-comp | Combined iCache×dCache×BPU SoC sweep |
+| `bpu_vs_pf.py` | Classic 2D | BPU type vs prefetcher |
+| `dcache_vs_pf.py` | Classic 2D | dCache size vs prefetcher |
 
 ## Architecture
 
@@ -134,9 +241,12 @@ src/
 ├── areaSim/AreaEst.hh       Area estimation helpers
 └── defines/                 Base classes, types, debug flags
 scripts/
-├── sweep_2d.py              2D parameter sweep
-├── compare_rtl.py           RTL comparison heatmap
-└── sweep_configs/           Sweep config files
+├── sweep_2d.py              2D/multi-component parameter sweep
+└── sweep_configs/           Sweep config files (Python modules)
+visual/
+├── plot_perf.py             Performance heatmap (IPC / miss rates)
+├── plot_error_heatmap.py    IPC error heatmap vs RTL
+└── plots/                   Generated figures
 area/
 └── area_est.py              Offline area estimation from conf.json
 ```

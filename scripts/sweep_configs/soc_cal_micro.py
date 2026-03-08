@@ -1,5 +1,16 @@
 # SoC-mode calibration sweep for MicroBench (train)
 # Matches RTL configs in ccout/sweep-microbench-soc-train/
+# Run with:
+#   python3 scripts/sweep_2d.py --conf scripts/sweep_configs/soc_cal_micro.py \
+#       --prefix microbench --outdir soc-cal-micro --fig-type heatmap
+#
+# RTL reference: $NPC_HOME/ccout/sweep-microbench-soc-train/
+#   Error heatmap: python3 visual/plot_error_heatmap.py \
+#       --sim-dir simout/soc-cal-micro \
+#       --rtl-dir $NPC_HOME/ccout/sweep-microbench-soc-train \
+#       --prefix microbench \
+#       --icache scripts/sweep_configs/soc_cal_micro.py \
+#       --outfile visual/plots/soc-cal-micro/error_heatmap.png
 
 trace = "tests/microbench-soc-cal.nptr.zst"
 
@@ -27,8 +38,8 @@ default_conf = {
     "bpu-type":        "none",
     "stbuf-entries":   "0",
     "br-pen":          "1",
-    "sdram-lat":       "55",
-    "sdram-burst-lat": "23",
+    "sdram-lat-us":    "0.055",
+    "sdram-burst-us":  "0.023",
     "ifq-size":        "3",
     "socmode":         None,
     "sram-lat":        "1",

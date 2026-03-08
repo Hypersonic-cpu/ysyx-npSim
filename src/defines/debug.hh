@@ -63,6 +63,14 @@ set_flags(const std::string& flag_str) {
   do {                                                                      \
   } while (0)
 #else
+#define DPRINTFI(flag, fmt, ...)                                             \
+  do {                                                                      \
+    if (debug::enabled_flags & debug::flag) [[unlikely]] {                  \
+      fprintf(stderr, "%lu: [%s] " fmt, curr_tick(),                   \
+              this->name().c_str(), ##__VA_ARGS__);                         \
+    }                                                                       \
+  } while (0)
+
 #define DPRINTF(flag, fmt, ...)                                             \
   do {                                                                      \
     if (debug::enabled_flags & debug::flag) [[unlikely]] {                  \

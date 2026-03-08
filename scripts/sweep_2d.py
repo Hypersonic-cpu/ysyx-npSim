@@ -8,6 +8,13 @@ Usage:
   python3 sweep_2d.py --conf scripts/sweep_configs/cache_vs_line.py \\
                       --outdir my_cache_sweep [--fig-type heatmap] [--jobs 4]
 
+  # With canonical naming (recommended — compatible with visual/plot_*.py):
+  python3 sweep_2d.py --conf scripts/sweep_configs/npc_cal.py \\
+                      --prefix coremark --outdir npc-cal --fig-type heatmap
+
+  Canonical subdir format: {prefix}_l1i-{size}-b{blk}-a{assoc}[_l1d-...][_bpu-...]
+  Compatible with: visual/plot_error_heatmap.py and visual/plot_perf.py
+
 Config file (Python module defining these names):
 
   trace        = "tests/coremark-10rnd-vld.nptr.zst"
@@ -43,6 +50,7 @@ import os
 import sys
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from itertools import product as cartesian_product
 from pathlib import Path
 
 import numpy as np
@@ -115,6 +123,112 @@ def make_tag(outdir, axis1, axis2, i, j):
     return f"{outdir}/{axis1['name']}-{l1}_{axis2['name']}-{l2}"
 
 
+def _parse_size_str(s) -> int:
+    """Parse size strings like '256B', '1kB', '4kB' to integer bytes."""
+    if s is None:
+        return 0
+    s = str(s).strip()
+    if s.lower().endswith("kb"):
+        return int(s[:-2]) * 1024
+    elif s.lower().endswith("mb"):
+        return int(s[:-2]) * 1024 * 1024
+    elif s.lower().endswith("b"):
+        return int(s[:-1])
+    else:
+        try:
+            return int(s)
+        except ValueError:
+            return 0
+
+
+def encode_config(params: dict) -> str:
+    """Encode npsim params dict to canonical config suffix string.
+
+    Only encodes l1i/l1d/bpu components; ignores timing/mem params.
+    Format: l1i-{size}-b{blk}-a{assoc}[_l1d-{size}-b{blk}-a{assoc}][_bpu-{type}-h{bht}-t{btb}]
+    """
+    parts = []
+    l1i_s = _parse_size_str(params.get("l1i-size", "0"))
+    if l1i_s > 0:
+        blk   = int(params.get("l1i-blksize", 16))
+        assoc = int(params.get("l1i-assoc", 1))
+        parts.append(f"l1i-{l1i_s}-b{blk}-a{assoc}")
+    l1d_s = _parse_size_str(params.get("l1d-size", "0"))
+    if l1d_s > 0:
+        blk   = int(params.get("l1d-blksize", 16))
+        assoc = int(params.get("l1d-assoc", 1))
+        parts.append(f"l1d-{l1d_s}-b{blk}-a{assoc}")
+    bpu = params.get("bpu-type")
+    if bpu and bpu != "none":
+        bht = int(params.get("bpu-size", 0))
+        btb = int(params.get("btb-size", 0))
+        parts.append(f"bpu-{bpu}-h{bht}-t{btb}")
+    return "_".join(parts) if parts else "default"
+
+
+def make_canonical_tag(outdir, prefix, default_conf, v1, v2):
+    """Build simout tag using canonical naming (with --prefix).
+
+    Returns: '{outdir}/{prefix}_{config_suffix}'
+    """
+    merged = dict(default_conf)
+    merged.update(_get_params(v1))
+    merged.update(_get_params(v2))
+    return f"{outdir}/{prefix}_{encode_config(merged)}"
+
+
+# ── Multi-component config ─────────────────────────────────────────────────────
+
+def _is_multicomp(conf) -> bool:
+    """Return True if conf uses the new multi-component axis format."""
+    return any(hasattr(conf, k)
+               for k in ("icache_axis", "dcache_axis", "bpu_axis"))
+
+
+def _expand_comp(comp: dict) -> list[dict]:
+    """Expand a component axis dict to a flat list of merged param dicts."""
+    axis1   = comp["axis1"]
+    axis2   = comp.get("axis2")
+    fixed   = comp.get("fixed", {})
+    result  = []
+    for v1 in axis1["vals"]:
+        p1 = _get_params(v1)
+        if axis2:
+            for v2 in axis2["vals"]:
+                result.append({**fixed, **p1, **_get_params(v2)})
+        else:
+            result.append({**fixed, **p1})
+    return result
+
+
+def build_multicomp_combos(conf, outdir: str, prefix: str | None
+                           ) -> list[tuple[str, dict]]:
+    """Build (tag, merged_params) list for a multi-component config.
+
+    Each element is one simulation run.
+    """
+    default_conf = conf.default_conf
+    comp_lists   = []
+    for key in ("icache_axis", "dcache_axis", "bpu_axis"):
+        if hasattr(conf, key):
+            comp_lists.append(_expand_comp(getattr(conf, key)))
+        else:
+            comp_lists.append([{}])
+
+    combos = []
+    for parts in cartesian_product(*comp_lists):
+        merged = dict(default_conf)
+        for p in parts:
+            merged.update(p)
+        suffix = encode_config(merged)
+        if prefix:
+            tag = f"{outdir}/{prefix}_{suffix}"
+        else:
+            tag = f"{outdir}/{suffix}"
+        combos.append((tag, merged))
+    return combos
+
+
 # ── Simulation ─────────────────────────────────────────────────────────────────
 
 def _build_npsim_cmd(trace, outdir_tag, default_conf, v1, v2):
@@ -135,6 +249,24 @@ def _build_npsim_cmd(trace, outdir_tag, default_conf, v1, v2):
 def run_one_sim(trace, outdir_tag, default_conf, v1, v2):
     """Run npsim for one configuration. Returns (tag, ok, message)."""
     cmd = _build_npsim_cmd(trace, outdir_tag, default_conf, v1, v2)
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(NPSIM_HOME))
+        if r.returncode != 0:
+            return outdir_tag, False, r.stderr.strip()
+        return outdir_tag, True, ""
+    except Exception as e:
+        return outdir_tag, False, str(e)
+
+
+def run_one_sim_merged(trace, outdir_tag, params):
+    """Run npsim for one configuration given a pre-merged params dict."""
+    cmd = [str(NPSIM_BIN), str(NPSIM_HOME / trace)]
+    for k, v in params.items():
+        if v is None or v is True:
+            cmd.append(f"--{k}")
+        else:
+            cmd += [f"--{k}", str(v)]
+    cmd += ["--outdir", outdir_tag, "--print-none"]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, cwd=str(NPSIM_HOME))
         if r.returncode != 0:
@@ -478,19 +610,73 @@ def main():
     p.add_argument("--no-area", action="store_true", help="Skip area estimation")
     p.add_argument("--trace", default=None,
                    help="Override trace file from config")
+    p.add_argument("--prefix", default=None,
+                   help="Prefix for canonical subdir naming: "
+                        "{outdir}/{prefix}_l1i-{size}-b{blk}-a{assoc}... "
+                        "Required for compatibility with visual/plot_*.py")
     args = p.parse_args()
 
     # ── Load and validate config ───────────────────────────────────────────
     conf = load_conf(args.conf)
-    axis1        = conf.axis1
-    axis2        = conf.axis2
     default_conf = conf.default_conf
     trace        = args.trace or conf.trace
+    outdir       = args.outdir
+
+    # ── Branch: multi-component vs classic 2D sweep ───────────────────────
+    if _is_multicomp(conf):
+        combos = build_multicomp_combos(conf, outdir, args.prefix)
+        total  = len(combos)
+        comp_counts = []
+        for key in ("icache_axis", "dcache_axis", "bpu_axis"):
+            if hasattr(conf, key):
+                comp = getattr(conf, key)
+                n = len(comp["axis1"]["vals"]) * len(comp.get("axis2", {}).get("vals", [{}]))
+                comp_counts.append(f"{key.replace('_axis','')}:{n}")
+        print(f"Multi-component sweep '{outdir}': "
+              f"{' × '.join(comp_counts)} = {total} configs")
+        print(f"  trace = {trace}")
+
+        if not args.no_sim:
+            print(f"\n[1/2] Simulating  ({args.jobs} parallel jobs)…")
+            with ThreadPoolExecutor(max_workers=args.jobs) as ex:
+                futures = {
+                    ex.submit(run_one_sim_merged, trace, tag, params): tag
+                    for tag, params in combos
+                }
+                done = 0
+                for fut in as_completed(futures):
+                    tag, ok, msg = fut.result()
+                    done += 1
+                    short  = tag.split("/")[-1]
+                    status = "ok" if ok else f"FAIL — {msg}"
+                    print(f"  [{done:>{len(str(total))}}/{total}] {short}: {status}")
+        else:
+            print("[1/2] Simulation skipped (--no-sim)")
+
+        if not args.no_area:
+            print(f"\n[2/2] Estimating area  ({args.jobs} parallel jobs)…")
+            with ThreadPoolExecutor(max_workers=args.jobs) as ex:
+                futures = {ex.submit(run_one_area, tag): tag for tag, _ in combos}
+                done = 0
+                for fut in as_completed(futures):
+                    tag, ok = fut.result()
+                    done += 1
+                    short = tag.split("/")[-1]
+                    print(f"  [{done:>{len(str(total))}}/{total}] {short}: {'ok' if ok else 'FAIL'}")
+        else:
+            print("[2/2] Area estimation skipped (--no-area)")
+
+        print("\nDone. Use visual/plot_perf.py or visual/plot_error_heatmap.py "
+              "to visualise results.")
+        return
+
+    # ── Classic 2D sweep ──────────────────────────────────────────────────
+    axis1 = conf.axis1
+    axis2 = conf.axis2
     validate_conf(axis1, axis2, default_conf)
 
     n1 = len(axis1["vals"])
     n2 = len(axis2["vals"])
-    outdir = args.outdir
 
     print(f"Sweep '{outdir}': {n1}×{n2} = {n1*n2} configs")
     print(f"  axis1 = {axis1['name']}  ({n1} values)")
@@ -504,7 +690,12 @@ def main():
     combos     = []   # (tag, v1, v2)
     for i in range(n1):
         for j in range(n2):
-            tag = make_tag(outdir, axis1, axis2, i, j)
+            if args.prefix:
+                tag = make_canonical_tag(
+                    outdir, args.prefix, default_conf,
+                    axis1["vals"][i], axis2["vals"][j])
+            else:
+                tag = make_tag(outdir, axis1, axis2, i, j)
             tags_grid[i][j] = tag
             tags_flat.append(tag)
             labels_flat.append(

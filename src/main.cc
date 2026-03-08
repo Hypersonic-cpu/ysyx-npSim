@@ -361,7 +361,7 @@ append_stats_json(json& root, size_t curr_cnt,
     {"has_src1", san.has_src1},
     {"has_src2", san.has_src2},
     {"sys_ops", san.sys_ops},
-    {"bad_marker", san.bad_marker},
+    {"rvm_ops", san.m_ext_ops},
     {"br_taken_no_target", san.br_taken_no_target},
   };
   root[key] = stats_obj;
