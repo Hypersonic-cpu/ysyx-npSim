@@ -58,30 +58,19 @@ protected:
   bool is_draining_;
 };
 
-// ─── 5-stage in-order pipeline ───────────────────────────────────
+// 5-stage in-order pipeline.
 //
-//  RTL mapping (NPC mode, no BPU, no dCache):
+// Branch misprediction model (matches RTL FetchStage):
 //
-//    IFU ──► IDU ──► EXU ──► LSU ──► WBU
-//     │                       │
-//    iCache              NoCache
-//     │                       │
-//     └──── AXI Arbiter(2) ───┘
-//                 │
-//              PMemBox
+// At IF we already know the branch outcome from the trace.
+// If mispredicted, the IFU continues fetching wrong-path PCs
+// (polluting iCache) until the branch reaches EX stage where
+// the hardware flush occurs.  At that point the IFQ is flushed
+// and the IFU redirects to the correct target.
 //
-//  Branch misprediction model:
-//
-//  At IF we already know the branch outcome from the trace.
-//  If mispredicted, the IFU continues fetching wrong-path PCs
-//  (polluting iCache) until the branch reaches EX stage where
-//  the hardware flush occurs.  At that point the IFQ is flushed
-//  and the IFU redirects to the correct target.
-//
-//  This matches RTL behavior: FetchStage keeps issuing ar requests
-//  at sequential PCs until ExecuteStage signals flushWire via
-//  fromEx.valid && brex.take, which invalidates all validBuf
-//  entries and redirects pc := brTarget.
+// FetchStage keeps issuing ar requests at sequential PCs until
+// ExecuteStage signals flushWire via fromEx.valid && brex.take,
+// which invalidates all validBuf entries and redirects pc.
 //
 class Pipeline final : public Processor {
 public:
@@ -91,7 +80,7 @@ public:
     NoInst,    // IFU stall (iCache miss, no fetch ready)
     LsuStall,  // LSU blocked (load/store in flight)
     BrMispred, // Branch misprediction recovery
-    RAW,       // Read-after-write hazard
+    RAW,       // Read-after-write hazard (including WAW from M-ext)
     NumCauses
   };
 
@@ -195,10 +184,10 @@ public:
   void
   reset_stats() override {
     SimObject::reset_stats();
-    last_attr_tick_ = curr_tick();
-    reset_tick_ = curr_tick();
-    stall_cause_ = NoInst;
-    in_br_recovery_ = false;
+    stall_.last_tick = curr_tick();
+    stall_.reset_tick = curr_tick();
+    stall_.cause = NoInst;
+    stall_.in_br_recovery = false;
   }
 
   void update_impl() override;
@@ -262,7 +251,7 @@ protected:
   using TransPtr = std::unique_ptr<Transaction>;
 
   // Cycles from EX flush until IFU can issue first correct-path
-  // fetch.  In RTL this is 1 cycle (flushWire → next cycle fetch).
+  // fetch.  In RTL this is 1 cycle (flushWire to next cycle fetch).
   tick_t BranchMissPenalty;
 
   using SimPipe = std::array<TransPtr, Num_PipeStage>;
@@ -316,19 +305,20 @@ private:
   size_t ongoing_insts_;
   tick_t calc_nxtupd_;
 
-  // LSU Serve Sel
+  // LSU stage selection (Div > Mul > Mem priority)
   PipeStage lsu_serving;
 
-  // ── Stall attribution ──────────────────────────────────────────
-  tick_t last_attr_tick_{0};
-  StallCause stall_cause_{NoInst};
-  tick_t reset_tick_{0};
-  bool in_br_recovery_{false};
-  tick_t brmiss_attr_end_{0};
+  // Stall attribution state
+  struct StallAttr {
+    tick_t last_tick{0};
+    tick_t reset_tick{0};
+    StallCause cause{NoInst};
+    bool in_br_recovery{false};
+    tick_t brmiss_attr_end{0};
+  } stall_;
 
   bool
   prev_stage_valid(PipeStage curr) const noexcept {
-    // (!i || sim_pipe_.at(i - 1) != nullptr)
     switch (curr) {
     case Fetch:
       return true;
@@ -346,12 +336,6 @@ private:
               || sim_pipe_.at(IntDivExt) != nullptr);
     case WriteBack:
       return sim_pipe_.at(Memory) != nullptr;
-    // case Memory:
-    //   return sim_pipe_.at(Execute) != nullptr;
-    // case WriteBack:
-    //   return (sim_pipe_.at(Memory) != nullptr
-    //           || sim_pipe_.at(IntMulExt) != nullptr
-    //           || sim_pipe_.at(IntDivExt) != nullptr);
     default:
       assert(false);
       return false;
@@ -360,20 +344,20 @@ private:
 
   void
   flush_stall_cycles(tick_t until) {
-    if (until <= last_attr_tick_)
+    if (until <= stall_.last_tick)
       return;
-    if (stall_cause_ == BrMispred && until > brmiss_attr_end_
-        && brmiss_attr_end_ > last_attr_tick_) {
-      auto gap1 = brmiss_attr_end_ - last_attr_tick_;
+    if (stall_.cause == BrMispred && until > stall_.brmiss_attr_end
+        && stall_.brmiss_attr_end > stall_.last_tick) {
+      auto gap1 = stall_.brmiss_attr_end - stall_.last_tick;
       stats.brmiss_stall += gap1;
-      auto gap2 = until - brmiss_attr_end_;
+      auto gap2 = until - stall_.brmiss_attr_end;
       stats.noinst += gap2;
-      stall_cause_ = NoInst;
-      last_attr_tick_ = until;
+      stall_.cause = NoInst;
+      stall_.last_tick = until;
       return;
     }
-    auto gap = until - last_attr_tick_;
-    switch (stall_cause_) {
+    auto gap = until - stall_.last_tick;
+    switch (stall_.cause) {
     case LsuStall:
       stats.lsu_stall += gap;
       break;
@@ -387,48 +371,40 @@ private:
       stats.noinst += gap;
       break;
     }
-    last_attr_tick_ = until;
+    stall_.last_tick = until;
   }
 
   void
   set_stall(StallCause new_cause) {
-    if (new_cause == stall_cause_)
+    if (new_cause == stall_.cause)
       return;
     flush_stall_cycles(curr_tick());
-    stall_cause_ = new_cause;
+    stall_.cause = new_cause;
   }
 
-  // ── Fetch queue (models RTL FetchStage PipeDepth buffer) ───────
+  // Fetch queue (models RTL FetchStage PipeDepth buffer)
   std::list<TransPtr> fetch_queue_;
   size_t ifq_size_;
 
-  // ── Wrong-path state ───────────────────────────────────────────
-  // When a mispredicted branch enters IF, subsequent fetches use
-  // wrong-path PCs until the branch reaches EX (flush_at_tick_).
-  // At that tick, the IFQ is flushed and IFU redirects.
-  bool in_wrong_path_{false};
-  addr_t wrong_path_pc_{0}; // Next wrong-path PC to fetch
-
-  // SoC mode: IDU drains completed wrong-path IFQ entries at
-  // 1/cycle, freeing slots for new wrong-path fetches.  This
-  // matches SoC RTL behavior where high SDRAM latency naturally
-  // rate-limits wrong-path iCache pollution.
-  //
-  // NPC mode (soc_mode_=false): wrong-path entries stay in IFQ
-  // until EX flushes, limiting total wrong-path fetches to
-  // IFQ_SIZE.  This matches NPC RTL's lower memory latency.
-
-  // After EX flush, IFU needs BranchMissPenalty cycles before
-  // issuing the first correct-path fetch.
-  tick_t fetch_resume_tick_{0};
-
-  // Count of in-flight iCache requests that should be ignored
-  // (their fetch_queue_ entries were flushed by EX).
-  size_t orphan_icache_resps_{0};
+  // Wrong-path fetch state. When a mispredicted branch enters IF,
+  // subsequent fetches use wrong-path PCs until the branch reaches
+  // EX.  SoC mode: IDU drains wrong-path IFQ entries at 1/cycle,
+  // freeing slots (matches high-latency RTL contention).
+  // NPC mode: entries stay until EX flushes (limits to IFQ_SIZE).
+  struct FetchState {
+    bool wrong_path{false};
+    addr_t wrong_path_pc{0};  // next wrong-path PC to fetch
+    tick_t resume_tick{0};    // first cycle IFU may fetch after flush
+    size_t orphan_resps{0};   // in-flight iCache resps to discard
+  } fetch_;
 
   // MMIO response timer (SoC non-cacheable accesses)
   tick_t mmio_resp_tick_{InfTime};
   tick_t mmio_lat_;
+
+  // M-extension computation completion ticks
+  tick_t mul_ready_tick_{0};
+  tick_t div_ready_tick_{0};
 };
 
 } // namespace pipeSim
