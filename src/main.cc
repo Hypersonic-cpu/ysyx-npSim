@@ -94,6 +94,7 @@ static int freq_mhz = 1000;  // CPU frequency in MHz (default 1 GHz)
 static std::string l1i_pref_type = "none"; // iCache prefetcher type
 static std::string l1d_pref_type = "none"; // dCache prefetcher type
 static bool sram_dff = true;          // Area model: DFF or SRAM macro
+static bool bpu_no_predecode = false; // if true: predict for all instructions
 
 // Dummy physical memory stubs (active mode: caches don't read data)
 void
@@ -152,6 +153,7 @@ parse_args(int argc, char* argv[]) {
     {"freq-mhz", required_argument, 0, 207U},
     {"axi-ovhd-cyc", required_argument, 0, 208U},
     {"l1i-lat", required_argument, 0, 209U},
+    {"bpu-no-predecode", no_argument, 0, 210U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -256,6 +258,9 @@ parse_args(int argc, char* argv[]) {
       break;
     case 209:
       l1i_pipe_depth = std::stoul(optarg);
+      break;
+    case 210U:
+      bpu_no_predecode = true;
       break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
@@ -400,6 +405,7 @@ main(int argc, char** argv) {
 
   /** Component Configuration */
   auto branch_unit = create_branch_unit();
+  branch_unit->set_no_predecode(bpu_no_predecode);
 
   // When dCache exists, no need for store queue (write-through)
   // Only use store queue when NoCache (need buffering for SDRAM)
@@ -576,10 +582,6 @@ main(int argc, char** argv) {
 
   // Dump final stats (use cumulative sanitizer)
   append_stats_json(root, dump_cnt++, simlist, sanitizer_all);
-  if (print_mode == 2) {
-    std::println("--- Cumulative Trace Summary ---");
-    sanitizer_all.dump();
-  }
   if (!out_dir.empty()) {
     outfile_write("simout/" + out_dir + "/stats.json", root);
   }

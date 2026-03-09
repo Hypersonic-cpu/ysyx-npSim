@@ -110,14 +110,12 @@ Pipeline::do_fetch_0() {
 
       // Branch prediction at IF stage
       const auto& inst = candidate->trace_inst;
-      auto pred = bpu->predict(inst.pc);
+      auto pred = bpu->predict_at_fetch(inst.pc, inst.is_branch);
       auto real_taken = inst.is_branch && inst.br_taken;
       addr_t real_target = real_taken ? inst.mem_addr : 0;
       auto accurate = bpu->judge(real_taken, real_target, pred);
       candidate->br_pred = pred;
       candidate->br_mispred = !accurate;
-      if (inst.is_branch)
-        bpu->stats.br_accesses++;
       if (!accurate && !inst.is_branch)
         bpu->stats.nonbr_mispred++;
 

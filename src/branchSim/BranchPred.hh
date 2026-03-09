@@ -129,7 +129,7 @@ struct BPStatsBase : public StatsBase {
 
   double
   miss_rate() const {
-    return accesses > 0 ? (double)misses / accesses : 0.0;
+    return br_accesses > 0 ? (double)misses / br_accesses : 0.0;
   }
 
   json
@@ -421,6 +421,7 @@ private:
   std::unique_ptr<BranchPred> bpu_;
   std::unique_ptr<BTBBase> btb_;
   std::unique_ptr<ReturnAddrStack> ras_;
+  bool no_predecode_ = false; // if true: predict for all instructions (not just branches)
 
 public:
   explicit BranchUnit(std::unique_ptr<BranchPred> bpu,
@@ -437,6 +438,20 @@ public:
     if (ras_depth > 0) {
       ras_ = std::make_unique<ReturnAddrStack>(ras_depth);
     }
+  }
+
+  void
+  set_no_predecode(bool v) { no_predecode_ = v; }
+
+  // Called at IF stage. Skips prediction for non-branch instructions unless
+  // --bpu-no-predecode is set (which disables predecode filtering).
+  BranchResult
+  predict_at_fetch(addr_t pc, bool is_branch) {
+    if (!no_predecode_ && !is_branch)
+      return {false, 0, false};
+    if (is_branch)
+      stats.br_accesses++;
+    return predict(pc);
   }
 
   BranchResult
