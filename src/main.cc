@@ -64,7 +64,7 @@ static tint_t sram_lat = 1;                  // SoC: on-chip SRAM latency (cycle
 static tint_t sdram_lat_cyc = 0;
 static tint_t sdram_burst_cyc = 0;
 static std::string trace_file;
-// RTL: iCacheConf(32, 1024, 16, 1) -- 1KB, 16B line, direct-mapped
+static size_t l1i_pipe_depth = 3; // iCache pipeline depth (3->3cyc hit, 2->2cyc)
 static size_t l1i_size = 1024;
 static size_t l1i_blksize = 16;
 static size_t l1i_assoc = 1;
@@ -151,6 +151,7 @@ parse_args(int argc, char* argv[]) {
     {"mmio-lat", required_argument, 0, 206U},
     {"freq-mhz", required_argument, 0, 207U},
     {"axi-ovhd-cyc", required_argument, 0, 208U},
+    {"l1i-lat", required_argument, 0, 209U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -252,6 +253,9 @@ parse_args(int argc, char* argv[]) {
       break;
     case 208:
       axi_ovhd_cyc = std::stoul(optarg);
+      break;
+    case 209:
+      l1i_pipe_depth = std::stoul(optarg);
       break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
@@ -417,7 +421,7 @@ main(int argc, char** argv) {
   auto icache = std::make_unique<cacheSim::PipeCache>(
     "iCache",
     /* host */ core.get(),
-    /* pipe depth */ 3, l1i_size, l1i_blksize, l1i_assoc, ipf,
+    /* pipe depth */ l1i_pipe_depth, l1i_size, l1i_blksize, l1i_assoc, ipf,
     /* cache ID */ 0, sram_dff);
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
@@ -440,6 +444,7 @@ main(int argc, char** argv) {
       dcache = std::make_unique<cacheSim::NoCache>("dNoCache",
                                                    static_cast<uint16_t>(1));
     } else {
+      assert(false && "RTL does not use StoreBuffer any more");
       dcache = std::make_unique<cacheSim::StoreBuffer>(
         "stBuf", stbuf_entries, static_cast<uint16_t>(1));
     }

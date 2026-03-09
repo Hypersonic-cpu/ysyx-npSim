@@ -35,8 +35,7 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
     , fetch_queue_{}
     , ongoing_insts_{0}
     , BranchMissPenalty{br_mis_pen}
-    , mmio_lat_{mmio_lat}
-    , lsu_serving{Num_PipeStage} {
+    , mmio_lat_{mmio_lat} {
   assert(bpu && "BranchUnit must not be null");
 }
 
@@ -365,7 +364,8 @@ Pipeline::do_mul_ext() {
   // RTL: WBU always forwards; result available when scoreboard clears
   update_reg_time(inst.dst_reg, curr_tick() + MulLat);
   schedule(IntMulExt, curr_tick() + MulLat);
-  async_schedule(Memory, curr_tick() + MulLat);
+  // MUL bypasses Memory stage and writes back directly.
+  async_schedule(WriteBack, curr_tick() + MulLat);
   sim_pipe_.at(IntMulExt) = std::move(sim_pipe_.at(Decode));
 }
 
@@ -384,37 +384,17 @@ Pipeline::do_div_ext() {
   // RTL: WBU always forwards; result available when scoreboard clears
   update_reg_time(inst.dst_reg, curr_tick() + DivLat);
   schedule(IntDivExt, curr_tick() + DivLat);
-  async_schedule(Memory, curr_tick() + DivLat);
+  // DIV bypasses Memory stage and writes back directly.
+  async_schedule(WriteBack, curr_tick() + DivLat);
   sim_pipe_.at(IntDivExt) = std::move(sim_pipe_.at(Decode));
 }
 
-// Memory
+// Memory: EXU path only.  MUL/DIV go directly to WriteBack.
 void
 Pipeline::do_memory() {
-  if (this->lsu_serving == Num_PipeStage) {
-    // Priority: Div (if ready) > Mul (if ready) > EXU
-    if (sim_pipe_.at(IntDivExt) && curr_tick() >= div_ready_tick_) {
-      this->lsu_serving = IntDivExt;
-    } else if (sim_pipe_.at(IntMulExt) && curr_tick() >= mul_ready_tick_) {
-      this->lsu_serving = IntMulExt;
-    } else if (sim_pipe_.at(Execute)) {
-      this->lsu_serving = Execute;
-    } else {
-      // M-ext in-flight but not yet ready
-      tick_t next = InfTime;
-      if (sim_pipe_.at(IntDivExt))
-        next = std::min(next, div_ready_tick_);
-      if (sim_pipe_.at(IntMulExt))
-        next = std::min(next, mul_ready_tick_);
-      if (next < InfTime)
-        schedule(Memory, next);
-      return;
-    }
-  }
-  auto& trans = sim_pipe_.at(this->lsu_serving);
-  assert(trans && "LSU got empty transaction");
+  auto& trans = sim_pipe_.at(Execute);
+  assert(trans && "Memory stage: no Execute instruction");
   const auto& inst = trans->trace_inst;
-  assert(!inst.ext_op || !inst.mem_op && "M-extension insts mem access");
 
   // SoC MMIO: second pass after latency elapsed
   if (trans->wait_mem && g_soc_mode && inst.mem_op != MemNone) {
@@ -426,8 +406,7 @@ Pipeline::do_memory() {
       if (inst.mem_op == MemLoad)
         update_reg_time(inst.dst_reg, curr_tick() + 1);
       schedule(Memory, curr_tick() + 1);
-      sim_pipe_.at(Memory) = std::move(trans);
-      this->lsu_serving = Num_PipeStage;
+      sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
       return;
     }
   }
@@ -464,10 +443,9 @@ Pipeline::do_memory() {
     schedule(Memory, InfTime);
     return;
   }
-  // No memory op -- pass through
+  // No memory op -- pass through to Memory slot
   schedule(Memory, curr_tick() + 1);
-  sim_pipe_.at(Memory) = std::move(sim_pipe_.at(this->lsu_serving));
-  this->lsu_serving = Num_PipeStage;
+  sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
 }
 
 void
@@ -496,10 +474,10 @@ Pipeline::handle_lsu_resp() {
   DPRINTF(Pipeline, " LS Resp [%s] PC=0x%08x addr=0x%08x",
           inst.mem_op == MemLoad ? "Load" : "Store", inst.pc, inst.mem_addr);
 
-  this->lsu_serving = Num_PipeStage;
-  set_stall(NoInst);
-  if (inst.mem_op != MemNone)
+  if (inst.mem_op == MemLoad)
     update_reg_time(inst.dst_reg, curr_tick() + 1);
+
+  set_stall(NoInst);
 
   // Check if decode is blocked by RAW from this load
   if (auto* ids = sim_pipe_.at(Fetch).get()) {
@@ -513,17 +491,36 @@ Pipeline::handle_lsu_resp() {
   sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
 }
 
-// WriteBack
+// WriteBack: selects from Memory (EXU path), MulExt, or DivExt.
+// Priority: Div > Mul > Memory, matching RTL WB arbiter.
 void
 Pipeline::do_writeback() {
+  PipeStage src;
+  if (sim_pipe_.at(IntDivExt) && curr_tick() >= div_ready_tick_)
+    src = IntDivExt;
+  else if (sim_pipe_.at(IntMulExt) && curr_tick() >= mul_ready_tick_)
+    src = IntMulExt;
+  else if (sim_pipe_.at(Memory))
+    src = Memory;
+  else {
+    // No source ready yet; schedule for earliest completion
+    tick_t next = InfTime;
+    if (sim_pipe_.at(IntDivExt))
+      next = std::min(next, div_ready_tick_);
+    if (sim_pipe_.at(IntMulExt))
+      next = std::min(next, mul_ready_tick_);
+    schedule(WriteBack, next);
+    return;
+  }
+
   ongoing_insts_--;
   DPRINTF(Pipeline, " WB PC=0x%08x Remain %lu",
-          sim_pipe_.at(Memory)->trace_inst.pc, ongoing_insts_);
+          sim_pipe_.at(src)->trace_inst.pc, ongoing_insts_);
   flush_stall_cycles(curr_tick());
   stats.nostall++;
   stall_.last_tick = curr_tick() + 1;
 
-  auto* trans = sim_pipe_.at(Memory).get();
+  auto* trans = sim_pipe_.at(src).get();
   if (trans->br_mispred) {
     stall_.cause = BrMispred;
     stall_.brmiss_attr_end = curr_tick() + 3;
@@ -535,7 +532,7 @@ Pipeline::do_writeback() {
 
   stats.insts++;
   stats.cycles = curr_tick() - stall_.reset_tick;
-  sim_pipe_.at(Memory) = nullptr;
+  sim_pipe_.at(src) = nullptr;
   schedule(WriteBack, curr_tick() + 1);
 }
 

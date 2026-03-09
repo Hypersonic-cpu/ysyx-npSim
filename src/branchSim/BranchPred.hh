@@ -468,10 +468,10 @@ public:
   update(addr_t pc, bool taken, addr_t target,
          bool is_call = false, bool is_ret = false,
          bool btb_hit = true) {
-    // RTL only updates BHT when btbHit || taken
-    if (btb_hit || taken) {
-      bpu_->update(pc, taken);
-    }
+    // Always update BHT (for direction prediction quality).
+    // The RTL "btbHit || taken" gate is for power saving; in simulation
+    // we train unconditionally so gshare global history is complete.
+    bpu_->update(pc, taken);
     if (taken) {
       btb_->update(pc, target);
       auto idx = (pc >> 2) & (btb_->num_entries() - 1);

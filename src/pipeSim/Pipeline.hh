@@ -306,9 +306,6 @@ private:
   size_t ongoing_insts_;
   tick_t calc_nxtupd_;
 
-  // LSU stage selection (Div > Mul > Mem priority)
-  PipeStage lsu_serving;
-
   // Stall attribution state
   struct StallAttr {
     tick_t last_tick{0};
@@ -332,11 +329,14 @@ private:
     case IntDivExt:
       return sim_pipe_.at(Decode) != nullptr;
     case Memory:
-      return (sim_pipe_.at(Execute) != nullptr
-              || sim_pipe_.at(IntMulExt) != nullptr
-              || sim_pipe_.at(IntDivExt) != nullptr);
+      // EXU path only: MUL/DIV now bypass Memory and go directly to WB.
+      return sim_pipe_.at(Execute) != nullptr;
     case WriteBack:
-      return sim_pipe_.at(Memory) != nullptr;
+      return (sim_pipe_.at(Memory) != nullptr)
+             || (sim_pipe_.at(IntMulExt) != nullptr
+                 && curr_tick() >= mul_ready_tick_)
+             || (sim_pipe_.at(IntDivExt) != nullptr
+                 && curr_tick() >= div_ready_tick_);
     default:
       assert(false);
       return false;
