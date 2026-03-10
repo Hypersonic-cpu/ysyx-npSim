@@ -84,48 +84,36 @@ CompressedBTB::update(addr_t pc, addr_t target) {
 // ============================================================================
 
 BimodalPredictor::BimodalPredictor(const std::string& name, size_t table_pow2,
-                                   uint8_t init_val, size_t ghr_bits)
+                                   uint8_t init_val)
     : BranchPred(name)
     , mask_((1u << table_pow2) - 1u)
-    , ghr_bits_(ghr_bits)
-    , ghr_mask_(ghr_bits > 0 ? (1u << ghr_bits) - 1u : 0u)
-    , ghr_(0)
     , table_(1u << table_pow2, init_val) {}
 
 BPUPredResult
 BimodalPredictor::predict(addr_t pc, addr_t) {
   stats.accesses++;
-  uint32_t snap = ghr_ & ghr_mask_;
-  size_t idx = index(pc, snap);
+  size_t idx = index(pc);
   uint8_t cnt = table_.at(idx);
   bool pred = cnt >= 2;
-  DPRINTF(BranchPred, "Bimodal Predict: PC=0x%x GHR=0x%x Idx=0x%zx Val=%d Pred=%d",
-          pc, snap, idx, cnt, pred);
-  if (ghr_bits_ > 0)
-    ghr_ = ((snap << 1) | (pred ? 1u : 0u)) & ghr_mask_;
-  return {pred, cnt, snap};
+  DPRINTF(BranchPred, "Bimodal Predict: PC=0x%x Idx=0x%zx Val=%d Pred=%d",
+          pc, idx, cnt, pred);
+  return {pred, cnt, 0};
 }
 
 void
 BimodalPredictor::update(addr_t pc, bool taken, bool btb_hit, uint8_t old_cnt,
-                         uint32_t old_ghr) {
-  size_t idx = index(pc, old_ghr & ghr_mask_);
+                         uint32_t) {
+  size_t idx = index(pc);
   uint8_t new_cnt;
-  if (taken && !btb_hit && ghr_bits_ == 0)
+  if (taken && !btb_hit)
     new_cnt = 2; // first-time taken: initialize to weakly taken (matches RTL)
   else if (taken)
     new_cnt = (old_cnt < 3) ? old_cnt + 1 : 3;
   else
     new_cnt = (old_cnt > 0) ? old_cnt - 1 : 0;
   table_.at(idx) = new_cnt;
-  DPRINTF(BranchPred, "Bimodal Update: PC=0x%x GHR=0x%x Idx=0x%zx %d->%d",
-          pc, old_ghr, idx, old_cnt, new_cnt);
-}
-
-void
-BimodalPredictor::on_mispred(bool actual_taken, uint8_t, uint32_t old_ghr) {
-  if (ghr_bits_ > 0)
-    ghr_ = ((old_ghr << 1) | (actual_taken ? 1u : 0u)) & ghr_mask_;
+  DPRINTF(BranchPred, "Bimodal Update: PC=0x%x Idx=0x%zx %d->%d",
+          pc, idx, old_cnt, new_cnt);
 }
 
 json
@@ -134,8 +122,7 @@ BimodalPredictor::config_json() const {
   ar["comb_percent"] = 0.30;
   ar["known_area"] = 0.0;
   ar["timing_bits"] = static_cast<int>(table_.size() * 2);
-  return json{{"entries", table_.size()}, {"ghr_bits", ghr_bits_},
-              {"area", ar}};
+  return json{{"entries", table_.size()}, {"area", ar}};
 }
 
 // ============================================================================

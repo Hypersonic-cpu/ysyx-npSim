@@ -185,27 +185,18 @@ public:
 
 class BimodalPredictor : public BranchPred {
 public:
-  // ghr_bits: number of GHR bits to XOR with PC for BHT index.
-  // When 0, plain PC-indexed bimodal (no GHR).
   explicit BimodalPredictor(const std::string& name, size_t entries_pow2,
-                             uint8_t init_val = 1, size_t ghr_bits = 0);
+                             uint8_t init_val = 1);
   BPUPredResult predict(addr_t pc, addr_t btb_target) override;
   void update(addr_t pc, bool taken, bool btb_hit, uint8_t old_cnt,
               uint32_t old_ghr) override;
-  void on_mispred(bool actual_taken, uint8_t old_cnt,
-                  uint32_t old_ghr) override;
   json config_json() const override;
 
 private:
   size_t mask_;
-  size_t ghr_bits_;
-  uint32_t ghr_mask_;
-  uint32_t ghr_;                 // global history register
   std::vector<uint8_t> table_;  // 2-bit saturating counters
 
-  size_t index(addr_t pc, uint32_t ghr) const {
-    return ((pc >> 2) ^ ghr) & mask_;
-  }
+  size_t index(addr_t pc) const { return (pc >> 2) & mask_; }
 };
 
 // ---- GSharePredictor -------------------------------------------------------

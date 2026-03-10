@@ -304,15 +304,15 @@ std::unique_ptr<branchSim::BranchPred>
 create_bpu_core() {
   if (bpu_type == "bimodal") {
     return std::make_unique<branchSim::BimodalPredictor>("BimodalBP",
-                                                         bpu_entries_pow2,
-                                                         1, ghr_bits);
+                                                         bpu_entries_pow2, 1);
   } else if (bpu_type == "gshare") {
+    size_t hist = ghr_bits > 0 ? ghr_bits : 12; // default 12-bit history
     return std::make_unique<branchSim::GSharePredictor>(
-      "GShareBP", bpu_entries_pow2,
-      12); // 12-bit history
+      "GShareBP", bpu_entries_pow2, hist);
   } else if (bpu_type == "tournament") {
+    size_t hist = ghr_bits > 0 ? ghr_bits : 12; // default 12-bit history
     return std::make_unique<branchSim::TournamentPredictor>(
-      "TournamentBP", bpu_entries_pow2, 12); // 12-bit history
+      "TournamentBP", bpu_entries_pow2, hist);
   } else if (bpu_type == "alwaystaken") {
     return std::make_unique<branchSim::AlwaysTakenPredictor>();
   } else if (bpu_type == "btfnt") {
