@@ -81,10 +81,11 @@ static std::string bpu_type = "";
 static size_t bpu_entries_pow2 = 4; // 16
 static size_t btb_entries_pow2 = 4;
 static size_t ras_depth = 0;
+static size_t ghr_bits = 0;        // GHR bits for bimodal+GHR indexing
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
-static size_t ifq_size = 4; // RTL FetchStage PipeDepth+1
+static size_t ifq_size = 8; // RTL FetchStage PipeDepth+1 (default 8-entry ring buffer)
 // FIXME: Remove this. NoCache means no buffer
 static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 0;
@@ -95,6 +96,7 @@ static std::string l1i_pref_type = "none"; // iCache prefetcher type
 static std::string l1d_pref_type = "none"; // dCache prefetcher type
 static bool sram_dff = true;          // Area model: DFF or SRAM macro
 static bool bpu_no_predecode = false; // if true: predict for all instructions
+static bool l1i_cwf = false;          // Critical Word First for iCache
 
 // Dummy physical memory stubs (active mode: caches don't read data)
 void
@@ -154,6 +156,8 @@ parse_args(int argc, char* argv[]) {
     {"axi-ovhd-cyc", required_argument, 0, 208U},
     {"l1i-lat", required_argument, 0, 209U},
     {"bpu-no-predecode", no_argument, 0, 210U},
+    {"l1i-cwf", no_argument, 0, 211U},
+    {"ghr-bits", required_argument, 0, 212U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -262,6 +266,12 @@ parse_args(int argc, char* argv[]) {
     case 210U:
       bpu_no_predecode = true;
       break;
+    case 211U:
+      l1i_cwf = true;
+      break;
+    case 212U:
+      ghr_bits = std::stoul(optarg);
+      break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
       return 1;
@@ -294,7 +304,8 @@ std::unique_ptr<branchSim::BranchPred>
 create_bpu_core() {
   if (bpu_type == "bimodal") {
     return std::make_unique<branchSim::BimodalPredictor>("BimodalBP",
-                                                         bpu_entries_pow2);
+                                                         bpu_entries_pow2,
+                                                         1, ghr_bits);
   } else if (bpu_type == "gshare") {
     return std::make_unique<branchSim::GSharePredictor>(
       "GShareBP", bpu_entries_pow2,
@@ -428,7 +439,7 @@ main(int argc, char** argv) {
     "iCache",
     /* host */ core.get(),
     /* pipe depth */ l1i_pipe_depth, l1i_size, l1i_blksize, l1i_assoc, ipf,
-    /* cache ID */ 0, sram_dff);
+    /* cache ID */ 0, sram_dff, /* write_back */ false, l1i_cwf);
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
     std::shared_ptr<cacheSim::Prefetcher> dpf = nullptr;

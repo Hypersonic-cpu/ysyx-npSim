@@ -208,13 +208,14 @@ public:
                      size_t size_bytes, size_t line_bytes, size_t assoc = 1,
                      std::shared_ptr<Prefetcher> prefetcher = nullptr,
                      uint16_t cache_id = 0, bool sram_dff = true,
-                     bool write_back = false)
+                     bool write_back = false, bool cwf = false)
       : CacheBase(name, host, size_bytes, line_bytes, assoc, prefetcher,
                   cache_id)
       , pipe_(pipe_depth)
       , pipe_depth_{pipe_depth}
       , sram_dff_{sram_dff}
       , write_back_{write_back}
+      , cwf_{cwf}
       , r_waiting_{false}
       , w_waiting_{false}
       , is_shifted_{true}
@@ -272,6 +273,7 @@ protected:
   size_t pipe_depth_;
   bool sram_dff_;
   bool write_back_;
+  bool cwf_;
   bool r_waiting_;
   bool w_waiting_;
   bool is_shifted_;

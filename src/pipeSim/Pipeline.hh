@@ -13,7 +13,6 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
-#include <list>
 #include <memory>
 #include <string>
 #include <utility>
@@ -171,7 +170,7 @@ public:
     json j;
     j["BranchPenaltyCycles"] = BranchMissPenalty;
     j["MmioLatency"] = mmio_lat_;
-    j["IFQSize"] = ifq_size_;
+    j["IFQSize"] = fetch_queue_.capacity();
     j["area"] = area::area_json(19570.0);
     return j;
   }
@@ -243,12 +242,67 @@ protected:
     explicit Transaction(const Inst& inst, bool wrong_path = false,
                          bool is_wait_mem = false) noexcept
         : trace_inst{inst}
-        , br_pred{false, 0, false}
+        , br_pred{false, 0, false, 1, 0}
         , br_mispred{false}
         , is_wrong_path{wrong_path}
         , wait_mem{is_wait_mem} {}
   };
   using TransPtr = std::unique_ptr<Transaction>;
+
+  // Fixed-capacity ring buffer for the instruction fetch queue.
+  struct IFQRingBuf {
+    std::vector<TransPtr> buf;
+    size_t cap_;
+    size_t head_ = 0, tail_ = 0, cnt_ = 0;
+
+    explicit IFQRingBuf(size_t cap)
+        : buf(cap)
+        , cap_(cap) {}
+
+    bool empty() const noexcept { return cnt_ == 0; }
+    bool full() const noexcept { return cnt_ >= cap_; }
+    size_t size() const noexcept { return cnt_; }
+    size_t capacity() const noexcept { return cap_; }
+
+    void push_back(TransPtr p) {
+      assert(!full());
+      buf[tail_] = std::move(p);
+      tail_ = (tail_ + 1) % cap_;
+      cnt_++;
+    }
+
+    TransPtr& front() noexcept {
+      assert(!empty());
+      return buf[head_];
+    }
+
+    void pop_front() noexcept {
+      assert(!empty());
+      buf[head_].reset();
+      head_ = (head_ + 1) % cap_;
+      cnt_--;
+    }
+
+    // Index access: at(0) = front, at(size-1) = back.
+    TransPtr& at(size_t i) noexcept { return buf[(head_ + i) % cap_]; }
+
+    void clear() noexcept {
+      for (size_t i = 0; i < cnt_; i++)
+        buf[(head_ + i) % cap_].reset();
+      head_ = tail_ = cnt_ = 0;
+    }
+
+    // Find first entry satisfying predicate; returns nullptr if not found.
+    template<class Pred>
+    TransPtr* find_if_ptr(Pred&& pred) noexcept {
+      for (size_t i = 0; i < cnt_; i++) {
+        auto& e = buf[(head_ + i) % cap_];
+        if (pred(e))
+          return &e;
+      }
+      return nullptr;
+    }
+  };
 
   // Cycles from EX flush until IFU can issue first correct-path
   // fetch.  In RTL this is 1 cycle (flushWire to next cycle fetch).
@@ -384,8 +438,7 @@ private:
   }
 
   // Fetch queue (models RTL FetchStage PipeDepth buffer)
-  std::list<TransPtr> fetch_queue_;
-  size_t ifq_size_;
+  IFQRingBuf fetch_queue_;
 
   // Wrong-path fetch state. When a mispredicted branch enters IF,
   // subsequent fetches use wrong-path PCs until the branch reaches

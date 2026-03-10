@@ -187,7 +187,8 @@ PipeCache::recv_mem_resp(MemTransPtr trans) {
     handle_fill(pipe_.back()->line, trans->addr, trans->data);
     // RTL fillFinish = RegNext(...): 1 extra blocking cycle after the
     // last beat before willShift can go high.  Total = +2 from last beat.
-    blocked_until_ = curr_tick() + 2;
+    // CWF: respond 1 cycle after critical word arrives (not after last beat).
+    blocked_until_ = curr_tick() + (cwf_ ? 1 : 2);
   } else if (!write_back_) {
     // Write-through: unblock after SDRAM write completes
     blocked_until_ = curr_tick() + 2;

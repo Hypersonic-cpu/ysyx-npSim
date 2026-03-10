@@ -84,24 +84,48 @@ CompressedBTB::update(addr_t pc, addr_t target) {
 // ============================================================================
 
 BimodalPredictor::BimodalPredictor(const std::string& name, size_t table_pow2,
-                                   uint8_t init_val)
+                                   uint8_t init_val, size_t ghr_bits)
     : BranchPred(name)
     , mask_((1u << table_pow2) - 1u)
+    , ghr_bits_(ghr_bits)
+    , ghr_mask_(ghr_bits > 0 ? (1u << ghr_bits) - 1u : 0u)
+    , ghr_(0)
     , table_(1u << table_pow2, init_val) {}
 
-bool
+BPUPredResult
 BimodalPredictor::predict(addr_t pc, addr_t) {
   stats.accesses++;
-  bool pred = table_.at(index(pc)) >= 2;
-  DPRINTF(BranchPred, "Bimodal Predict: PC=0x%x Idx=0x%zx Val=%d Pred=%d",
-          pc, index(pc), table_[index(pc)], pred);
-  return pred;
+  uint32_t snap = ghr_ & ghr_mask_;
+  size_t idx = index(pc, snap);
+  uint8_t cnt = table_.at(idx);
+  bool pred = cnt >= 2;
+  DPRINTF(BranchPred, "Bimodal Predict: PC=0x%x GHR=0x%x Idx=0x%zx Val=%d Pred=%d",
+          pc, snap, idx, cnt, pred);
+  if (ghr_bits_ > 0)
+    ghr_ = ((snap << 1) | (pred ? 1u : 0u)) & ghr_mask_;
+  return {pred, cnt, snap};
 }
 
 void
-BimodalPredictor::update(addr_t pc, bool taken) {
-  auto& ent = table_.at(index(pc));
-  if (taken) { if (ent < 3) ent++; } else { if (ent > 0) ent--; }
+BimodalPredictor::update(addr_t pc, bool taken, bool btb_hit, uint8_t old_cnt,
+                         uint32_t old_ghr) {
+  size_t idx = index(pc, old_ghr & ghr_mask_);
+  uint8_t new_cnt;
+  if (taken && !btb_hit && ghr_bits_ == 0)
+    new_cnt = 2; // first-time taken: initialize to weakly taken (matches RTL)
+  else if (taken)
+    new_cnt = (old_cnt < 3) ? old_cnt + 1 : 3;
+  else
+    new_cnt = (old_cnt > 0) ? old_cnt - 1 : 0;
+  table_.at(idx) = new_cnt;
+  DPRINTF(BranchPred, "Bimodal Update: PC=0x%x GHR=0x%x Idx=0x%zx %d->%d",
+          pc, old_ghr, idx, old_cnt, new_cnt);
+}
+
+void
+BimodalPredictor::on_mispred(bool actual_taken, uint8_t, uint32_t old_ghr) {
+  if (ghr_bits_ > 0)
+    ghr_ = ((old_ghr << 1) | (actual_taken ? 1u : 0u)) & ghr_mask_;
 }
 
 json
@@ -110,7 +134,8 @@ BimodalPredictor::config_json() const {
   ar["comb_percent"] = 0.30;
   ar["known_area"] = 0.0;
   ar["timing_bits"] = static_cast<int>(table_.size() * 2);
-  return json{{"entries", table_.size()}, {"area", ar}};
+  return json{{"entries", table_.size()}, {"ghr_bits", ghr_bits_},
+              {"area", ar}};
 }
 
 // ============================================================================
@@ -122,25 +147,45 @@ GSharePredictor::GSharePredictor(const std::string& name, size_t table_pow2,
     : BranchPred(name)
     , history_len_(history_len)
     , mask_((1u << table_pow2) - 1u)
+    , hist_mask_((1u << history_len) - 1u)
     , global_history_(0)
     , table_(1u << table_pow2, init_val) {}
 
-bool
+BPUPredResult
 GSharePredictor::predict(addr_t pc, addr_t) {
   stats.accesses++;
-  bool pred = table_.at(index(pc)) >= 2;
+  uint32_t snap = global_history_;
+  size_t idx = index(pc, snap);
+  uint8_t cnt = table_.at(idx);
+  bool pred = cnt >= 2;
   DPRINTF(BranchPred,
           "GShare Predict: PC=0x%x GH=0x%x Idx=0x%zx Val=%d Pred=%d",
-          pc, global_history_, index(pc), table_[index(pc)], pred);
-  return pred;
+          pc, snap, idx, cnt, pred);
+  // Shift GHR at predict time with PREDICTED direction.
+  global_history_ = ((snap << 1) | (pred ? 1u : 0u)) & hist_mask_;
+  return {pred, cnt, snap};
 }
 
 void
-GSharePredictor::update(addr_t pc, bool taken) {
-  auto& ent = table_.at(index(pc));
-  if (taken) { if (ent < 3) ent++; } else { if (ent > 0) ent--; }
-  global_history_ =
-    ((global_history_ << 1) | (taken ? 1u : 0u)) & ((1u << history_len_) - 1u);
+GSharePredictor::update(addr_t pc, bool taken, bool btb_hit, uint8_t old_cnt,
+                        uint32_t old_ghr) {
+  // Use GHR snapshot from prediction time to reconstruct the correct index.
+  size_t idx = index(pc, old_ghr);
+  uint8_t new_cnt;
+  if (taken && !btb_hit)
+    new_cnt = 2;
+  else if (taken)
+    new_cnt = (old_cnt < 3) ? old_cnt + 1 : 3;
+  else
+    new_cnt = (old_cnt > 0) ? old_cnt - 1 : 0;
+  table_.at(idx) = new_cnt;
+  // GHR is NOT shifted here; it was shifted at predict time.
+}
+
+void
+GSharePredictor::on_mispred(bool actual_taken, uint8_t, uint32_t old_ghr) {
+  // Restore GHR to reflect actual branch history.
+  global_history_ = ((old_ghr << 1) | (actual_taken ? 1u : 0u)) & hist_mask_;
 }
 
 json
@@ -164,27 +209,36 @@ TournamentPredictor::TournamentPredictor(const std::string& name,
     : BranchPred(name)
     , history_len_(history_len)
     , mask_((1u << table_pow2) - 1u)
+    , hist_mask_((1u << history_len) - 1u)
     , global_history_(0)
     , local_table_(1u << table_pow2, 1)
     , global_table_(1u << table_pow2, 1)
     , selector_table_(1u << table_pow2, 1) {}
 
-bool
+BPUPredResult
 TournamentPredictor::predict(addr_t pc, addr_t) {
   stats.accesses++;
-  bool local_pred = local_table_[local_index(pc)] >= 2;
-  bool global_pred = global_table_[global_index(pc)] >= 2;
-  bool use_global = selector_table_[local_index(pc)] >= 2;
+  uint32_t snap = global_history_;
+  size_t li = local_index(pc);
+  size_t gi = global_index(pc, snap);
+  bool local_pred = local_table_[li] >= 2;
+  bool global_pred = global_table_[gi] >= 2;
+  bool use_global = selector_table_[li] >= 2;
   bool pred = use_global ? global_pred : local_pred;
   DPRINTF(BranchPred,
-          "Tournament Predict: PC=0x%x Local=%d Global=%d UseGlobal=%d Pred=%d",
-          pc, local_pred, global_pred, use_global, pred);
-  return pred;
+          "Tournament Predict: PC=0x%x GH=0x%x Local=%d Global=%d UseGlobal=%d Pred=%d",
+          pc, snap, local_pred, global_pred, use_global, pred);
+  // Shift GHR at predict time with PREDICTED direction.
+  global_history_ = ((snap << 1) | (pred ? 1u : 0u)) & hist_mask_;
+  return {pred, use_global ? global_table_[gi] : local_table_[li], snap};
 }
 
 void
-TournamentPredictor::update(addr_t pc, bool taken) {
-  size_t li = local_index(pc), gi = global_index(pc);
+TournamentPredictor::update(addr_t pc, bool taken, bool, uint8_t,
+                            uint32_t old_ghr) {
+  // Use GHR snapshot from prediction time for global index.
+  size_t li = local_index(pc);
+  size_t gi = global_index(pc, old_ghr);
   bool local_correct = (local_table_[li] >= 2) == taken;
   bool global_correct = (global_table_[gi] >= 2) == taken;
 
@@ -198,9 +252,12 @@ TournamentPredictor::update(addr_t pc, bool taken) {
 
   auto& ge = global_table_[gi];
   if (taken) { if (ge < 3) ge++; } else { if (ge > 0) ge--; }
+  // GHR is NOT shifted here; it was shifted at predict time.
+}
 
-  global_history_ =
-    ((global_history_ << 1) | (taken ? 1u : 0u)) & ((1u << history_len_) - 1u);
+void
+TournamentPredictor::on_mispred(bool actual_taken, uint8_t, uint32_t old_ghr) {
+  global_history_ = ((old_ghr << 1) | (actual_taken ? 1u : 0u)) & hist_mask_;
 }
 
 json
@@ -236,7 +293,7 @@ BranchUnit::BranchUnit(std::unique_ptr<BranchPred> bpu,
 BranchResult
 BranchUnit::predict_at_fetch(addr_t pc, bool is_branch) {
   if (!no_predecode_ && !is_branch)
-    return {false, 0, false};
+    return {false, 0, false, 0, 0};
   if (is_branch)
     stats.br_accesses++;
   return predict(pc);
@@ -247,7 +304,7 @@ BranchUnit::predict(addr_t pc) {
   stats.accesses++;
   addr_t btb_target = btb_->lookup(pc);
   bool btb_hit = (btb_target != 0);
-  bool pred_taken = bpu_->predict(pc, btb_target);
+  auto [pred_taken, bht_cnt, ghr_snap] = bpu_->predict(pc, btb_target);
   addr_t target = btb_target;
 
   // RAS override for return instructions
@@ -263,14 +320,16 @@ BranchUnit::predict(addr_t pc) {
   DPRINTF(BranchPred,
           "BranchUnit Predict: PC=0x%08x taken=%d target=0x%08x redirect=%d",
           pc, pred_taken, target, will_redirect);
-  return {pred_taken, target, will_redirect};
+  return {pred_taken, target, will_redirect, bht_cnt, ghr_snap};
 }
 
 void
 BranchUnit::update(addr_t pc, bool taken, addr_t target, bool is_call,
-                   bool is_ret, bool btb_hit) {
-  (void)btb_hit;
-  bpu_->update(pc, taken);
+                   bool is_ret, bool btb_hit, const BranchResult& pred,
+                   bool mispred) {
+  bpu_->update(pc, taken, btb_hit, pred.bht_cnt, pred.ghr_snap);
+  if (mispred)
+    bpu_->on_mispred(taken, pred.bht_cnt, pred.ghr_snap);
   if (taken) {
     btb_->update(pc, target);
     auto idx = (pc >> 2) & (btb_->num_entries() - 1);

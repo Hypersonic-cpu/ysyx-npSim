@@ -31,8 +31,7 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
                      &Pipeline::do_execute,  &Pipeline::do_mul_ext,
                      &Pipeline::do_div_ext,  &Pipeline::do_memory,
                      &Pipeline::do_writeback}
-    , ifq_size_{ifq_size}
-    , fetch_queue_{}
+    , fetch_queue_(ifq_size)
     , ongoing_insts_{0}
     , BranchMissPenalty{br_mis_pen}
     , mmio_lat_{mmio_lat} {
@@ -88,7 +87,7 @@ Pipeline::update_impl() {
 //
 void
 Pipeline::do_fetch_0() {
-  if (imem->is_ready().first && fetch_queue_.size() < ifq_size_) {
+  if (imem->is_ready().first && !fetch_queue_.full()) {
     TransPtr candidate = nullptr;
 
     if (is_draining_) [[unlikely]] {
@@ -152,14 +151,13 @@ Pipeline::do_fetch_0() {
       imem->read_req_speculative(candidate->trace_inst.pc);
     else
       imem->read_req(candidate->trace_inst.pc);
-    fetch_queue_.emplace_back(std::move(candidate));
+    fetch_queue_.push_back(std::move(candidate));
   }
 }
 
 // Fetch stage 1: IFQ head to pipeline[Fetch]
 void
 Pipeline::do_fetch_1() {
-  assert(fetch_queue_.size() <= ifq_size_);
   if (fetch_queue_.empty()) {
     schedule(Fetch, InfTime);
     return;
@@ -196,10 +194,10 @@ Pipeline::handle_ifu_resp() {
             fetch_.orphan_resps);
     return;
   }
-  auto it = std::ranges::find_if(
-    fetch_queue_, [](const auto& item) { return item->wait_mem; });
-  assert(it != fetch_queue_.end());
-  (*it)->wait_mem = false;
+  auto* ptr = fetch_queue_.find_if_ptr(
+    [](const TransPtr& item) { return item->wait_mem; });
+  assert(ptr != nullptr);
+  (*ptr)->wait_mem = false;
   DPRINTF(Pipeline, " IF Resp -> PC %08x WP=%d T@ %lu", (*it)->trace_inst.pc,
           (*it)->is_wrong_path, curr_tick() + 1);
   async_schedule(Fetch, curr_tick() + 1);
@@ -298,7 +296,8 @@ Pipeline::do_execute() {
     bool is_call = (inst.dst_reg == 1);
     bool is_ret = (inst.src_reg[0] == 1 && inst.dst_reg == 0);
     bool btb_hit = (trans->br_pred.pred_target != 0);
-    bpu->update(inst.pc, real_taken, real_target, is_call, is_ret, btb_hit);
+    bpu->update(inst.pc, real_taken, real_target, is_call, is_ret, btb_hit,
+                trans->br_pred, trans->br_mispred);
 
     if (trans->br_mispred) {
       DPRINTF(Pipeline, " EX Flush PC=0x%08x taken=%d target=0x%08x",
@@ -306,7 +305,8 @@ Pipeline::do_execute() {
 
       // Flush fetch queue: wrong-path discarded, real entries get
       // ongoing_insts_ decremented.  Track orphaned iCache requests.
-      for (auto& fq_entry : fetch_queue_) {
+      for (size_t i = 0; i < fetch_queue_.size(); i++) {
+        auto& fq_entry = fetch_queue_.at(i);
         if (fq_entry) {
           if (fq_entry->wait_mem)
             fetch_.orphan_resps++;
@@ -592,7 +592,8 @@ Pipeline::flush_false_btb_hit(const Transaction& trans) {
   if (inst.is_branch || !trans.br_mispred)
     return;
   DPRINTF(Pipeline, " EX NonBr Flush PC=0x%08x (false BTB hit)", inst.pc);
-  for (auto& fq_entry : fetch_queue_) {
+  for (size_t i = 0; i < fetch_queue_.size(); i++) {
+    auto& fq_entry = fetch_queue_.at(i);
     if (fq_entry) {
       if (fq_entry->wait_mem)
         fetch_.orphan_resps++;
