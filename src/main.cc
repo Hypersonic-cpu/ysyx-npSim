@@ -16,6 +16,8 @@
 #include <sys/types.h>
 
 #include "branchSim/BranchPred.hh"
+#include "branchSim/Bimodal.hh"
+#include "branchSim/Tage.hh"
 #include "cacheSim/CacheBase.hh"
 #include "cacheSim/Prefetcher.hh"
 #include "cacheSim/RamConn.hh"
@@ -81,6 +83,8 @@ static size_t bpu_entries_pow2 = 4; // 16
 static size_t btb_entries_pow2 = 4;
 static size_t ras_depth = 0;
 static size_t ghr_bits = 0;        // GHR bits for bimodal+GHR indexing
+static int tage_comp_pow2 = 7;     // TAGE: log2 of entries per component (128)
+static std::string tage_hists = "2,8,32"; // TAGE: comma-separated history lengths
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
@@ -91,9 +95,6 @@ static size_t stbuf_entries = 0;
 static tick_t br_mis_pen = 2; // Branch misprediction penalty (cycles)
 static tick_t mmio_lat = 3;  // MMIO access latency (cycles, SoC only)
 static int freq_mhz = 1000;  // CPU frequency in MHz (default 1 GHz)
-static size_t er_bubble = 0; // earlyRedirect bubble (disabled: handled via fill_lat_extra)
-static size_t wp_budget = 99; // Max WP per mispred (effectively uncapped)
-static size_t l1i_fill_extra = 0; // Extra cycles after iCache fill (pipeline depth model)
 static std::string l1i_pref_type = "none"; // iCache prefetcher type
 static std::string l1d_pref_type = "none"; // dCache prefetcher type
 static bool sram_dff = true;          // Area model: DFF or SRAM macro
@@ -159,9 +160,8 @@ parse_args(int argc, char* argv[]) {
     {"bpu-no-predecode", no_argument, 0, 210U},
     {"l1i-cwf", no_argument, 0, 211U},
     {"ghr-bits", required_argument, 0, 212U},
-    {"er-bubble", required_argument, 0, 213U},
-    {"wp-budget", required_argument, 0, 214U},
-    {"l1i-fill-extra", required_argument, 0, 215U},
+    {"tage-hists", required_argument, 0, 213U},
+    {"tage-comp-pow2", required_argument, 0, 214U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -274,13 +274,10 @@ parse_args(int argc, char* argv[]) {
       ghr_bits = std::stoul(optarg);
       break;
     case 213U:
-      er_bubble = std::stoul(optarg);
+      tage_hists = optarg;
       break;
     case 214U:
-      wp_budget = std::stoul(optarg);
-      break;
-    case 215U:
-      l1i_fill_extra = std::stoul(optarg);
+      tage_comp_pow2 = std::stoi(optarg);
       break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
@@ -323,6 +320,21 @@ create_bpu_core() {
     size_t hist = ghr_bits > 0 ? ghr_bits : 12; // default 12-bit history
     return std::make_unique<branchSim::TournamentPredictor>(
       "TournamentBP", bpu_entries_pow2, hist);
+  } else if (bpu_type == "tage") {
+    // Parse comma-separated history lengths, e.g. "2,8,32"
+    std::vector<int> hlens;
+    {
+      std::string s = tage_hists;
+      size_t pos = 0;
+      while (pos < s.size()) {
+        size_t comma = s.find(',', pos);
+        if (comma == std::string::npos) comma = s.size();
+        hlens.push_back(std::stoi(s.substr(pos, comma - pos)));
+        pos = comma + 1;
+      }
+    }
+    return std::make_unique<branchSim::TagePredictor>(
+      "TageBP", bpu_entries_pow2, tage_comp_pow2, std::move(hlens));
   } else if (bpu_type == "alwaystaken") {
     return std::make_unique<branchSim::AlwaysTakenPredictor>();
   } else if (bpu_type == "btfnt") {
@@ -437,7 +449,7 @@ main(int argc, char** argv) {
   size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
     "Core", ifq_size, actual_stq_size, branch_unit.get(),
-    br_mis_pen, mmio_lat, er_bubble, wp_budget);
+    br_mis_pen, mmio_lat);
 
   std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
   if (l1i_pref_type == "nextline") {
@@ -452,8 +464,7 @@ main(int argc, char** argv) {
     "iCache",
     /* host */ core.get(),
     /* pipe depth */ l1i_pipe_depth, l1i_size, l1i_blksize, l1i_assoc, ipf,
-    /* cache ID */ 0, sram_dff, /* write_back */ false, l1i_cwf,
-    l1i_fill_extra);
+    /* cache ID */ 0, sram_dff, /* write_back */ false, l1i_cwf);
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
     std::shared_ptr<cacheSim::Prefetcher> dpf = nullptr;

@@ -214,13 +214,11 @@ public:
                      size_t size_bytes, size_t line_bytes, size_t assoc = 1,
                      std::shared_ptr<Prefetcher> prefetcher = nullptr,
                      uint16_t cache_id = 0, bool sram_dff = true,
-                     bool write_back = false, bool cwf = false,
-                     size_t fill_lat_extra = 0)
+                     bool write_back = false, bool cwf = false)
       : CacheBase(name, host, size_bytes, line_bytes, assoc, prefetcher,
                   cache_id)
       , pipe_(pipe_depth)
       , pipe_depth_{pipe_depth}
-      , fill_lat_extra_{fill_lat_extra}
       , sram_dff_{sram_dff}
       , write_back_{write_back}
       , cwf_{cwf}
@@ -280,7 +278,6 @@ protected:
 
   std::vector<PipePtr> pipe_;
   size_t pipe_depth_;
-  size_t fill_lat_extra_;
   bool sram_dff_;
   bool write_back_;
   bool cwf_;

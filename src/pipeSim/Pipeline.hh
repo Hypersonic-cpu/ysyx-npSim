@@ -97,8 +97,7 @@ public:
     size_t wp_bpu_queries = 0;
     size_t wp_btb_hits = 0;
     size_t wp_redirects = 0;
-    size_t er_bubble_accesses = 0;
-    size_t wp_budget_caps = 0;
+    size_t early_redirects = 0;
 
     double
     get_ipc() const {
@@ -127,8 +126,7 @@ public:
       j["WP_bpu_queries"] = wp_bpu_queries;
       j["WP_btb_hits"] = wp_btb_hits;
       j["WP_redirects"] = wp_redirects;
-      j["ER_bubble_accesses"] = er_bubble_accesses;
-      j["WP_budget_caps"] = wp_budget_caps;
+      j["early_redirects"] = early_redirects;
       return j;
     }
 
@@ -174,8 +172,7 @@ public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
                     size_t stq_size, BranchUnit* bpu, tick_t br_mis_pen = 1,
-                    tick_t mmio_lat = 1, size_t er_bubble = 3,
-                    size_t wp_budget = 7);
+                    tick_t mmio_lat = 1);
 
   json
   config_json() const override {
@@ -183,8 +180,6 @@ public:
     j["BranchPenaltyCycles"] = BranchMissPenalty;
     j["MmioLatency"] = mmio_lat_;
     j["IFQSize"] = fetch_queue_.capacity();
-    j["EarlyRedirectBubble"] = er_bubble_;
-    j["WpBudgetPerMispred"] = wp_budget_;
     j["area"] = area::area_json(19570.0);
     return j;
   }
@@ -322,15 +317,6 @@ protected:
   // fetch.  In RTL this is 1 cycle (flushWire to next cycle fetch).
   tick_t BranchMissPenalty;
 
-  // earlyRedirect bubble size: RTL FetchStage sends sequential
-  // iCache requests before BPU redirect fires (2-cycle iCache +
-  // 1-cycle BPU SyncReadMem latency).
-  size_t er_bubble_;
-
-  // Max WP iCache accesses per misprediction. RTL FetchStage buffer
-  // (PipeDepth+1=8) limits in-flight requests, capping WP.
-  size_t wp_budget_;
-
   using SimPipe = std::array<TransPtr, Num_PipeStage>;
   TransPtr input_buffer_;
   SimPipe sim_pipe_;
@@ -376,6 +362,8 @@ protected:
     // iCache requests each cycle but does not push to IFQ, so
     // there is no async_schedule callback to wake us.
     if (fetch_.wrong_path)
+      mins = std::min(mins, curr_tick() + 1);
+    if (fetch_.early_redir_remaining > 0)
       mins = std::min(mins, curr_tick() + 1);
     // Wake at resume_tick so fetch resumes after branch penalty.
     if (fetch_.resume_tick > curr_tick() && input_buffer_)
@@ -479,7 +467,6 @@ private:
     bool wp_flushed{false};   // true after EX flush; WP continues
     addr_t wrong_path_pc{0};  // next wrong-path PC to fetch
     tick_t resume_tick{0};    // first cycle IFU may fetch after flush
-    size_t wp_count{0};       // WP fetches since misprediction start
     // iCache response ordering FIFO: tracks whether each in-flight
     // iCache request is for a real IFQ entry (false) or a
     // wrong-path/orphan request (true).  Responses arrive in order.
@@ -490,6 +477,13 @@ private:
     addr_t wp_redirect_target_s1{0};
     bool wp_redirect_s2{false};
     addr_t wp_redirect_target_s2{0};
+    // earlyRedirect: after a correctly predicted taken branch, the
+    // IFU continues fetching 2 sequential PCs before the BPU
+    // redirect takes effect (matches RTL FetchStage earlyRedirect).
+    // These fetches go through iCache (pollution) but responses are
+    // discarded as orphans.
+    int early_redir_remaining{0};
+    addr_t early_redir_seq_pc{0};
   } fetch_;
 
   // MMIO response timer (SoC non-cacheable accesses)

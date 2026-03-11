@@ -21,8 +21,7 @@ using trace::MemNone;
 using trace::MemStore;
 
 Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
-                   BranchUnit* bpu, tick_t br_mis_pen, tick_t mmio_lat,
-                   size_t er_bubble, size_t wp_budget)
+                   BranchUnit* bpu, tick_t br_mis_pen, tick_t mmio_lat)
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}
@@ -35,8 +34,6 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
     , fetch_queue_(ifq_size)
     , ongoing_insts_{0}
     , BranchMissPenalty{br_mis_pen}
-    , er_bubble_{er_bubble}
-    , wp_budget_{wp_budget}
     , mmio_lat_{mmio_lat} {
   assert(bpu && "BranchUnit must not be null");
 }
@@ -95,6 +92,23 @@ Pipeline::do_fetch_0() {
   if (!imem->is_ready().first)
     return;
 
+  // earlyRedirect: after a correctly predicted taken branch, the
+  // IFU continues fetching sequential PCs for 2 cycles before the
+  // BPU redirect takes effect.  Matches RTL FetchStage where
+  // earlyRedirect fires 2 cycles after receipt (iCache 1cyc +
+  // BPU SyncReadMem 1cyc).  These fetches pollute iCache but
+  // their responses are discarded.
+  if (fetch_.early_redir_remaining > 0) {
+    imem->read_req(fetch_.early_redir_seq_pc);
+    fetch_.resp_is_orphan.push_back(true);
+    DPRINTF(Pipeline, " IF EarlyRedir PC=0x%08x (%d left)",
+            fetch_.early_redir_seq_pc,
+            fetch_.early_redir_remaining - 1);
+    fetch_.early_redir_seq_pc += 4;
+    fetch_.early_redir_remaining--;
+    return;
+  }
+
   // Wrong-path: issue iCache request for cache pollution but do NOT
   // push to IFQ.  In RTL, wrong-path instructions flow through the
   // full pipeline (FetchBuf -> Decode -> Dispatch -> Execute),
@@ -109,16 +123,10 @@ Pipeline::do_fetch_0() {
       fetch_.wrong_path = false;
       fetch_.wp_flushed = false;
       // Fall through to normal fetch below
-    } else if (fetch_.wp_count >= wp_budget_) {
-    // WP budget exhausted: RTL FetchStage buffer (PipeDepth+1)
-    // limits in-flight requests, capping WP during pipeline stalls.
-    stats.wp_budget_caps++;
-    return;
     } else {
     // BPU predicts on wrong-path PC (matches RTL SyncReadMem query)
     auto wp_pred = bpu->predict(fetch_.wrong_path_pc);
     stats.wp_bpu_queries++;
-    fetch_.wp_count++;
 
     // Issue iCache request for cache pollution
     imem->read_req(fetch_.wrong_path_pc);
@@ -192,7 +200,6 @@ Pipeline::do_fetch_0() {
 
   if (!accurate) {
     fetch_.wrong_path = true;
-    fetch_.wp_count = 0;
     flush_stall_cycles(curr_tick());
     stall_.in_br_recovery = true;
 
@@ -211,18 +218,24 @@ Pipeline::do_fetch_0() {
   imem->read_req(candidate->trace_inst.pc);
   fetch_.resp_is_orphan.push_back(false);
 
-  // earlyRedirect bubble: RTL FetchStage sends sequential iCache
-  // requests for er_bubble_ cycles before BPU redirect fires.
-  // Models 2-cycle iCache pipeline + 1-cycle BPU SyncReadMem latency.
-  // These requests pollute the cache but do NOT block the pipeline
-  // (RTL sends them BEFORE the redirect; the real branch-target fetch
-  // starts only after the redirect fires).  Use pollute() to model
-  // the cache eviction effect without stalling the iCache pipeline.
-  if (pred.will_redirect && inst.is_branch && er_bubble_ > 0) {
-    for (size_t i = 1; i <= er_bubble_; i++) {
-      imem->pollute(inst.pc + 4 * i);
-    }
-    stats.er_bubble_accesses += er_bubble_;
+  // TAGE timing model: TAGE result is 1 cycle later than bimodal.
+  // If TAGE overrode the bimodal direction (and BTB hit), the fetch
+  // based on bimodal is wrong; stall IFU for 1 cycle for the redirect.
+  // This is applied even when the overall prediction is accurate
+  // (TAGE cost still exists when it corrects bimodal).
+  if (pred.tage_overrode_bimodal) {
+    fetch_.resume_tick = std::max(fetch_.resume_tick, curr_tick() + 2);
+    DPRINTF(Pipeline, " IF TAGE-override stall PC=0x%08x", inst.pc);
+  }
+
+  // earlyRedirect trigger: correctly predicted taken branch.
+  // RTL's IFU fetches 2 sequential PCs (PC+4, PC+8) before
+  // the BPU redirect takes effect.  These go through iCache
+  // (cache pollution) but results are discarded as orphans.
+  if (accurate && pred.will_redirect) {
+    fetch_.early_redir_remaining = 2;
+    fetch_.early_redir_seq_pc = inst.pc + 4;
+    stats.early_redirects++;
   }
 
   fetch_queue_.push_back(std::move(candidate));
@@ -389,6 +402,7 @@ Pipeline::do_execute() {
       fetch_.wp_flushed = true;
       fetch_.wp_redirect_s1 = false;
       fetch_.wp_redirect_s2 = false;
+      fetch_.early_redir_remaining = 0;
       // RTL iCache pipe is NOT flushed on branch misprediction:
       // wrong-path fills complete and pollute the cache.
 
@@ -430,7 +444,7 @@ Pipeline::do_mul_ext() {
 
   flush_false_btb_hit(*trans);
 
-  constexpr tick_t MulLat = 3;
+  constexpr tick_t MulLat = 4;
   mul_ready_tick_ = curr_tick() + MulLat;
   // RTL: WBU always forwards; result available when scoreboard clears
   update_reg_time(inst.dst_reg, curr_tick() + MulLat);
@@ -704,6 +718,7 @@ Pipeline::flush_false_btb_hit(const Transaction& trans) {
   fetch_.wp_flushed = true;
   fetch_.wp_redirect_s1 = false;
   fetch_.wp_redirect_s2 = false;
+  fetch_.early_redir_remaining = 0;
 
   fetch_.resume_tick = curr_tick() + BranchMissPenalty;
   flush_stall_cycles(curr_tick());

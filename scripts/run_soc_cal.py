@@ -107,9 +107,6 @@ SHARED_DEFAULTS = {
     "l1i-assoc": str(IC_ASSOC),
     "l1d-assoc": str(DC_ASSOC),
     "bpu-no-predecode": None,
-    "er-bubble": "0",
-    "wp-budget": "99",
-    "l1i-fill-extra": "8",
 }
 
 

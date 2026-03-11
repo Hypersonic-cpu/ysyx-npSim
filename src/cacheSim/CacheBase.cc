@@ -118,7 +118,6 @@ PipeCache::config_json() const {
   j["assoc"] = assoc();
   j["blkSize"] = blksize();
   j["latency"] = pipe_depth_;
-  j["fill_lat_extra"] = fill_lat_extra_;
   j["write_back"] = write_back_;
 
   json ar;
@@ -184,7 +183,7 @@ PipeCache::recv_mem_resp(MemTransPtr trans) {
     // RTL fillFinish = RegNext(...): 1 extra blocking cycle after the
     // last beat before willShift can go high.  Total = +2 from last beat.
     // CWF: respond 1 cycle after critical word arrives (not after last beat).
-    blocked_until_ = curr_tick() + (cwf_ ? 1 : 2) + fill_lat_extra_;
+    blocked_until_ = curr_tick() + (cwf_ ? 1 : 2);
   } else if (!write_back_) {
     // Write-through: unblock after SDRAM write completes
     blocked_until_ = curr_tick() + 2;

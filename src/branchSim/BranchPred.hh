@@ -15,6 +15,7 @@ namespace branchSim {
 // ---- BTBBase ---------------------------------------------------------------
 
 class BTBBase : public SimObject {
+
 public:
   struct BTBEntry {
     addr_t pc_tag = 0;
@@ -120,14 +121,32 @@ struct BPStatsBase : public StatsBase {
   }
 };
 
-// ---- BranchPred (direction predictor base) ---------------------------------
+// ---- BPUPredResult ---------------------------------------------------------
 
 // State captured at prediction time and carried to EX for accurate update.
 struct BPUPredResult {
   bool taken;
   uint8_t bht_cnt;   // 2-bit saturating counter at prediction time
-  uint32_t ghr_snap; // GHR snapshot before prediction shift
+  uint32_t ghr_snap; // GHR snapshot (or snap_id for TAGE)
+  // Set by TAGE when its direction differs from the bimodal base result
+  // and BTB has a hit (i.e., redirect direction actually differs).
+  bool tage_overrode_bimodal = false;
 };
+
+// ---- BranchResult ----------------------------------------------------------
+// Moved before BranchPred so on_resolved() can take BranchResult.
+
+struct BranchResult {
+  bool pred_taken = false;
+  addr_t pred_target = 0;
+  bool will_redirect = false;
+  uint8_t bht_cnt = 1;    // BHT counter at prediction time (for update)
+  uint32_t ghr_snap = 0;  // GHR snapshot (or snap_id for TAGE) (for update)
+  // Set by TAGE when it overrides the bimodal base direction (BTB hit).
+  bool tage_overrode_bimodal = false;
+};
+
+// ---- BranchPred (direction predictor base) ---------------------------------
 
 class BranchPred : public SimObject {
 public:
@@ -154,6 +173,16 @@ public:
     (void)old_cnt;
     (void)old_ghr;
   }
+  // Called for every resolved branch regardless of the btb_hit||taken gate.
+  // Default no-op. Used by TAGE to update per-component accuracy stats.
+  virtual void on_resolved(bool taken, const BranchResult& pred) {
+    (void)taken;
+    (void)pred;
+  }
+  // Extra predictor-specific stats merged into BranchUnit stats JSON.
+  // Default: empty object (no extra fields).
+  virtual json extra_stats_json() const { return json{}; }
+
   json config_json() const override { return json{{"area", area::area_json(0.0)}}; }
 };
 
@@ -190,84 +219,6 @@ public:
     return {target < pc, 0, 0}; // backward = taken
   }
   void update(addr_t, bool, bool, uint8_t, uint32_t) override {}
-};
-
-// ---- BimodalPredictor ------------------------------------------------------
-
-class BimodalPredictor : public BranchPred {
-public:
-  explicit BimodalPredictor(const std::string& name, size_t entries_pow2,
-                             uint8_t init_val = 1);
-  BPUPredResult predict(addr_t pc, addr_t btb_target) override;
-  void update(addr_t pc, bool taken, bool btb_hit, uint8_t old_cnt,
-              uint32_t old_ghr) override;
-  json config_json() const override;
-
-private:
-  size_t idx_bits_;
-  size_t mask_;
-  std::vector<uint8_t> table_;  // 2-bit saturating counters
-
-  // XOR-folding index: matches RTL BrPred.scala idxOf()
-  //   pc(idxHi, 2) ^ pc(idxHi + idxBits, idxHi + 1)
-  size_t index(addr_t pc) const {
-    size_t lo = (pc >> 2) & mask_;
-    size_t hi = (pc >> (2 + idx_bits_)) & mask_;
-    return lo ^ hi;
-  }
-};
-
-// ---- GSharePredictor -------------------------------------------------------
-
-class GSharePredictor : public BranchPred {
-public:
-  explicit GSharePredictor(const std::string& name, size_t entries_pow2,
-                           size_t history_len = 10, uint8_t init_val = 1);
-  BPUPredResult predict(addr_t pc, addr_t btb_target) override;
-  void update(addr_t pc, bool taken, bool btb_hit, uint8_t old_cnt,
-              uint32_t old_ghr) override;
-  void on_mispred(bool actual_taken, uint8_t old_cnt,
-                  uint32_t old_ghr) override;
-  json config_json() const override;
-
-private:
-  const size_t history_len_;
-  size_t mask_;
-  uint32_t hist_mask_;
-  uint32_t global_history_;
-  std::vector<uint8_t> table_;
-
-  size_t index(addr_t pc, uint32_t ghr) const {
-    return ((pc >> 2) ^ ghr) & mask_;
-  }
-};
-
-// ---- TournamentPredictor ---------------------------------------------------
-
-class TournamentPredictor : public BranchPred {
-public:
-  explicit TournamentPredictor(const std::string& name, size_t entries_pow2,
-                               size_t history_len = 10);
-  BPUPredResult predict(addr_t pc, addr_t btb_target) override;
-  void update(addr_t pc, bool taken, bool btb_hit, uint8_t old_cnt,
-              uint32_t old_ghr) override;
-  void on_mispred(bool actual_taken, uint8_t old_cnt,
-                  uint32_t old_ghr) override;
-  json config_json() const override;
-
-private:
-  const size_t history_len_;
-  size_t mask_;
-  uint32_t hist_mask_;
-  uint32_t global_history_;
-  std::vector<uint8_t> local_table_;
-  std::vector<uint8_t> global_table_;
-  std::vector<uint8_t> selector_table_; // 0-1=local, 2-3=global
-
-  size_t local_index(addr_t pc) const { return (pc >> 2) & mask_; }
-  size_t global_index(addr_t pc, uint32_t ghr) const {
-    return ((pc >> 2) ^ ghr) & mask_;
-  }
 };
 
 // ---- NoBTB -----------------------------------------------------------------
@@ -312,16 +263,6 @@ private:
   std::vector<addr_t> stack_;
   size_t tos_;
   size_t cnt_;
-};
-
-// ---- BranchResult ----------------------------------------------------------
-
-struct BranchResult {
-  bool pred_taken;    // direction prediction
-  addr_t pred_target; // BTB target (0 if miss)
-  bool will_redirect; // pred_taken && btb_hit
-  uint8_t bht_cnt;    // BHT counter at prediction time (for update)
-  uint32_t ghr_snap;  // GHR snapshot before prediction shift (for update)
 };
 
 // ---- BranchUnit ------------------------------------------------------------
