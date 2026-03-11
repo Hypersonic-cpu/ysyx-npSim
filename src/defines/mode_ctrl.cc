@@ -1,3 +1,3 @@
 #include "defines/mode_ctrl.hh"
 
-bool g_soc_mode = true;
+// NPC mode removed: SoC mode is the only supported mode.

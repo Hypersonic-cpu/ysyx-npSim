@@ -54,17 +54,16 @@ set_global_tick(tick_t t) noexcept {
 
 // Memory latency parameters (microsecond-based, converted to cycles
 // via freq_mhz: cycles = ceil(lat_us * freq_mhz))
-//   NPC mode: fixed SDRAM latency via PMemBox (DPI-C ~40ns + overhead)
 //   SoC mode: SdramModel (bank-aware row-hit/miss/conflict)
-static double sdram_lat_us = 0.043;           // NPC default: 43ns = 0.043us
-static double sdram_burst_us = 0.016;         // NPC default: 16ns = 0.016us
+static double sdram_lat_us = 0.051;           // SoC default: 51ns = 0.051us
+static double sdram_burst_us = 0.024;         // SoC default: 24ns = 0.024us
 static tint_t axi_ovhd_cyc = 0;              // Fixed AXI protocol overhead (cycles)
 static tint_t sram_lat = 1;                  // SoC: on-chip SRAM latency (cycles)
 // Derived (set by parse_args from sdram_*_us x freq_mhz)
 static tint_t sdram_lat_cyc = 0;
 static tint_t sdram_burst_cyc = 0;
 static std::string trace_file;
-static size_t l1i_pipe_depth = 3; // iCache pipeline depth (3->3cyc hit, 2->2cyc)
+static size_t l1i_pipe_depth = 1; // iCache pipeline depth (RTL: 2-cycle hit pipeline)
 static size_t l1i_size = 1024;
 static size_t l1i_blksize = 16;
 static size_t l1i_assoc = 1;
@@ -85,17 +84,20 @@ static size_t ghr_bits = 0;        // GHR bits for bimodal+GHR indexing
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
-static size_t ifq_size = 8; // RTL FetchStage PipeDepth+1 (default 8-entry ring buffer)
+static size_t ifq_size = 3; // RTL FetchStage PipeDepth=3
 // FIXME: Remove this. NoCache means no buffer
 static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 0;
-static tick_t br_mis_pen = 1; // Branch misprediction penalty (cycles)
+static tick_t br_mis_pen = 2; // Branch misprediction penalty (cycles)
 static tick_t mmio_lat = 3;  // MMIO access latency (cycles, SoC only)
 static int freq_mhz = 1000;  // CPU frequency in MHz (default 1 GHz)
+static size_t er_bubble = 0; // earlyRedirect bubble (disabled: handled via fill_lat_extra)
+static size_t wp_budget = 99; // Max WP per mispred (effectively uncapped)
+static size_t l1i_fill_extra = 0; // Extra cycles after iCache fill (pipeline depth model)
 static std::string l1i_pref_type = "none"; // iCache prefetcher type
 static std::string l1d_pref_type = "none"; // dCache prefetcher type
 static bool sram_dff = true;          // Area model: DFF or SRAM macro
-static bool bpu_no_predecode = false; // if true: predict for all instructions
+static bool bpu_no_predecode = true; // predict for all instructions (matches RTL)
 static bool l1i_cwf = false;          // Critical Word First for iCache
 
 // Dummy physical memory stubs (active mode: caches don't read data)
@@ -147,7 +149,6 @@ parse_args(int argc, char* argv[]) {
     {"l1d-pref", required_argument, 0, 'p'},
     {"print-brief", no_argument, 0, 201U},
     {"print-none", no_argument, 0, 200U},
-    {"npc-mode", no_argument, 0, 202U},
     {"sram-lat", required_argument, 0, 203U},
     {"sram-dff", no_argument, 0, 204U},
     {"sram-lib", no_argument, 0, 205U},
@@ -158,6 +159,9 @@ parse_args(int argc, char* argv[]) {
     {"bpu-no-predecode", no_argument, 0, 210U},
     {"l1i-cwf", no_argument, 0, 211U},
     {"ghr-bits", required_argument, 0, 212U},
+    {"er-bubble", required_argument, 0, 213U},
+    {"wp-budget", required_argument, 0, 214U},
+    {"l1i-fill-extra", required_argument, 0, 215U},
     {0, 0, 0, 0}};
 
   int opt;
@@ -239,9 +243,6 @@ parse_args(int argc, char* argv[]) {
     case 200:
       print_mode = 0;
       break;
-    case 202:
-      g_soc_mode = false;
-      break;
     case 203:
       sram_lat = std::stoul(optarg);
       break;
@@ -271,6 +272,15 @@ parse_args(int argc, char* argv[]) {
       break;
     case 212U:
       ghr_bits = std::stoul(optarg);
+      break;
+    case 213U:
+      er_bubble = std::stoul(optarg);
+      break;
+    case 214U:
+      wp_budget = std::stoul(optarg);
+      break;
+    case 215U:
+      l1i_fill_extra = std::stoul(optarg);
       break;
     default:
       std::cerr << "Usage: " << argv[0] << " <trace_file> [options]\n";
@@ -330,8 +340,11 @@ create_btb() {
   if (btb_entries_pow2 == 0) {
     return std::make_unique<branchSim::NoBTB>();
   }
+  // Match RTL: btbTagBits = min(AddrBits - btbIdxBits - 2, 16)
+  constexpr size_t AddrBits = 32;
+  size_t tag_bits = std::min(AddrBits - btb_entries_pow2 - 2, size_t{16});
   return std::make_unique<branchSim::CompressedBTB>(
-    "BTB", btb_entries_pow2, 10, 20, sram_dff);
+    "BTB", btb_entries_pow2, tag_bits, 20, sram_dff);
 }
 
 std::unique_ptr<BranchUnit>
@@ -424,7 +437,7 @@ main(int argc, char** argv) {
   size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
     "Core", ifq_size, actual_stq_size, branch_unit.get(),
-    br_mis_pen, mmio_lat);
+    br_mis_pen, mmio_lat, er_bubble, wp_budget);
 
   std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
   if (l1i_pref_type == "nextline") {
@@ -439,7 +452,8 @@ main(int argc, char** argv) {
     "iCache",
     /* host */ core.get(),
     /* pipe depth */ l1i_pipe_depth, l1i_size, l1i_blksize, l1i_assoc, ipf,
-    /* cache ID */ 0, sram_dff, /* write_back */ false, l1i_cwf);
+    /* cache ID */ 0, sram_dff, /* write_back */ false, l1i_cwf,
+    l1i_fill_extra);
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
     std::shared_ptr<cacheSim::Prefetcher> dpf = nullptr;
@@ -470,12 +484,8 @@ main(int argc, char** argv) {
   pipeSim::Processor* proc = &(*core);
 
   // SoC mode: bank-aware SDRAM timing model.
-  // NPC mode: fixed-latency (sdram_lat_cyc / sdram_burst_cyc).
-  std::unique_ptr<memSim::SdramModel> sdram_model;
-  if (g_soc_mode) {
-    sdram_model =
-        std::make_unique<memSim::SdramModel>(freq_mhz);
-  }
+  auto sdram_model =
+      std::make_unique<memSim::SdramModel>(freq_mhz);
 
   auto sdram = std::make_unique<memSim::RAMArbiter>(
     "SDRAM", sdram_lat_cyc, sdram_burst_cyc,

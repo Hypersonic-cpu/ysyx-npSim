@@ -13,6 +13,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <string>
 #include <utility>
@@ -93,6 +94,11 @@ public:
     size_t lsu_stall = 0;
     size_t brmiss_stall = 0;
     size_t raw_stall = 0;
+    size_t wp_bpu_queries = 0;
+    size_t wp_btb_hits = 0;
+    size_t wp_redirects = 0;
+    size_t er_bubble_accesses = 0;
+    size_t wp_budget_caps = 0;
 
     double
     get_ipc() const {
@@ -118,6 +124,11 @@ public:
         bd["RAW_pct"] = 100.0 * raw_stall / cycles;
       }
       j["CycBreakdown"] = bd;
+      j["WP_bpu_queries"] = wp_bpu_queries;
+      j["WP_btb_hits"] = wp_btb_hits;
+      j["WP_redirects"] = wp_redirects;
+      j["ER_bubble_accesses"] = er_bubble_accesses;
+      j["WP_budget_caps"] = wp_budget_caps;
       return j;
     }
 
@@ -163,7 +174,8 @@ public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
                     size_t stq_size, BranchUnit* bpu, tick_t br_mis_pen = 1,
-                    tick_t mmio_lat = 1);
+                    tick_t mmio_lat = 1, size_t er_bubble = 3,
+                    size_t wp_budget = 7);
 
   json
   config_json() const override {
@@ -171,6 +183,8 @@ public:
     j["BranchPenaltyCycles"] = BranchMissPenalty;
     j["MmioLatency"] = mmio_lat_;
     j["IFQSize"] = fetch_queue_.capacity();
+    j["EarlyRedirectBubble"] = er_bubble_;
+    j["WpBudgetPerMispred"] = wp_budget_;
     j["area"] = area::area_json(19570.0);
     return j;
   }
@@ -308,6 +322,15 @@ protected:
   // fetch.  In RTL this is 1 cycle (flushWire to next cycle fetch).
   tick_t BranchMissPenalty;
 
+  // earlyRedirect bubble size: RTL FetchStage sends sequential
+  // iCache requests before BPU redirect fires (2-cycle iCache +
+  // 1-cycle BPU SyncReadMem latency).
+  size_t er_bubble_;
+
+  // Max WP iCache accesses per misprediction. RTL FetchStage buffer
+  // (PipeDepth+1=8) limits in-flight requests, capping WP.
+  size_t wp_budget_;
+
   using SimPipe = std::array<TransPtr, Num_PipeStage>;
   TransPtr input_buffer_;
   SimPipe sim_pipe_;
@@ -349,6 +372,14 @@ protected:
         mins = std::min(mins, elem);
     }
     mins = std::min(mins, mmio_resp_tick_);
+    // Keep Pipeline active during wrong-path: do_fetch_0 issues
+    // iCache requests each cycle but does not push to IFQ, so
+    // there is no async_schedule callback to wake us.
+    if (fetch_.wrong_path)
+      mins = std::min(mins, curr_tick() + 1);
+    // Wake at resume_tick so fetch resumes after branch penalty.
+    if (fetch_.resume_tick > curr_tick() && input_buffer_)
+      mins = std::min(mins, fetch_.resume_tick);
     calc_nxtupd_ = mins;
   }
 
@@ -441,15 +472,24 @@ private:
   IFQRingBuf fetch_queue_;
 
   // Wrong-path fetch state. When a mispredicted branch enters IF,
-  // subsequent fetches use wrong-path PCs until the branch reaches
-  // EX.  SoC mode: IDU drains wrong-path IFQ entries at 1/cycle,
-  // freeing slots (matches high-latency RTL contention).
-  // NPC mode: entries stay until EX flushes (limits to IFQ_SIZE).
+  // wrong-path PCs are fetched as fire-and-forget iCache requests
+  // (not pushed to IFQ).  Responses are tracked via resp_is_orphan_.
   struct FetchState {
     bool wrong_path{false};
+    bool wp_flushed{false};   // true after EX flush; WP continues
     addr_t wrong_path_pc{0};  // next wrong-path PC to fetch
     tick_t resume_tick{0};    // first cycle IFU may fetch after flush
-    size_t orphan_resps{0};   // in-flight iCache resps to discard
+    size_t wp_count{0};       // WP fetches since misprediction start
+    // iCache response ordering FIFO: tracks whether each in-flight
+    // iCache request is for a real IFQ entry (false) or a
+    // wrong-path/orphan request (true).  Responses arrive in order.
+    std::deque<bool> resp_is_orphan;
+    // Wrong-path BPU redirect (2-cycle delay matching RTL
+    // iCache 1cyc + SyncReadMem 1cyc)
+    bool wp_redirect_s1{false};
+    addr_t wp_redirect_target_s1{0};
+    bool wp_redirect_s2{false};
+    addr_t wp_redirect_target_s2{0};
   } fetch_;
 
   // MMIO response timer (SoC non-cacheable accesses)

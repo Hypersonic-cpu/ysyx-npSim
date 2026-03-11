@@ -118,6 +118,7 @@ PipeCache::config_json() const {
   j["assoc"] = assoc();
   j["blkSize"] = blksize();
   j["latency"] = pipe_depth_;
+  j["fill_lat_extra"] = fill_lat_extra_;
   j["write_back"] = write_back_;
 
   json ar;
@@ -157,14 +158,9 @@ PipeCache::handle_hit(const PipePtr& bk, bool immediate) {
     is_read ? bk->line->atAligned(offsetOf(bk->addr)) : bk->wrdata;
   blocked_until_ = curr_tick() + 1;
   if (is_read) {
-    if (immediate || write_back_) {
-      // Fill replay or write-back dCache: respond immediately
-      cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
-    } else {
-      // Normal iCache hit: defer 1 cycle (RTL C3 word-select stage)
-      sched_hit_time_ = curr_tick() + 1;
-      sched_hit_resp_ = {bk->addr, dt, cache_id_, Read};
-    }
+    // Immediate response: matches RTL iCache where tagHit drives
+    // resp.valid combinationally at C2 (same cycle as tag compare).
+    cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
   } else {
     auto mask = CacheBase::strbExtend(bk->wrstrb);
     dt = (~mask & dt) | (mask & bk->wrdata);
@@ -188,7 +184,7 @@ PipeCache::recv_mem_resp(MemTransPtr trans) {
     // RTL fillFinish = RegNext(...): 1 extra blocking cycle after the
     // last beat before willShift can go high.  Total = +2 from last beat.
     // CWF: respond 1 cycle after critical word arrives (not after last beat).
-    blocked_until_ = curr_tick() + (cwf_ ? 1 : 2);
+    blocked_until_ = curr_tick() + (cwf_ ? 1 : 2) + fill_lat_extra_;
   } else if (!write_back_) {
     // Write-through: unblock after SDRAM write completes
     blocked_until_ = curr_tick() + 2;
@@ -382,6 +378,18 @@ PipeCache::read_req_speculative(addr_t addr) {
   pipe_.front() = std::move(req);
   blocked_until_ = curr_tick() + 1;
   is_shifted_ = false;
+}
+
+void
+PipeCache::pollute(addr_t addr) {
+  // Direct pollution: if addr misses, evict victim and install a
+  // valid line.  Models wrong-path iCache fills that could not be
+  // issued through the normal pipeline (iCache was blocked on a miss).
+  // iCache is read-only (write-through, no dirty eviction concern).
+  if (probe(addr))
+    return;  // already cached, no pollution
+  auto* line = access(addr);  // evict LRU, set tag, increment misses
+  line->activate();            // mark valid (simulates SDRAM fill)
 }
 
 void

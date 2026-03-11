@@ -79,6 +79,17 @@ CompressedBTB::update(addr_t pc, addr_t target) {
   DPRINTF(BranchPred, "BTB Update: PC=0x%x Idx=0x%zx Target=0x%x", pc, idx, target);
 }
 
+void
+CompressedBTB::clear_entry(addr_t pc) {
+  auto idx = index(pc);
+  auto& ent = table_.at(idx);
+  ent.valid = false;
+  ent.pc_tag = 0;
+  ent.target = 0;
+  ent.type = 0;
+  DPRINTF(BranchPred, "BTB Clear: PC=0x%x Idx=0x%zx", pc, idx);
+}
+
 // ============================================================================
 // BimodalPredictor
 // ============================================================================
@@ -86,6 +97,7 @@ CompressedBTB::update(addr_t pc, addr_t target) {
 BimodalPredictor::BimodalPredictor(const std::string& name, size_t table_pow2,
                                    uint8_t init_val)
     : BranchPred(name)
+    , idx_bits_(table_pow2)
     , mask_((1u << table_pow2) - 1u)
     , table_(1u << table_pow2, init_val) {}
 
@@ -289,7 +301,19 @@ BranchUnit::predict_at_fetch(addr_t pc, bool is_branch) {
 BranchResult
 BranchUnit::predict(addr_t pc) {
   stats.accesses++;
+  // Model 1RW SRAM port conflict (RTL RegNext bypass).
+  // bypass_valid_ is set from the PREVIOUS tick's write.
+  // Same-index reads use bypass data (correct); different-index reads
+  // are forced to BTB miss.
   addr_t btb_target = btb_->lookup(pc);
+  if (bypass_valid_) {
+    size_t read_idx = (pc >> 2) & (btb_->num_entries() - 1);
+    if (read_idx != bypass_idx_) {
+      // Different index from last write: SRAM output is stale
+      btb_target = 0;
+    }
+    // Same index: SRAM output is correct (bypass data)
+  }
   bool btb_hit = (btb_target != 0);
   auto [pred_taken, bht_cnt, ghr_snap] = bpu_->predict(pc, btb_target);
   addr_t target = btb_target;
@@ -305,8 +329,10 @@ BranchUnit::predict(addr_t pc) {
 
   bool will_redirect = pred_taken && (target != 0);
   DPRINTF(BranchPred,
-          "BranchUnit Predict: PC=0x%08x taken=%d target=0x%08x redirect=%d",
-          pc, pred_taken, target, will_redirect);
+          "BranchUnit Predict: PC=0x%08x taken=%d target=0x%08x redirect=%d"
+          " bypass_conflict=%d",
+          pc, pred_taken, target, will_redirect,
+          bypass_valid_ && ((pc >> 2) & (btb_->num_entries() - 1)) != bypass_idx_);
   return {pred_taken, target, will_redirect, bht_cnt, ghr_snap};
 }
 
@@ -314,12 +340,17 @@ void
 BranchUnit::update(addr_t pc, bool taken, addr_t target, bool is_call,
                    bool is_ret, bool btb_hit, const BranchResult& pred,
                    bool mispred) {
-  bpu_->update(pc, taken, btb_hit, pred.bht_cnt, pred.ghr_snap);
+  // BHT update gate: only update when BTB hit or taken.
+  // Matches RTL: bhtWen = updValid && (updBtbHit || updTaken)
+  if (btb_hit || taken)
+    bpu_->update(pc, taken, btb_hit, pred.bht_cnt, pred.ghr_snap);
   if (mispred)
     bpu_->on_mispred(taken, pred.bht_cnt, pred.ghr_snap);
   if (taken) {
     btb_->update(pc, target);
-    auto idx = (pc >> 2) & (btb_->num_entries() - 1);
+    btb_written_this_tick_ = true;
+    btb_written_idx_ = (pc >> 2) & (btb_->num_entries() - 1);
+    auto idx = btb_written_idx_;
     btb_->set_entry_type(idx, is_ret ? 1 : 0);
   }
   if (ras_) {

@@ -31,6 +31,9 @@ public:
   virtual ~BTBBase() = default;
   virtual addr_t lookup(addr_t pc) const = 0;
   virtual void update(addr_t pc, addr_t target) = 0;
+  virtual void clear_entry(addr_t pc) {
+    (void)pc;
+  }
 
   json stats_json() const override { return json{}; }
   json config_json() const override; // implemented in .cc
@@ -55,7 +58,8 @@ protected:
 
 class CompressedBTB : public BTBBase {
 public:
-  // tag_shift_override: if > 0, overrides the default tag shift
+  // tag_bits: RTL uses min(AddrBits - idxBits - 2, 16).
+  // tag_shift: 2 + entries_pow2 (matches RTL btbTagOf start bit).
   explicit CompressedBTB(const std::string& name, size_t entries_pow2,
                          size_t tag_bits = 10, size_t target_bits = 20,
                          bool sram_dff = true, size_t tag_shift_override = 0)
@@ -64,16 +68,23 @@ public:
       , index_mask_((1u << entries_pow2) - 1u)
       , tag_shift_(tag_shift_override > 0 ? tag_shift_override
                                           : 2 + entries_pow2) {
-    (void)target_bits; // retained for API compatibility, not stored
+    (void)target_bits;
   }
 
   addr_t lookup(addr_t pc) const override;
   void update(addr_t pc, addr_t target) override;
+  void clear_entry(addr_t pc) override;
+
+  // RTL 1RW SRAM: write blocks read in the same cycle.
+  // Call after update()/clear_entry() to record the write tick.
+  void mark_write_tick(tick_t t) { last_write_tick_ = t; }
+  tick_t last_write_tick() const { return last_write_tick_; }
 
 private:
   addr_t tag_mask_;
   addr_t index_mask_;
   size_t tag_shift_;
+  tick_t last_write_tick_ = 0;
 
   size_t index(addr_t pc) const { return (pc >> 2) & index_mask_; }
 };
@@ -193,10 +204,17 @@ public:
   json config_json() const override;
 
 private:
+  size_t idx_bits_;
   size_t mask_;
   std::vector<uint8_t> table_;  // 2-bit saturating counters
 
-  size_t index(addr_t pc) const { return (pc >> 2) & mask_; }
+  // XOR-folding index: matches RTL BrPred.scala idxOf()
+  //   pc(idxHi, 2) ^ pc(idxHi + idxBits, idxHi + 1)
+  size_t index(addr_t pc) const {
+    size_t lo = (pc >> 2) & mask_;
+    size_t hi = (pc >> (2 + idx_bits_)) & mask_;
+    return lo ^ hi;
+  }
 };
 
 // ---- GSharePredictor -------------------------------------------------------
@@ -335,6 +353,31 @@ public:
   // Check prediction accuracy and record miss statistics.
   bool judge(bool real_taken, addr_t real_target, const BranchResult& pred);
 
+  // Clear BTB entry (used on non-branch false BTB hit).
+  // Marks a BTB write for 1RW SRAM port conflict modeling.
+  void clear_btb_entry(addr_t pc) {
+    btb_->clear_entry(pc);
+    btb_written_this_tick_ = true;
+    btb_written_idx_ = (pc >> 2) & (btb_->num_entries() - 1);
+  }
+
+  // Notify BranchUnit of a new simulation tick.  Must be called
+  // before any predict/update calls in this tick.
+  // Shifts this-tick write state to bypass registers (1-cycle delay,
+  // matching RTL RegNext(btbUpdWen)).
+  void begin_tick() {
+    bypass_valid_ = btb_written_this_tick_;
+    bypass_idx_ = btb_written_idx_;
+    btb_written_this_tick_ = false;
+  }
+
+  // Returns true if the BTB has a hit for this PC (for non-branch
+  // clearing).  Does NOT go through the SRAM 1RW port conflict check
+  // because the predBtbHit was captured at predict time.
+  bool has_btb_hit(addr_t pc) const {
+    return btb_->lookup(pc) != 0;
+  }
+
   json stats_json() const override;
   json config_json() const override;
   void reset_stats() override;
@@ -347,6 +390,21 @@ private:
   std::unique_ptr<BTBBase> btb_;
   std::unique_ptr<ReturnAddrStack> ras_;
   bool no_predecode_ = false;
+  // 1RW SRAM port conflict model matching RTL CacheArray behavior.
+  //
+  // RTL uses RegNext(btbUpdWen) for bypass: write at cycle T causes
+  // the bypass to be active at cycle T+1.  At T+1, reads to the SAME
+  // index as the write use bypass data (correct), while reads to a
+  // DIFFERENT index are forced to BTB miss.
+  //
+  // btb_written_this_tick_ / btb_written_idx_: set by update()/
+  //   clear_btb_entry() in the current tick.
+  // bypass_valid_ / bypass_idx_: propagated from previous tick by
+  //   begin_tick() -- checked by predict().
+  bool btb_written_this_tick_ = false;
+  size_t btb_written_idx_ = 0;
+  bool bypass_valid_ = false;
+  size_t bypass_idx_ = 0;
 };
 
 } // namespace branchSim

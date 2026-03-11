@@ -137,6 +137,12 @@ public:
   virtual void write_req(addr_t addr, word_t data, uint8_t mask) = 0;
   virtual void recv_mem_resp(MemTransPtr trans) = 0;
 
+  // Direct pollution: simulate a WP fetch hitting the cache without
+  // going through the pipeline.  If the address misses, evict the
+  // victim and install a valid line (modeling the WP fill from SDRAM).
+  // Default no-op for NoCache.
+  virtual void pollute(addr_t addr) {}
+
   void
   set_cpu_side_handlers(CpuSideMRespReceiver recv, CpuSideAckReceiver ack) {
     cpu_resp_recv_ = recv;
@@ -208,11 +214,13 @@ public:
                      size_t size_bytes, size_t line_bytes, size_t assoc = 1,
                      std::shared_ptr<Prefetcher> prefetcher = nullptr,
                      uint16_t cache_id = 0, bool sram_dff = true,
-                     bool write_back = false, bool cwf = false)
+                     bool write_back = false, bool cwf = false,
+                     size_t fill_lat_extra = 0)
       : CacheBase(name, host, size_bytes, line_bytes, assoc, prefetcher,
                   cache_id)
       , pipe_(pipe_depth)
       , pipe_depth_{pipe_depth}
+      , fill_lat_extra_{fill_lat_extra}
       , sram_dff_{sram_dff}
       , write_back_{write_back}
       , cwf_{cwf}
@@ -237,6 +245,7 @@ public:
   void read_req_speculative(addr_t addr) override;
   void write_req(addr_t addr, word_t data, uint8_t mask) override;
   void recv_mem_resp(MemTransPtr trans) override;
+  void pollute(addr_t addr) override;
 
   void flush_all() override;
   size_t flush_speculative() override;
@@ -271,6 +280,7 @@ protected:
 
   std::vector<PipePtr> pipe_;
   size_t pipe_depth_;
+  size_t fill_lat_extra_;
   bool sram_dff_;
   bool write_back_;
   bool cwf_;

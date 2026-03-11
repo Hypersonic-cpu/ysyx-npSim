@@ -80,8 +80,7 @@ public:
       j["sdram_burst_cyc"] = sdram_burst_;
       j["axi_ovhd_cyc"] = axi_ovhd_;
     }
-    if (g_soc_mode)
-      j["sram_lat"] = sram_lat_;
+    j["sram_lat"] = sram_lat_;
     j["num_hosts"] = hosts_.size();
     j["area"] = area::area_json(200.0);
     return j;
@@ -125,7 +124,7 @@ private:
   inline tint_t
   lat_of(MemTrans* req) {
     assert(req->bst_len >= 1);
-    if (g_soc_mode && (isSRAM(req->addr) || isCLINT(req->addr)))
+    if ((isSRAM(req->addr) || isCLINT(req->addr)))
       return sram_lat_;
     if (req->id < host_sdram_rd_.size()) {
       if (req->mop == Read)
