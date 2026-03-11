@@ -84,7 +84,7 @@ static size_t btb_entries_pow2 = 4;
 static size_t ras_depth = 0;
 static size_t ghr_bits = 0;        // GHR bits for bimodal+GHR indexing
 static int tage_comp_pow2 = 7;     // TAGE: log2 of entries per component (128)
-static std::string tage_hists = "2,8,32"; // TAGE: comma-separated history lengths
+static std::string tage_hists = "2,4,8,16,32,64"; // TAGE: comma-separated history lengths
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
