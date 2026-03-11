@@ -594,13 +594,16 @@ Pipeline::do_writeback() {
            && curr_tick() >= mul_ready_tick_)
     src = IntMulExt;
   else {
-    // No source ready yet; schedule for earliest completion
+    // No source ready yet, or pendingALU is blocking a ready MUL/DIV.
+    // Schedule retry at the earliest ready tick, but not in the past:
+    // when pendingALU delayed commitment past mul/div_ready_tick_, the
+    // result is already available -- retry next cycle once ALU clears.
     tick_t next = InfTime;
     if (sim_pipe_.at(IntDivExt))
       next = std::min(next, div_ready_tick_);
     if (sim_pipe_.at(IntMulExt))
       next = std::min(next, mul_ready_tick_);
-    schedule(WriteBack, next);
+    schedule(WriteBack, std::max(next, curr_tick() + 1));
     return;
   }
 
