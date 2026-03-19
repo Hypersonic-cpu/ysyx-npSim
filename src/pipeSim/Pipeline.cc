@@ -341,9 +341,13 @@ Pipeline::do_decode() {
     if (has_mext_waw(IntMulExt) || has_mext_waw(IntDivExt)) {
       if (!lsu_active)
         set_stall(RAW);
-      schedule(Decode, reg_ready_.at(inst.dst_reg));
+      auto waw_ready = reg_ready_.at(inst.dst_reg);
+      // Clamp to future: if dst reg is already ready, proceed next cycle
+      if (waw_ready <= curr_tick())
+        waw_ready = curr_tick() + 1;
+      schedule(Decode, waw_ready);
       DPRINTF(Pipeline, " ID WAW stall PC=0x%08x dst=%d until T@%lu",
-              inst.pc, inst.dst_reg, reg_ready_.at(inst.dst_reg));
+              inst.pc, inst.dst_reg, waw_ready);
       return;
     }
   }
@@ -673,7 +677,11 @@ Pipeline::update_reg_time(uint8_t rd, tick_t when) {
       if (idi.src_reg[0] || idi.src_reg[1]) {
         auto ready_time = std::max(reg_ready_.at(idi.src_reg[0]),
                                    reg_ready_.at(idi.src_reg[1]));
-        schedule(Decode, ready_time);
+        // If registers are already ready, wake up in next cycle
+        if (ready_time <= curr_tick())
+          schedule(Decode, curr_tick() + 1);
+        else
+          schedule(Decode, ready_time);
       }
     }
   }
