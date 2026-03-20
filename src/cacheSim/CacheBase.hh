@@ -4,6 +4,7 @@
 #include "areaSim/AreaEst.hh"
 #include "cacheSim/CacheLine.hh"
 #include "cacheSim/Prefetcher.hh"
+#include "cacheSim/ReplPolicy.hh"
 #include "cacheSim/RamConn.hh"
 #include "defines/base.hh"
 #include "defines/interface.hh"
@@ -100,7 +101,8 @@ public:
   CacheBase(const std::string& name, CPU* host, size_t size_bytes,
             size_t line_bytes, size_t assoc = 1,
             std::shared_ptr<Prefetcher> prefetcher = nullptr,
-            uint16_t cache_id = 0)
+            uint16_t cache_id = 0,
+            std::unique_ptr<ReplPolicy> repl_policy = nullptr)
       : ClockedObject(name, &this->stats)
       , stats(name)
       , lineBytes_(line_bytes)
@@ -110,6 +112,7 @@ public:
       , cache_id_(cache_id)
       , setsArr_(sets_, std::vector<CacheLine>(assoc_, {line_bytes}))
       , prefetcher_(prefetcher)
+      , repl_policy_(std::move(repl_policy))
       , cpu_resp_recv_(nullptr)
       , cpu_ack_recv_(nullptr)
       , mem_side_(nullptr) {
@@ -119,6 +122,8 @@ public:
     if (prefetcher_) {
       prefetcher_->setBlockSize(lineBytes_);
     }
+    if (!repl_policy_)
+      repl_policy_ = make_repl_policy("lru", assoc_);
   }
 
   virtual ~CacheBase() = default;
@@ -155,10 +160,12 @@ public:
   }
 
 protected:
+  using Set = ReplPolicy::Set;
   /** Access index and check tag, update LRU stamps.
    * @return Pointer to CacheLine on hit, nullptr on miss
    */
   CacheLine* access(addr_t addr);
+  CacheLine* select_victim(Set& set);
 
   /// Tag lookup without stats side effects. Returns true if addr is
   /// present in the cache.
@@ -201,6 +208,7 @@ protected:
 
   std::vector<std::vector<CacheLine>> setsArr_;
   std::shared_ptr<Prefetcher> prefetcher_;
+  std::unique_ptr<ReplPolicy> repl_policy_;
 
   CpuSideMRespReceiver cpu_resp_recv_;
   CpuSideAckReceiver cpu_ack_recv_;
@@ -214,9 +222,10 @@ public:
                      size_t size_bytes, size_t line_bytes, size_t assoc = 1,
                      std::shared_ptr<Prefetcher> prefetcher = nullptr,
                      uint16_t cache_id = 0, bool sram_dff = true,
-                     bool write_back = false, bool cwf = false)
+                     bool write_back = false, bool cwf = false,
+                     std::unique_ptr<ReplPolicy> repl_policy = nullptr)
       : CacheBase(name, host, size_bytes, line_bytes, assoc, prefetcher,
-                  cache_id)
+                  cache_id, std::move(repl_policy))
       , pipe_(pipe_depth)
       , pipe_depth_{pipe_depth}
       , sram_dff_{sram_dff}
@@ -306,7 +315,7 @@ class NoCache : public CacheBase {
 public:
   explicit NoCache(const std::string& name, uint16_t cache_id = 1)
       : CacheBase(name, 0, 8, 4, 1, nullptr,
-                  cache_id) // 8B total, 4B line, 1-way = 2 sets
+                  cache_id, make_repl_policy("lru", 1))
       , r_busy_{false}
       , w_busy_{false} {} // Dummy values for base
 

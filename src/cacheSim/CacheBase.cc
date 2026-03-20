@@ -50,6 +50,15 @@ CacheBase::blksize() const {
 }
 
 CacheLine*
+CacheBase::select_victim(Set& set) {
+  for (auto& line : set) {
+    if (!line.isValid())
+      return &line;
+  }
+  return repl_policy_->getVictim(set);
+}
+
+CacheLine*
 CacheBase::access(addr_t addr) {
   ++stats.accesses;
   addr_t tag = tagOf(addr);
@@ -60,7 +69,7 @@ CacheBase::access(addr_t addr) {
   for (size_t i = 0; i < set.size(); ++i) {
     auto& l = set.at(i);
     if (l.isValid() && l.getTag() == tag) {
-      l.stamp = curr_tick();
+      repl_policy_->onHit(l);
       ++this->stats.hits;
       if (l.is_prefetched && prefetcher_) {
         l.is_prefetched = false;
@@ -70,15 +79,13 @@ CacheBase::access(addr_t addr) {
     }
   }
 
-  // miss: replace LRU
+  // miss: Invoking replacement policy
   ++stats.misses;
-  auto it = std::min_element(set.begin(), set.end(),
-                             [](const CacheLine& a, const CacheLine& b) {
-                               return a.stamp < b.stamp;
-                             });
+  // FIXME: Replace this LRU
+  auto* victim = select_victim(set);
   // Write back by caller. Dirty bit is not cleared so far.
-  it->invalidate();
-  return &(*it);
+  victim->invalidate();
+  return victim;
 }
 
 void
@@ -86,6 +93,7 @@ CacheBase::handle_fill(CacheLine* blk, addr_t addr,
                        const std::vector<word_t>& ret) {
   blk->activate();
   blk->setTag(tagOf(addr));
+  repl_policy_->onFill(*blk);
   DPRINTF(Cache, "ReFill @ addr %08x", blk->getTag());
   blk->setVecData(ret);
 }
@@ -344,13 +352,10 @@ PipeCache::handle_prefetch(addr_t addr, bool is_hit) {
 
   // Fill the line immediately (simplified: no memory latency for prefetch)
   prefetcher_->prefetch_issued++;
-  auto* victim =
-    &*std::min_element(set.begin(), set.end(),
-                       [](const CacheLine& a, const CacheLine& b) {
-                         return a.stamp < b.stamp;
-                       });
+  auto* victim = select_victim(set);
   victim->setTag(tag);
   victim->activate();
+  repl_policy_->onFill(*victim);
   victim->is_prefetched = true;
   DPRINTF(Cache, "Prefetch Fill @ %08x (set %zu)", paddr, si);
   return true;
@@ -467,10 +472,7 @@ PipeCache::save_evict_info(addr_t req_addr) {
   size_t si = setIndexOf(req_addr);
   auto& set = setsArr_.at(si);
   // Same LRU victim selection as access()
-  auto it = std::min_element(set.begin(), set.end(),
-    [](const CacheLine& a, const CacheLine& b) {
-      return a.stamp < b.stamp;
-    });
+  auto* it = select_victim(set);
   if (it->isValid() && it->isDirty()) {
     pending_evict_ = true;
     evict_addr_ = it->getTag();  // blockAddrOf — already aligned

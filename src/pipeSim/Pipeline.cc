@@ -168,15 +168,11 @@ Pipeline::do_fetch_0() {
   if (fetch_queue_.full())
     return;
 
-  if (is_draining_) [[unlikely]] {
-    Inst drain_inst{0, 0, 0, false, false, 0, {0, 0}, 0, 0};
-    auto candidate =
-      std::make_unique<Transaction>(drain_inst, true, true);
-    imem->read_req(candidate->trace_inst.pc);
-    fetch_.resp_is_orphan.push_back(false);
-    fetch_queue_.push_back(std::move(candidate));
+  // Drain mode: stop issuing new placeholder traffic.
+  // But if a real instruction is still buffered in input_buffer_,
+  // let it proceed so ongoing_insts_ can eventually reach zero.
+  if (is_draining_ && input_buffer_ == nullptr) [[unlikely]]
     return;
-  }
 
   if (curr_tick() < fetch_.resume_tick)
     return;

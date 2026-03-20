@@ -20,6 +20,7 @@
 #include "branchSim/Tage.hh"
 #include "cacheSim/CacheBase.hh"
 #include "cacheSim/Prefetcher.hh"
+#include "cacheSim/ReplPolicy.hh"
 #include "cacheSim/RamConn.hh"
 #include "defines/base.hh"
 
@@ -97,6 +98,8 @@ static tick_t mmio_lat = 3;  // MMIO access latency (cycles, SoC only)
 static int freq_mhz = 1000;  // CPU frequency in MHz (default 1 GHz)
 static std::string l1i_pref_type = "none"; // iCache prefetcher type
 static std::string l1d_pref_type = "none"; // dCache prefetcher type
+static std::string l1i_repl = "lru";       // iCache replacement policy
+static std::string l1d_repl = "lru";       // dCache replacement policy
 static bool sram_dff = true;          // Area model: DFF or SRAM macro
 static bool bpu_no_predecode = true; // predict for all instructions (matches RTL)
 static bool l1i_cwf = false;          // Critical Word First for iCache
@@ -147,7 +150,9 @@ parse_args(int argc, char* argv[]) {
     {"stbuf-entries", required_argument, 0, 'Z'},
     {"br-pen", required_argument, 0, 'X'},
     {"l1i-pref", required_argument, 0, 'P'},
+    {"l1i-repl", required_argument, 0, 215U},
     {"l1d-pref", required_argument, 0, 'p'},
+    {"l1d-repl", required_argument, 0, 216U},
     {"print-brief", no_argument, 0, 201U},
     {"print-none", no_argument, 0, 200U},
     {"sram-lat", required_argument, 0, 203U},
@@ -234,8 +239,24 @@ parse_args(int argc, char* argv[]) {
     case 'P':
       l1i_pref_type = optarg;
       break;
+    case 215U:
+      l1i_repl = optarg;
+      if (l1i_repl != "lru" && l1i_repl != "srrip" && l1i_repl != "rr") {
+        std::cerr << "Invalid --l1i-repl value: " << l1i_repl
+                  << " (expected lru|srrip|rr)\n";
+        return 1;
+      }
+      break;
     case 'p':
       l1d_pref_type = optarg;
+      break;
+    case 216U:
+      l1d_repl = optarg;
+      if (l1d_repl != "lru" && l1d_repl != "srrip" && l1d_repl != "rr") {
+        std::cerr << "Invalid --l1d-repl value: " << l1d_repl
+                  << " (expected lru|srrip|rr)\n";
+        return 1;
+      }
       break;
     case 201:
       print_mode = 1;
@@ -464,7 +485,8 @@ main(int argc, char** argv) {
     "iCache",
     /* host */ core.get(),
     /* pipe depth */ l1i_pipe_depth, l1i_size, l1i_blksize, l1i_assoc, ipf,
-    /* cache ID */ 0, sram_dff, /* write_back */ false, l1i_cwf);
+    /* cache ID */ 0, sram_dff, /* write_back */ false, l1i_cwf,
+    cacheSim::make_repl_policy(l1i_repl, l1i_assoc));
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
     std::shared_ptr<cacheSim::Prefetcher> dpf = nullptr;
@@ -480,7 +502,8 @@ main(int argc, char** argv) {
       /* host */ core.get(),
       /* pipe depth */ 1, l1d_size, l1d_blksize, l1d_assoc, dpf,
       /* cache ID */ 1, sram_dff,
-      /* write_back */ true);
+      /* write_back */ true, /* cwf */ false,
+      cacheSim::make_repl_policy(l1d_repl, l1d_assoc));
   } else {
     if (stbuf_entries == 0) {
       dcache = std::make_unique<cacheSim::NoCache>("dNoCache",
@@ -540,6 +563,7 @@ main(int argc, char** argv) {
 
   TraceInst inst;
   bool has_next = true;
+  bool stop_after_dump = false;
 
   size_t dump_cnt = 0;
   size_t inst_cnt = 0;
@@ -552,7 +576,7 @@ main(int argc, char** argv) {
     }
 
     if (core->inst_avail()) {
-      if (has_next && inst_cnt < max_insts) [[likely]] {
+      if (!stop_after_dump && has_next && inst_cnt < max_insts) [[likely]] {
         has_next = reader.next(inst);
         if (!has_next) {
           core->set_draining();
@@ -601,6 +625,9 @@ main(int argc, char** argv) {
           dcache ? dcache->stats.miss_rate() : -1);
       }
       append_stats_json(root, dump_cnt++, simlist, sanitizer);
+      // Trace ROI convention: stop feeding new instructions after dump marker
+      // and only drain in-flight pipeline/cache traffic.
+      stop_after_dump = true;
     }
   } while (!core->is_finished() && curr_tick() < max_ticks);
 
