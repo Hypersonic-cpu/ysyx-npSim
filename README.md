@@ -7,7 +7,7 @@ cache, and memory model. Calibrated against NPC RTL (≤3.4% IPC,
 ## Quick Reference
 
 ```bash
-make all -j4 DEBUG_MODE=0 NPSIM_ACTIVE=1       # Release build
+make all -j4 DEBUG_MODE=0       # Release build
 ./build/npsim.elf <trace.nptr.zst> [options]    # Run simulation
 python3 scripts/sweep_2d.py --conf <config.py> --outdir <dir> --jobs 4
 python3 area/area_est.py --conf-json simout/<dir>/conf.json --outdir simout/<dir>

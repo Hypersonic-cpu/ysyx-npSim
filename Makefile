@@ -5,12 +5,7 @@ else
 	DBG_FLAGS = -DNDEBUG
 endif
 
-NPSIM_ACTIVE?=1
-ifeq ($(NPSIM_ACTIVE),1)
-	SRC_PATH = ./src
-else
-	SRC_PATH = $(NPSIM_HOME)/src
-endif
+SRC_PATH = ./src
 
 SRCS_BRANCH := $(shell find "$(SRC_PATH)/branchSim" -name '*.cc' -type f)
 SRCS_CACHE  := $(shell find "$(SRC_PATH)/cacheSim" -name '*.cc' -type f)
@@ -19,8 +14,7 @@ SRCS_DEFINE := $(shell find "$(SRC_PATH)/defines" -name '*.cc' -type f)
 SRCS_TRACE  := $(shell find "$(SRC_PATH)" -maxdepth 1 -name 'trace.cc' -type f)
 SRCS_PMEM   := $(shell find "$(SRC_PATH)" -maxdepth 1 -name 'pmem.cc' -type f)
 
-ifeq ($(NPSIM_ACTIVE),1)
-# ACTIVE mode, run `make` in this folder
+
 CXX := clang++-22
 CXXFLAGS ?= -std=c++23 -stdlib=libc++ -O3 -flto -g -fPIC -I./src -Wall -Wno-reorder-ctor
 CXXFLAGS += -I ./libs/json/include
@@ -78,9 +72,4 @@ clean:
 	@echo $(OBJS)
 	rm -rf build/*
 
-else
-# PASSIVE mode, called by npc/
-# TODO: Branch
-CSRCS +=
-INC_PATH += $(NPSIM_HOME)
-endif
+
