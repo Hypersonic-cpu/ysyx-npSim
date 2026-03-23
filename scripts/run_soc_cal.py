@@ -1,201 +1,193 @@
 #!/usr/bin/env python3
-"""run_soc_cal.py -- Run npsim configs matching RTL sweep.
+"""npSim sweep for SoC calibration matrix (23-Mar-2026).
 
-Generates the exact same config tags as npc/scripts/sweep_rv32im_soc_cal.py
-so compare_rtl.py can match them by suffix.
+This script is npSim-only and runs in npsim/.
+It never triggers RTL compile/run.
 
-Usage:
-  python3 scripts/run_soc_cal.py --mhz 1000 --group all --jobs 4
-  python3 scripts/run_soc_cal.py --mhz 500 --group bpu
+Trace inputs:
+  tests/cm2-im-optklib2.nptr.zst
+  tests/dry2500-im-optklib2.nptr.zst
+
+Output layout:
+  npsim/simout/23-Mar-2026-Cal/{cm2,dry2500}-{500,1000}MHz/<suffix>/stats.json
 """
 
+from __future__ import annotations
+
 import argparse
-import json
+import importlib.util
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-
-NPSIM_HOME = Path(__file__).resolve().parent.parent
-NPSIM_BIN = NPSIM_HOME / "build" / "npsim.elf"
-SIMOUT = NPSIM_HOME / "simout"
-TRACE = "tests/cm2-soc-regen.nptr.zst"
-
-IC_ASSOC = 1
-DC_ASSOC = 1
-DC_BLK = 16
+from typing import Dict, List, Tuple
 
 
-def canonical_tag(mhz, ic_sz, ic_blk, dc_sz, bpu_type,
-                  bht=0, btb=0):
-    prefix = f"rv32im_soc_cal_{mhz}MHz"
-    s = (f"{prefix}_l1i-{ic_sz}-b{ic_blk}-a{IC_ASSOC}"
-         f"_l1d-{dc_sz}-b{DC_BLK}-a{DC_ASSOC}")
-    if bpu_type == "none":
-        s += "_bpu-none"
-    else:
-        s += f"_bpu-bimodal-h{bht}-t{btb}"
-    return s
+def load_common(repo_root: Path):
+    common_py = repo_root / "misc" / "soc_cal_23mar2026_common.py"
+    if not common_py.exists():
+        raise FileNotFoundError(f"Missing shared config: {common_py}")
+    spec = importlib.util.spec_from_file_location("soc_cal_common", common_py)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
-def gen_bpu_configs(mhz):
-    """NoBPU + Bimodal BPU sweep (fixed 1kB caches)."""
-    ic_sz, ic_blk, dc_sz = 1024, 16, 1024
-    configs = []
-    # NoBPU
-    configs.append({
-        "tag": canonical_tag(mhz, ic_sz, ic_blk, dc_sz, "none"),
-        "l1i-size": str(ic_sz), "l1i-blksize": str(ic_blk),
-        "l1d-size": str(dc_sz), "l1d-blksize": str(DC_BLK),
-        "bpu-type": "none",
-    })
-    # Bimodal sweep
-    for bht in [128, 256, 1024]:
-        for btb in [64, 128, 512]:
-            configs.append({
-                "tag": canonical_tag(mhz, ic_sz, ic_blk, dc_sz,
-                                     "bimodal", bht, btb),
-                "l1i-size": str(ic_sz), "l1i-blksize": str(ic_blk),
-                "l1d-size": str(dc_sz), "l1d-blksize": str(DC_BLK),
-                "bpu-type": "bimodal", "bpu-size": str(bht),
-                "btb-size": str(btb), "ras-size": "8",
-            })
-    return configs
+def ensure_exists(path: Path, what: str) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"{what} not found: {path}")
 
 
-def gen_cache_configs(mhz):
-    """iCache x dCache sweep (fixed bimodal h256-t128)."""
-    bht, btb = 256, 128
-    configs = []
-    for ic_sz in [512, 1024, 2048]:
-        for ic_blk in [16, 32]:
-            for dc_sz in [512, 1024]:
-                configs.append({
-                    "tag": canonical_tag(mhz, ic_sz, ic_blk, dc_sz,
-                                         "bimodal", bht, btb),
-                    "l1i-size": str(ic_sz),
-                    "l1i-blksize": str(ic_blk),
-                    "l1d-size": str(dc_sz),
-                    "l1d-blksize": str(DC_BLK),
-                    "bpu-type": "bimodal", "bpu-size": str(bht),
-                    "btb-size": str(btb), "ras-size": "8",
-                })
-    return configs
+def parse_csv_ints(s: str) -> List[int]:
+    vals = [x.strip() for x in s.split(",") if x.strip()]
+    return [int(x) for x in vals]
 
 
-def gen_pipe_configs(mhz):
-    """Large cache + NoBPU for pipeline validation."""
-    ic_sz, ic_blk, dc_sz = 4096, 16, 2048
-    return [{
-        "tag": canonical_tag(mhz, ic_sz, ic_blk, dc_sz, "none"),
-        "l1i-size": str(ic_sz), "l1i-blksize": str(ic_blk),
-        "l1d-size": str(dc_sz), "l1d-blksize": str(DC_BLK),
-        "bpu-type": "none",
-    }]
+def parse_csv_strs(s: str) -> List[str]:
+    return [x.strip() for x in s.split(",") if x.strip()]
 
 
-# Shared defaults (SoC mode, no store buffer, no prefetcher)
-SHARED_DEFAULTS = {
-    "stbuf-entries": "0",
-    "br-pen": "3",
-    "sdram-lat-us": "0.051",
-    "sdram-burst-us": "0.024",
-    "sram-lat": "1",
-    "ifq-size": "3",
-    "l1i-pref": "none",
-    "l1d-pref": "none",
-    "l1i-assoc": str(IC_ASSOC),
-    "l1d-assoc": str(DC_ASSOC),
-    "bpu-no-predecode": None,
-}
+def run_one(
+    npsim_home: str,
+    npsim_bin: str,
+    trace_file: str,
+    out_tag: str,
+    params: Dict[str, str | None],
+    timeout_s: int,
+) -> Tuple[str, bool, str]:
+    stats = Path(npsim_home) / "simout" / out_tag / "stats.json"
+    if stats.exists():
+        return out_tag, True, "cached"
 
-
-def run_one(tag, params, outdir, mhz):
-    """Run npsim for one config. Returns (tag, ok, msg)."""
-    merged = dict(SHARED_DEFAULTS)
-    merged["freq-mhz"] = str(mhz)
-    merged.update(params)
-    del merged["tag"]  # not an npsim flag
-
-    out_tag = f"{outdir}/{tag}"
-    cmd = [str(NPSIM_BIN), str(NPSIM_HOME / TRACE)]
-    for k, v in merged.items():
+    cmd = [npsim_bin, trace_file]
+    for k, v in params.items():
         if v is None:
             cmd.append(f"--{k}")
         else:
             cmd += [f"--{k}", str(v)]
     cmd += ["--outdir", out_tag, "--print-none"]
 
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           cwd=str(NPSIM_HOME), timeout=300)
-        if r.returncode != 0:
-            return tag, False, r.stderr.strip()[-200:]
-        return tag, True, ""
-    except Exception as e:
-        return tag, False, str(e)
+    p = subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+        timeout=timeout_s,
+        cwd=npsim_home,
+    )
+    if p.returncode != 0 or not stats.exists():
+        return out_tag, False, (p.stdout + p.stderr)[-1200:]
+    return out_tag, True, "ok"
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-        formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--group",
-                    choices=["bpu", "cache", "pipe", "all"],
-                    default="all")
-    ap.add_argument("--mhz", type=int, nargs="+",
-                    default=[1000],
-                    help="Frequency(s) (default: 1000)")
-    ap.add_argument("--jobs", type=int, default=4)
+def main() -> int:
+    repo_root = Path(__file__).resolve().parents[2]
+    npsim_home = repo_root / "npsim"
+    common = load_common(repo_root)
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--groups", default=common.default_groups_csv())
+    ap.add_argument("--freqs", default="500,1000")
+    ap.add_argument("--benches", default="cm2,dry2500")
+    ap.add_argument("--jobs", type=int, default=8)
+    ap.add_argument("--out-root", default="23-Mar-2026-Cal")
+    ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--limit-configs", type=int, default=0)
+    ap.add_argument("--stbuf-entries", type=int, default=0)
+    ap.add_argument("--axi-ovhd-cyc", type=int, default=4)
+    ap.add_argument("--sdram-lat-us", type=float, default=0.051)
+    ap.add_argument("--sdram-burst-us", type=float, default=0.024)
+    ap.add_argument("--sram-lat", type=int, default=1)
     args = ap.parse_args()
 
-    if not NPSIM_BIN.exists():
-        print(f"ERROR: {NPSIM_BIN} not found. Run make first.")
-        sys.exit(1)
+    npsim_bin = npsim_home / "build" / "npsim.elf"
+    ensure_exists(npsim_bin, "npSim binary")
 
-    for mhz in args.mhz:
-        outdir = f"rv32im_soc_cal_{mhz}MHz"
-        configs = []
-        if args.group in ("bpu", "all"):
-            configs += gen_bpu_configs(mhz)
-        if args.group in ("cache", "all"):
-            configs += gen_cache_configs(mhz)
-        if args.group in ("pipe", "all"):
-            configs += gen_pipe_configs(mhz)
+    trace_map = {
+        "cm2": npsim_home / "tests" / "cm2-im-optklib2.nptr.zst",
+        "dry2500": npsim_home / "tests" / "dry2500-im-optklib2.nptr.zst",
+    }
 
-        # Deduplicate by tag
-        seen = set()
-        unique = []
-        for c in configs:
-            if c["tag"] not in seen:
-                seen.add(c["tag"])
-                unique.append(c)
-        configs = unique
+    groups = common.parse_groups(args.groups)
+    freqs = parse_csv_ints(args.freqs)
+    benches = parse_csv_strs(args.benches)
 
-        print(f"\n{'='*60}")
-        print(f"  {outdir}: {len(configs)} configs @ {mhz} MHz")
-        print(f"{'='*60}")
+    for b in benches:
+        if b not in trace_map:
+            raise ValueError(f"Unsupported bench '{b}', choose from {sorted(trace_map)}")
+        ensure_exists(trace_map[b], f"trace ({b})")
 
-        with ThreadPoolExecutor(max_workers=args.jobs) as ex:
-            futures = {
-                ex.submit(run_one, c["tag"], c, outdir, mhz): c["tag"]
-                for c in configs
-            }
-            done = 0
-            total = len(configs)
-            pass_n = 0
-            for fut in as_completed(futures):
-                tag, ok, msg = fut.result()
-                done += 1
-                short = tag.split("_", 4)[-1] if "_" in tag else tag
-                status = "ok" if ok else f"FAIL: {msg}"
-                print(f"  [{done:>{len(str(total))}}/{total}] "
-                      f"{short}: {status}")
-                if ok:
-                    pass_n += 1
+    cfgs = common.configs_for_groups(groups, dedup=True)
+    cfgs = sorted(cfgs, key=lambda c: common.canonical_suffix(c))
+    if args.limit_configs > 0:
+        cfgs = cfgs[: args.limit_configs]
 
-        print(f"\n  {pass_n}/{total} succeeded. "
-              f"Results in simout/{outdir}/")
+    base_params: Dict[str, str | None] = {
+        "stbuf-entries": str(args.stbuf_entries),
+        "axi-ovhd-cyc": str(args.axi_ovhd_cyc),
+        "sdram-lat-us": f"{args.sdram_lat_us}",
+        "sdram-burst-us": f"{args.sdram_burst_us}",
+        "sram-lat": str(args.sram_lat),
+        "l1i-pref": "none",
+        "l1d-pref": "none",
+    }
+
+    print(f"Groups: {groups}")
+    print(f"Unique HW configs: {len(cfgs)}")
+    print(f"Freqs: {freqs}")
+    print(f"Benches: {benches}")
+    print(f"Output root: npsim/simout/{args.out_root}")
+
+    tasks = []
+    for mhz in freqs:
+        for cfg in cfgs:
+            hw = common.npsim_hw_params(cfg)
+            for b in benches:
+                tag = f"{args.out_root}/{common.full_tag(b, mhz, cfg)}"
+                p = dict(base_params)
+                p["freq-mhz"] = str(mhz)
+                p.update(hw)
+                tasks.append((
+                    str(trace_map[b]),
+                    tag,
+                    p,
+                ))
+
+    print(f"Total npSim tasks: {len(tasks)} (jobs={args.jobs})")
+    fail = 0
+    done = 0
+
+    with ThreadPoolExecutor(max_workers=args.jobs) as ex:
+        futs = {
+            ex.submit(
+                run_one,
+                str(npsim_home),
+                str(npsim_bin),
+                trace,
+                out_tag,
+                params,
+                args.timeout,
+            ): out_tag
+            for trace, out_tag, params in tasks
+        }
+        total = len(futs)
+        for fut in as_completed(futs):
+            tag, ok, msg = fut.result()
+            done += 1
+            if not ok:
+                fail += 1
+            status = "OK" if ok else "FAIL"
+            print(f"  [{done}/{total}] {tag}: {status}")
+            if not ok:
+                print(msg)
+
+    print("\n[Summary]")
+    print(f"  Total tasks : {len(tasks)}")
+    print(f"  Failed      : {fail}")
+    print(f"  Output base : {npsim_home / 'simout' / args.out_root}")
+    return 0 if fail == 0 else 2
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

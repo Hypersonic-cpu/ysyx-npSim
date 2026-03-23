@@ -51,11 +51,12 @@ CacheBase::blksize() const {
 
 CacheLine*
 CacheBase::select_victim(Set& set) {
+  size_t set_idx = static_cast<size_t>(&set - &setsArr_.front());
   for (auto& line : set) {
     if (!line.isValid())
       return &line;
   }
-  return repl_policy_->getVictim(set);
+  return repl_policy_->getVictim(set_idx, set);
 }
 
 CacheLine*
@@ -64,12 +65,36 @@ CacheBase::access(addr_t addr) {
   addr_t tag = tagOf(addr);
   size_t si = setIndexOf(addr);
   auto& set = setsArr_.at(si);
+  // RTL dCache (FSM-based) latches victimWay in idle using the previous
+  // request's reqIdx but the CURRENT cache state, because the next request
+  // is only accepted after the previous one fully completes.
+  size_t lag_way = 0;
+  if (victim_way_lag_) {
+    size_t lag_si = lag_set_valid_ ? lag_set_idx_ : si;
+    auto& lag_set = setsArr_.at(lag_si);
+    bool has_invalid = false;
+    for (size_t i = 0; i < lag_set.size(); ++i) {
+      if (!lag_set.at(i).isValid()) {
+        lag_way = i;
+        has_invalid = true;
+        break;
+      }
+    }
+    if (!has_invalid) {
+      auto* victim = repl_policy_->getVictim(lag_si, lag_set);
+      lag_way = static_cast<size_t>(victim - &lag_set.front());
+    }
+  }
 
   // find hit in this set
   for (size_t i = 0; i < set.size(); ++i) {
     auto& l = set.at(i);
     if (l.isValid() && l.getTag() == tag) {
-      repl_policy_->onHit(l);
+      if (victim_way_lag_) {
+        lag_set_idx_ = si;
+        lag_set_valid_ = true;
+      }
+      repl_policy_->onHit(si, i, l);
       ++this->stats.hits;
       if (l.is_prefetched && prefetcher_) {
         l.is_prefetched = false;
@@ -81,8 +106,19 @@ CacheBase::access(addr_t addr) {
 
   // miss: Invoking replacement policy
   ++stats.misses;
-  // FIXME: Replace this LRU
-  auto* victim = select_victim(set);
+  CacheLine* victim = nullptr;
+  if (victim_way_lag_) {
+    auto way = lag_way % assoc_;
+    victim = &set.at(way);
+    lag_set_idx_ = si;
+    lag_set_valid_ = true;
+  } else {
+    victim = select_victim(set);
+    if (victim_way_lag_) {
+      lag_set_idx_ = si;
+      lag_set_valid_ = true;
+    }
+  }
   // Write back by caller. Dirty bit is not cleared so far.
   victim->invalidate();
   return victim;
@@ -93,7 +129,19 @@ CacheBase::handle_fill(CacheLine* blk, addr_t addr,
                        const std::vector<word_t>& ret) {
   blk->activate();
   blk->setTag(tagOf(addr));
-  repl_policy_->onFill(*blk);
+  size_t si = setIndexOf(addr);
+  auto& set = setsArr_.at(si);
+  size_t way = 0;
+  bool found = false;
+  for (size_t i = 0; i < set.size(); ++i) {
+    if (&set.at(i) == blk) {
+      way = i;
+      found = true;
+      break;
+    }
+  }
+  assert(found);
+  repl_policy_->onFill(si, way, *blk);
   DPRINTF(Cache, "ReFill @ addr %08x", blk->getTag());
   blk->setVecData(ret);
 }
@@ -127,6 +175,7 @@ PipeCache::config_json() const {
   j["blkSize"] = blksize();
   j["latency"] = pipe_depth_;
   j["write_back"] = write_back_;
+  j["wb_hit_resp_delay"] = wb_hit_resp_delay_;
 
   json ar;
   size_t line_words = lineBytes_ / sizeof(word_t);
@@ -165,14 +214,32 @@ PipeCache::handle_hit(const PipePtr& bk, bool immediate) {
     is_read ? bk->line->atAligned(offsetOf(bk->addr)) : bk->wrdata;
   blocked_until_ = curr_tick() + 1;
   if (is_read) {
-    // Immediate response: matches RTL iCache where tagHit drives
-    // resp.valid combinationally at C2 (same cycle as tag compare).
-    cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
+    if (write_back_) {
+      if (wb_hit_resp_delay_ == 0) {
+        cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
+      } else {
+        sched_hit_resp_ = {bk->addr, dt, cache_id_, Read};
+        sched_hit_time_ = curr_tick() + wb_hit_resp_delay_;
+      }
+    } else {
+      // Immediate response: matches RTL iCache where tagHit drives
+      // resp.valid combinationally at C2 (same cycle as tag compare).
+      cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
+    }
   } else {
     auto mask = CacheBase::strbExtend(bk->wrstrb);
     dt = (~mask & dt) | (mask & bk->wrdata);
     bk->line->setDirty();
-    cpu_resp_recv_({bk->addr, dt, cache_id_, Write});
+    if (write_back_) {
+      if (wb_hit_resp_delay_ == 0) {
+        cpu_resp_recv_({bk->addr, dt, cache_id_, Write});
+      } else {
+        sched_hit_resp_ = {bk->addr, dt, cache_id_, Write};
+        sched_hit_time_ = curr_tick() + wb_hit_resp_delay_;
+      }
+    } else {
+      cpu_resp_recv_({bk->addr, dt, cache_id_, Write});
+    }
   }
   DPRINTF(Cache, "Cache Resp (%s) @ addr %08x data %08x",
           bk->mop == Read ? "Read " : "Write", bk->addr, dt);
@@ -183,18 +250,21 @@ PipeCache::recv_mem_resp(MemTransPtr trans) {
   auto is_read = trans->mop == Read;
   DPRINTF(Cache, "Recv Mem[%s] Resp : length %lu",
           is_read ? "Read " : "Write", trans->data.size());
-  auto& wait = is_read ? r_waiting_ : w_waiting_;
-  assert(wait);
-  wait = false;
   if (is_read) {
+    assert(r_waiting_);
+    r_waiting_ = false;
     handle_fill(pipe_.back()->line, trans->addr, trans->data);
     // RTL fillFinish = RegNext(...): 1 extra blocking cycle after the
     // last beat before willShift can go high.  Total = +2 from last beat.
     // CWF: respond 1 cycle after critical word arrives (not after last beat).
     blocked_until_ = curr_tick() + (cwf_ ? 1 : 2);
-  } else if (!write_back_) {
-    // Write-through: unblock after SDRAM write completes
-    blocked_until_ = curr_tick() + 2;
+  } else {
+    assert(w_waiting_);
+    w_waiting_ = false;
+    if (!write_back_) {
+      // Write-through: unblock after SDRAM write completes
+      blocked_until_ = curr_tick() + 2;
+    }
   }
   // Write-back eviction response: nothing extra needed
 }
@@ -211,76 +281,56 @@ PipeCache::update_impl() {
   // is_waiting_ is cleared on mem resp
   // Serve target
   if (const auto& bk = pipe_.back()) {
-    bool spec_miss = false;
     if (bk->line == nullptr) {
-      if (bk->speculative && !probe(bk->addr)) {
-        // Speculative (wrong-path): miss without allocation.
-        // Respond immediately; do not fill from memory.
-        // No cache stall — wrong-path misses don't block the pipe.
-        ++stats.spec_accesses;
-        ++stats.spec_misses;
-        cpu_resp_recv_({bk->addr, 0, cache_id_, Read});
-        spec_miss = true;
-      } else if (bk->speculative) {
-        // Speculative hit: track separately, respond immediately
-        ++stats.spec_accesses;
-        cpu_resp_recv_({bk->addr, 0, cache_id_, Read});
-        spec_miss = true; // reuse flag to reset pipe entry
-      } else {
-        save_evict_info(bk->addr);
-        bk->line = access(bk->addr);
-      }
+      save_evict_info(bk->addr);
+      bk->line = access(bk->addr);
     }
-    if (spec_miss) {
-      pipe_.back().reset();
+    assert(!is_replay_ || bk->line->isValid());
+    bool was_miss = is_replay_;
+    is_replay_ = false;
+    if (bk->line->isValid()) {
+      handle_hit(bk, was_miss);
+      if (bk->mop == Read && !r_waiting_) {
+        handle_prefetch(bk->addr, !was_miss);
+      }
+      pipe_.back().reset();  // Clear processed entry
     } else {
-      assert(!is_replay_ || bk->line->isValid());
-      bool was_miss = is_replay_;
-      is_replay_ = false;
-      if (bk->line->isValid()) {
-        handle_hit(bk, was_miss);
-        if (bk->mop == Read && !r_waiting_) {
-          handle_prefetch(bk->addr, !was_miss);
-        }
-        pipe_.back().reset();  // Clear processed entry
-      } else {
-        // Model RTL flowing→memreq state transition: the AXI AR
-        // request fires one cycle after the miss is detected.
-        if (!pending_fill_req_) {
-          pending_fill_req_ = true;
-          blocked_until_ = curr_tick() + 1;
-          return;
-        }
-        // Dirty eviction: write-back before fill (RTL: evict→fill)
-        if (pending_evict_) {
-          if (w_waiting_) {
-            // Previous eviction write still pending, wait
-            blocked_until_ = curr_tick() + 1;
-            return;
-          }
-          mem_side_->recv_req(std::make_unique<MemTrans>(
-            Req, Write, evict_addr_, cache_id_,
-            static_cast<uint16_t>(evict_data_.size()),
-            std::move(evict_data_)));
-          w_waiting_ = true;
-          pending_evict_ = false;
-          // Wait for eviction to complete before fill
-          blocked_until_ = curr_tick() + 1;
-          return;
-        }
-        // Wait for eviction write to complete before sending fill
-        if (w_waiting_) {
-          blocked_until_ = curr_tick() + 1;
-          return;
-        }
-        pending_fill_req_ = false;
-        mem_side_->recv_req(std::make_unique<MemTrans>(
-          Req, Read, bk->addr, cache_id_,
-          static_cast<uint16_t>(lineBytes_ / sizeof(word_t))));
-        r_waiting_ = true;
-        is_replay_ = true;
+      // Model RTL flowing→memreq state transition: the AXI AR
+      // request fires one cycle after the miss is detected.
+      if (!pending_fill_req_) {
+        pending_fill_req_ = true;
+        blocked_until_ = curr_tick() + 1;
         return;
       }
+      // Dirty eviction: write-back before fill (RTL: evict→fill)
+      if (pending_evict_) {
+        if (w_waiting_) {
+          // Previous eviction write still pending, wait
+          blocked_until_ = curr_tick() + 1;
+          return;
+        }
+        mem_side_->recv_req(std::make_unique<MemTrans>(
+          Req, Write, evict_addr_, cache_id_,
+          static_cast<uint16_t>(evict_data_.size()),
+          std::move(evict_data_)));
+        w_waiting_ = true;
+        pending_evict_ = false;
+        // Wait for eviction to complete before fill
+        blocked_until_ = curr_tick() + 1;
+        return;
+      }
+      // Wait for eviction write to complete before sending fill
+      if (w_waiting_) {
+        blocked_until_ = curr_tick() + 1;
+        return;
+      }
+      pending_fill_req_ = false;
+      mem_side_->recv_req(std::make_unique<MemTrans>(
+        Req, Read, bk->addr, cache_id_,
+        static_cast<uint16_t>(lineBytes_ / sizeof(word_t))));
+      r_waiting_ = true;
+      is_replay_ = true;
+      return;
     }
   }
   // Flush cache, next cycle available
@@ -308,20 +358,11 @@ PipeCache::update_impl() {
   // (willShift block) + T+2 (access+pending) + T+3 (AR) = 1 extra.
   if (pipe_.back() && pipe_.back()->line == nullptr
       && !probe(pipe_.back()->addr)) {
-    if (pipe_.back()->speculative) {
-      // Speculative miss: respond immediately, don't allocate
-      // No cache stall — wrong-path misses don't block the pipe.
-      ++stats.spec_accesses;
-      ++stats.spec_misses;
-      cpu_resp_recv_({pipe_.back()->addr, 0, cache_id_, Read});
-      pipe_.back().reset();
-    } else {
-      save_evict_info(pipe_.back()->addr);
-      pipe_.back()->line = access(pipe_.back()->addr);
-      pending_fill_req_ = true;
-      blocked_until_ = curr_tick() + 1;
-      return;
-    }
+    save_evict_info(pipe_.back()->addr);
+    pipe_.back()->line = access(pipe_.back()->addr);
+    pending_fill_req_ = true;
+    blocked_until_ = curr_tick() + 1;
+    return;
   }
 
   is_shifted_ = true;
@@ -353,9 +394,10 @@ PipeCache::handle_prefetch(addr_t addr, bool is_hit) {
   // Fill the line immediately (simplified: no memory latency for prefetch)
   prefetcher_->prefetch_issued++;
   auto* victim = select_victim(set);
+  size_t way = static_cast<size_t>(victim - &set.front());
   victim->setTag(tag);
   victim->activate();
-  repl_policy_->onFill(*victim);
+  repl_policy_->onFill(si, way, *victim);
   victim->is_prefetched = true;
   DPRINTF(Cache, "Prefetch Fill @ %08x (set %zu)", paddr, si);
   return true;
@@ -373,18 +415,6 @@ PipeCache::read_req(addr_t addr) {
 }
 
 void
-PipeCache::read_req_speculative(addr_t addr) {
-  DPRINTF(Cache, "Recv READ Req (spec) @ %u", addr);
-  assert(is_shifted_);
-  assert(pipe_.front() == nullptr);
-  auto req = std::make_unique<CachePipeEntry>(addr, nullptr, Read);
-  req->speculative = true;
-  pipe_.front() = std::move(req);
-  blocked_until_ = curr_tick() + 1;
-  is_shifted_ = false;
-}
-
-void
 PipeCache::pollute(addr_t addr) {
   // Direct pollution: if addr misses, evict victim and install a
   // valid line.  Models wrong-path iCache fills that could not be
@@ -392,7 +422,7 @@ PipeCache::pollute(addr_t addr) {
   // iCache is read-only (write-through, no dirty eviction concern).
   if (probe(addr))
     return;  // already cached, no pollution
-  auto* line = access(addr);  // evict LRU, set tag, increment misses
+  auto* line = access(addr); // evict victim, set tag, increment misses
   line->activate();            // mark valid (simulates SDRAM fill)
 }
 
@@ -428,18 +458,6 @@ PipeCache::write_req(addr_t addr, word_t data, uint8_t mask) {
 void
 PipeCache::flush_all() {
   pending_flush_ = true;
-}
-
-size_t
-PipeCache::flush_speculative() {
-  size_t count = 0;
-  for (auto& entry : pipe_) {
-    if (entry && entry->speculative) {
-      entry.reset();
-      ++count;
-    }
-  }
-  return count;
 }
 
 void

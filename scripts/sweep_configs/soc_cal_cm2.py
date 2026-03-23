@@ -93,13 +93,10 @@ dcache_axis = {
 # Shared defaults: SoC mode, no store buffer, no prefetcher
 default_conf = {
     "stbuf-entries":    "0",
-    "br-pen":           "1",
     "sdram-lat-us":     "0.051",
     "sdram-burst-us":   "0.024",
     "sram-lat":         "1",
-    "ifq-size":         "8",
     "freq-mhz":         "1000",
     "l1i-pref":         "none",
     "l1d-pref":         "none",
-    "bpu-no-predecode": None,
 }

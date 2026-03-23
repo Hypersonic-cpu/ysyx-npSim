@@ -11,7 +11,12 @@ namespace trace {
 
 /** NEMU visible */
 enum MemOp { MemNone = 0, MemLoad = 1, MemStore = 2 };
-enum SysOp { SysNone = 0, SysResetStats = 1, SysDumpStats = 2 };
+enum SysOp {
+  SysNone = 0,
+  SysResetStats = 1,
+  SysDumpStats = 2,
+  SysFenceI = 3
+};
 enum ExtOp {
   ExtNone = 0,
   IntMulL = 1,

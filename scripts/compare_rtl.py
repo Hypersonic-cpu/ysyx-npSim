@@ -1,181 +1,255 @@
 #!/usr/bin/env python3
-"""Compare npsim vs RTL stats for SoC calibration.
+"""Compare npSim vs RTL stats for 23-Mar-2026 SoC calibration sweep.
 
-Reads RTL stats from $NPC_HOME/ccout/<rtl-prefix>/*/stats.json
-and npsim stats from simout/<sim-prefix>/*/stats.json.
-Matches configs by canonical suffix (l1i-*_l1d-*[_bpu-*]).
-
-Usage:
-  python3 scripts/compare_rtl.py \
-      --rtl-dir $NPC_HOME/ccout/rv32im_soc_cal_1000MHz \
-      --sim-dir simout/soc-cal-cm2
+Directory layout expected:
+  RTL : npc/ccout/23-Mar-2026-Cal/<bench-mhz>/<suffix>/stats.json
+  npSim: npsim/simout/23-Mar-2026-Cal/<bench-mhz>/<suffix>/stats.json
 """
+
+from __future__ import annotations
 
 import argparse
 import json
-import re
-import sys
+import math
 from pathlib import Path
+from typing import Dict, Tuple
 
 
-def extract_suffix(tag):
-    """Extract canonical suffix starting from l1i-."""
-    m = re.search(r'(l1i-.*)', tag)
-    return m.group(1) if m else tag
+def pct_err(sim: float, rtl: float) -> float:
+    if rtl == 0:
+        return 0.0 if sim == 0 else float("inf")
+    return abs(sim - rtl) / abs(rtl) * 100.0
 
 
-def load_rtl_stats(stats_file):
-    """Load stats from RTL JSON (pmu format)."""
-    with open(stats_file) as f:
-        d = json.load(f)
+def safe_div(a: float, b: float) -> float:
+    return a / b if b else 0.0
+
+
+def load_rtl_stats(path: Path) -> Dict[str, float]:
+    d = json.loads(path.read_text())
     pmu = d["pmu"]
     bc = pmu["BlockedCause"]
-    total = bc["samples"]
+    ic = pmu.get("L1ICache", {})
+    dc = pmu.get("L1DCache", {})
+    bp = pmu.get("BranchPred", {})
+    ib = pmu.get("InstBreakdown", {})
+
+    insts = float(ib.get("Commit", bc.get("NoStall", 0)))
+
+    i_acc = float(ic.get("samples", ic.get("Hit", 0) + ic.get("Miss", 0)))
+    i_hit = float(ic.get("Hit", 0))
+    i_miss = float(ic.get("Miss", 0))
+    d_acc = float(dc.get("samples", dc.get("Hit", 0) + dc.get("Miss", 0)))
+    d_hit = float(dc.get("Hit", 0))
+    d_miss = float(dc.get("Miss", 0))
+
+    bp_correct = float(bp.get("Correct", 0))
+    bp_btbmiss = float(bp.get("BtbMiss", 0))
+    bp_wrongdir = float(bp.get("WrongDir", 0))
+    bp_wrongtgt = float(bp.get("WrongTgt", 0))
+    bp_total = max(1.0, bp_correct + bp_btbmiss + bp_wrongdir + bp_wrongtgt)
+
+    cyc_total = max(1.0, float(bc.get("samples", 0)))
+
     return {
-        "ipc": pmu["ipc"],
-        "cycles": total,
-        "NoStall": bc["NoStall"],
-        "NoInst": bc["NoInst"],
-        "LsuStall": bc["LsuStall"],
-        "BrMispred": bc["BranchMispred"],
-        "RAW": bc["RAW"],
-        "iCache_miss": pmu.get("L1ICache", {}).get("Miss", 0),
-        "iCache_hit": pmu.get("L1ICache", {}).get("Hit", 0),
-        "dCache_miss": pmu.get("L1DCache", {}).get("Miss", 0),
-        "dCache_hit": pmu.get("L1DCache", {}).get("Hit", 0),
-        "bp_correct": pmu.get("BranchPred", {}).get("Correct", 0),
-        "bp_btbmiss": pmu.get("BranchPred", {}).get("BtbMiss", 0),
-        "bp_wrongdir": pmu.get("BranchPred", {}).get("WrongDir", 0),
-        "bp_wrongtgt": pmu.get("BranchPred", {}).get("WrongTgt", 0),
+        "ipc": float(pmu.get("ipc", 0.0)),
+        "insts": insts,
+        "cycles": float(bc.get("samples", 0.0)),
+        "cyc_NoStall": safe_div(float(bc.get("NoStall", 0)), cyc_total),
+        "cyc_NoInst": safe_div(float(bc.get("NoInst", 0)), cyc_total),
+        "cyc_LsuStall": safe_div(float(bc.get("LsuStall", 0)), cyc_total),
+        "cyc_BranchMispred": safe_div(float(bc.get("BranchMispred", 0)), cyc_total),
+        "cyc_RAW": safe_div(float(bc.get("RAW", 0)), cyc_total),
+        "i_hit_rate": safe_div(i_hit, max(1.0, i_acc)),
+        "i_miss_rate": safe_div(i_miss, max(1.0, i_acc)),
+        "d_hit_rate": safe_div(d_hit, max(1.0, d_acc)),
+        "d_miss_rate": safe_div(d_miss, max(1.0, d_acc)),
+        "bp_frac_correct": safe_div(bp_correct, bp_total),
+        "bp_frac_btbmiss": safe_div(bp_btbmiss, bp_total),
+        "bp_frac_wrongdir": safe_div(bp_wrongdir, bp_total),
+        "bp_frac_wrongtgt": safe_div(bp_wrongtgt, bp_total),
     }
 
 
-def load_sim_stats(stats_file):
-    """Load stats from npsim JSON."""
-    with open(stats_file) as f:
-        d = json.load(f)
-    # Find the stats section (stats0, stats1, ...)
-    for key in sorted(d.keys()):
-        if key.startswith("stats") and "Core" in d[key]:
-            core = d[key]["Core"]
-            bd = core["CycBreakdown"]
-            ic = d[key].get("iCache", {})
-            dc = d[key].get("dCache", d[key].get("dNoCache", {}))
-            bp = d[key].get("BranchUnit", {})
-            return {
-                "ipc": core["ipc"],
-                "cycles": core["cycles"],
-                "NoStall": bd["NoStall"],
-                "NoInst": bd["NoInst"],
-                "LsuStall": bd["LsuStall"],
-                "BrMispred": bd["BranchMispred"],
-                "RAW": bd["RAW"],
-                "iCache_miss": ic.get("misses", 0),
-                "iCache_hit": ic.get("hits", 0),
-                "dCache_miss": dc.get("misses", 0),
-                "dCache_hit": dc.get("hits", 0),
-                "bp_correct": bp.get("accesses", 0)
-                              - bp.get("misses", 0),
-                "bp_btbmiss": bp.get("miss_no_target", 0),
-                "bp_wrongdir": bp.get("miss_bad_pred", 0),
-                "bp_wrongtgt": bp.get("miss_bad_target", 0),
-            }
-    raise ValueError(f"Cannot parse npsim stats: {stats_file}")
+def load_sim_stats(path: Path) -> Dict[str, float]:
+    d = json.loads(path.read_text())
+    keys = sorted(k for k in d.keys() if k.startswith("stats"))
+    if not keys:
+        raise ValueError(f"No stats* key in {path}")
+    s = d[keys[-1]]
+
+    core = s.get("Core", {})
+    bd = core.get("CycBreakdown", {})
+    ic = s.get("iCache", {})
+    dc = s.get("dCache", s.get("dNoCache", {}))
+    bp = s.get("BranchUnit", {})
+    bpu_name = str(d.get("config", {}).get("BranchUnit", {}).get("bpu", ""))
+    no_bpu = bpu_name.lower() == "nobpu"
+
+    cycles = float(core.get("cycles", 0))
+    cyc_total = max(1.0, cycles)
+
+    i_acc = float(ic.get("accesses", 0))
+    i_hit = float(ic.get("hits", 0))
+    i_miss = float(ic.get("misses", 0))
+    d_acc = float(dc.get("accesses", 0))
+    d_hit = float(dc.get("hits", 0))
+    d_miss = float(dc.get("misses", 0))
+
+    bp_acc = float(bp.get("br_accesses", bp.get("accesses", 0)))
+    if no_bpu:
+        # NoBPU mode in RTL attributes taken-branch misses under BTB miss.
+        bp_btbmiss = float(bp.get("miss_no_target", 0)) + float(
+            bp.get("miss_bad_pred", 0)
+        )
+        bp_wrongdir = 0.0
+    else:
+        bp_btbmiss = float(bp.get("miss_no_target", 0))
+        bp_wrongdir = float(bp.get("miss_bad_pred", 0))
+    bp_wrongtgt = float(bp.get("miss_bad_target", 0))
+    bp_correct = max(0.0, bp_acc - bp_btbmiss - bp_wrongdir - bp_wrongtgt)
+    bp_total = max(1.0, bp_correct + bp_btbmiss + bp_wrongdir + bp_wrongtgt)
+
+    return {
+        "ipc": float(core.get("ipc", 0.0)),
+        "insts": float(core.get("insts", 0.0)),
+        "cycles": cycles,
+        "cyc_NoStall": safe_div(float(bd.get("NoStall", 0)), cyc_total),
+        "cyc_NoInst": safe_div(float(bd.get("NoInst", 0)), cyc_total),
+        "cyc_LsuStall": safe_div(float(bd.get("LsuStall", 0)), cyc_total),
+        "cyc_BranchMispred": safe_div(float(bd.get("BranchMispred", 0)), cyc_total),
+        "cyc_RAW": safe_div(float(bd.get("RAW", 0)), cyc_total),
+        "i_hit_rate": safe_div(i_hit, max(1.0, i_acc)),
+        "i_miss_rate": safe_div(i_miss, max(1.0, i_acc)),
+        "d_hit_rate": safe_div(d_hit, max(1.0, d_acc)),
+        "d_miss_rate": safe_div(d_miss, max(1.0, d_acc)),
+        "bp_frac_correct": safe_div(bp_correct, bp_total),
+        "bp_frac_btbmiss": safe_div(bp_btbmiss, bp_total),
+        "bp_frac_wrongdir": safe_div(bp_wrongdir, bp_total),
+        "bp_frac_wrongtgt": safe_div(bp_wrongtgt, bp_total),
+    }
 
 
-def pct_error(sim, rtl):
-    if rtl == 0:
-        return 0.0 if sim == 0 else float('inf')
-    return (sim - rtl) / rtl * 100.0
+def collect_stats(root: Path) -> Dict[str, Path]:
+    out: Dict[str, Path] = {}
+    for sf in root.rglob("stats.json"):
+        rel = sf.parent.relative_to(root).as_posix()
+        out[rel] = sf
+    return out
 
 
-def main():
-    ap = argparse.ArgumentParser(
-        description="Compare npsim vs RTL stats")
-    ap.add_argument("--rtl-dir", required=True,
-                    help="RTL stats directory")
-    ap.add_argument("--sim-dir", required=True,
-                    help="npsim stats directory")
-    ap.add_argument("--tolerance", type=float, default=5.0,
-                    help="IPC error tolerance (%%)")
-    ap.add_argument("--verbose", "-v", action="store_true",
-                    help="Show detailed stall breakdown")
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--rtl-root", required=True)
+    ap.add_argument("--sim-root", required=True)
+    ap.add_argument("--ipc-threshold", type=float, default=5.0)
+    ap.add_argument("--other-threshold", type=float, default=10.0)
+    ap.add_argument("--report-json", default="")
     args = ap.parse_args()
 
-    rtl_dir = Path(args.rtl_dir)
-    sim_dir = Path(args.sim_dir)
-
-    # Build suffix->path maps
-    rtl_map = {}
-    for sf in rtl_dir.rglob("stats.json"):
-        tag = sf.parent.name
-        suffix = extract_suffix(tag)
-        rtl_map[suffix] = sf
-
-    sim_map = {}
-    for sf in sim_dir.rglob("stats.json"):
-        tag = sf.parent.name
-        suffix = extract_suffix(tag)
-        sim_map[suffix] = sf
-
+    rtl_root = Path(args.rtl_root)
+    sim_root = Path(args.sim_root)
+    rtl_map = collect_stats(rtl_root)
+    sim_map = collect_stats(sim_root)
     common = sorted(set(rtl_map) & set(sim_map))
+
     if not common:
-        print("No matching configs found.")
-        print(f"RTL suffixes ({len(rtl_map)}):")
-        for s in sorted(rtl_map):
-            print(f"  {s}")
-        print(f"Sim suffixes ({len(sim_map)}):")
-        for s in sorted(sim_map):
-            print(f"  {s}")
-        sys.exit(1)
+        print("No matching stats found between RTL and npSim roots")
+        return 1
 
-    # Header
-    cols = ["IPC_err", "Cycles_err"]
-    if args.verbose:
-        cols += ["NoInst%", "LsuStl%", "BrMis%", "RAW%",
-                 "iC_miss", "dC_miss"]
-    hdr = f"{'Config':55s}"
-    for c in cols:
-        hdr += f" {c:>10s}"
-    hdr += "  Status"
-    print(hdr)
-    print("-" * len(hdr))
+    rows = []
+    for rel in common:
+        rtl = load_rtl_stats(rtl_map[rel])
+        sim = load_sim_stats(sim_map[rel])
 
-    pass_count = 0
-    fail_count = 0
+        cyc_keys = [
+            "cyc_NoStall",
+            "cyc_NoInst",
+            "cyc_LsuStall",
+            "cyc_BranchMispred",
+            "cyc_RAW",
+        ]
+        cache_keys = ["i_hit_rate", "i_miss_rate", "d_hit_rate", "d_miss_rate"]
+        bp_keys = [
+            "bp_frac_correct",
+            "bp_frac_btbmiss",
+            "bp_frac_wrongdir",
+            "bp_frac_wrongtgt",
+        ]
 
-    for suffix in common:
-        rtl = load_rtl_stats(rtl_map[suffix])
-        sim = load_sim_stats(sim_map[suffix])
+        cyc_err = {k: abs(sim[k] - rtl[k]) * 100.0 for k in cyc_keys}
+        cache_err = {k: abs(sim[k] - rtl[k]) * 100.0 for k in cache_keys}
+        bp_err = {k: abs(sim[k] - rtl[k]) * 100.0 for k in bp_keys}
 
-        ipc_err = pct_error(sim["ipc"], rtl["ipc"])
-        cyc_err = pct_error(sim["cycles"], rtl["cycles"])
-        ok = abs(ipc_err) <= args.tolerance
+        err = {
+            "ipc_err_pct": pct_err(sim["ipc"], rtl["ipc"]),
+            "inst_err_pct": pct_err(sim["insts"], rtl["insts"]),
+            "cycles_err_pct": pct_err(sim["cycles"], rtl["cycles"]),
+            "cycle_breakdown_max_err_pct": max(cyc_err.values()),
+            "cache_max_err_pct": max(cache_err.values()),
+            "bp_breakdown_max_err_pct": max(bp_err.values()),
+        }
+        err.update({f"{k}_err_pct": v for k, v in cyc_err.items()})
+        err.update({f"{k}_err_pct": v for k, v in cache_err.items()})
+        err.update({f"{k}_err_pct": v for k, v in bp_err.items()})
 
-        line = f"{suffix:55s}"
-        line += f" {ipc_err:+9.2f}%"
-        line += f" {cyc_err:+9.2f}%"
+        pass_ipc = err["ipc_err_pct"] <= args.ipc_threshold
+        pass_other = (
+            err["inst_err_pct"] <= args.other_threshold
+            and err["cycle_breakdown_max_err_pct"] <= args.other_threshold
+            and err["cache_max_err_pct"] <= args.other_threshold
+            and err["bp_breakdown_max_err_pct"] <= args.other_threshold
+        )
 
-        if args.verbose:
-            for m in ["NoInst", "LsuStall", "BrMispred", "RAW"]:
-                e = pct_error(sim[m], rtl[m])
-                line += f" {e:+9.1f}%"
-            ic_e = pct_error(sim["iCache_miss"], rtl["iCache_miss"])
-            dc_e = pct_error(sim["dCache_miss"], rtl["dCache_miss"])
-            line += f" {ic_e:+9.1f}%"
-            line += f" {dc_e:+9.1f}%"
+        rows.append(
+            {
+                "tag": rel,
+                "rtl": rtl,
+                "sim": sim,
+                "err": err,
+                "pass_ipc": pass_ipc,
+                "pass_other": pass_other,
+                "pass_all": pass_ipc and pass_other,
+            }
+        )
 
-        line += f"  {'PASS' if ok else 'FAIL'}"
-        print(line)
-        if ok:
-            pass_count += 1
-        else:
-            fail_count += 1
+    def worst(k: str) -> float:
+        return max(r["err"][k] for r in rows)
 
-    print(f"\n{pass_count} PASS, {fail_count} FAIL "
-          f"(IPC tolerance: {args.tolerance}%)")
-    print(f"Matched {len(common)}/{len(rtl_map)} RTL configs")
+    summary = {
+        "rows": len(rows),
+        "pass_all": sum(1 for r in rows if r["pass_all"]),
+        "fail_all": sum(1 for r in rows if not r["pass_all"]),
+        "worst_ipc_err_pct": worst("ipc_err_pct"),
+        "worst_inst_err_pct": worst("inst_err_pct"),
+        "worst_cycle_breakdown_err_pct": worst("cycle_breakdown_max_err_pct"),
+        "worst_cache_err_pct": worst("cache_max_err_pct"),
+        "worst_bp_breakdown_err_pct": worst("bp_breakdown_max_err_pct"),
+        "ipc_threshold_pct": args.ipc_threshold,
+        "other_threshold_pct": args.other_threshold,
+    }
+
+    print("Summary")
+    print(f"  matched rows               : {summary['rows']}")
+    print(f"  pass all                   : {summary['pass_all']}")
+    print(f"  fail all                   : {summary['fail_all']}")
+    print(f"  worst IPC err (%)          : {summary['worst_ipc_err_pct']:.3f}")
+    print(f"  worst Inst err (%)         : {summary['worst_inst_err_pct']:.3f}")
+    print(
+        f"  worst cycle breakdown err (%): "
+        f"{summary['worst_cycle_breakdown_err_pct']:.3f}"
+    )
+    print(f"  worst cache err (%)        : {summary['worst_cache_err_pct']:.3f}")
+    print(f"  worst BP breakdown err (%) : {summary['worst_bp_breakdown_err_pct']:.3f}")
+
+    if args.report_json:
+        rp = Path(args.report_json)
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        rp.write_text(json.dumps({"summary": summary, "rows": rows}, indent=2))
+        print(f"Report: {rp}")
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

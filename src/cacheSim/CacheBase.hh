@@ -65,8 +65,6 @@ public:
       j["hits"] = hits;
       j["misses"] = misses;
       j["miss_rate"] = miss_rate();
-      j["spec_accesses"] = spec_accesses;
-      j["spec_misses"] = spec_misses;
       return j;
     }
 
@@ -84,12 +82,7 @@ public:
       accesses = 0;
       hits = 0;
       misses = 0;
-      spec_accesses = 0;
-      spec_misses = 0;
     }
-    // Speculative (wrong-path) stats — tracked separately
-    size_t spec_accesses = 0;
-    size_t spec_misses = 0;
   } stats;
 
 public:
@@ -102,7 +95,8 @@ public:
             size_t line_bytes, size_t assoc = 1,
             std::shared_ptr<Prefetcher> prefetcher = nullptr,
             uint16_t cache_id = 0,
-            std::unique_ptr<ReplPolicy> repl_policy = nullptr)
+            std::unique_ptr<ReplPolicy> repl_policy = nullptr,
+            bool victim_way_lag = false)
       : ClockedObject(name, &this->stats)
       , stats(name)
       , lineBytes_(line_bytes)
@@ -110,6 +104,9 @@ public:
       , sets_(size_bytes / (line_bytes * assoc))
       , assoc_(assoc)
       , cache_id_(cache_id)
+      , victim_way_lag_{victim_way_lag}
+      , lag_set_idx_{0}
+      , lag_set_valid_{false}
       , setsArr_(sets_, std::vector<CacheLine>(assoc_, {line_bytes}))
       , prefetcher_(prefetcher)
       , repl_policy_(std::move(repl_policy))
@@ -123,7 +120,7 @@ public:
       prefetcher_->setBlockSize(lineBytes_);
     }
     if (!repl_policy_)
-      repl_policy_ = make_repl_policy("lru", assoc_);
+      repl_policy_ = make_repl_policy("plru", assoc_, sets_);
   }
 
   virtual ~CacheBase() = default;
@@ -136,9 +133,7 @@ public:
   // Read / write channel ready
   virtual auto is_ready() const -> std::pair<bool, bool> = 0;
   virtual void flush_all() = 0;
-  virtual size_t flush_speculative() { return 0; }
   virtual void read_req(addr_t addr) = 0;
-  virtual void read_req_speculative(addr_t addr) { read_req(addr); }
   virtual void write_req(addr_t addr, word_t data, uint8_t mask) = 0;
   virtual void recv_mem_resp(MemTransPtr trans) = 0;
 
@@ -205,6 +200,9 @@ protected:
   size_t const sets_;
   size_t const assoc_;
   uint16_t const cache_id_; // 0=ICache, 1=DCache
+  bool const victim_way_lag_;
+  size_t lag_set_idx_;
+  bool lag_set_valid_;
 
   std::vector<std::vector<CacheLine>> setsArr_;
   std::shared_ptr<Prefetcher> prefetcher_;
@@ -223,14 +221,17 @@ public:
                      std::shared_ptr<Prefetcher> prefetcher = nullptr,
                      uint16_t cache_id = 0, bool sram_dff = true,
                      bool write_back = false, bool cwf = false,
+                     tick_t wb_hit_resp_delay = 1,
                      std::unique_ptr<ReplPolicy> repl_policy = nullptr)
       : CacheBase(name, host, size_bytes, line_bytes, assoc, prefetcher,
-                  cache_id, std::move(repl_policy))
+                  cache_id, std::move(repl_policy),
+                  /* victim_way_lag */ write_back && assoc > 1)
       , pipe_(pipe_depth)
       , pipe_depth_{pipe_depth}
       , sram_dff_{sram_dff}
       , write_back_{write_back}
       , cwf_{cwf}
+      , wb_hit_resp_delay_{wb_hit_resp_delay}
       , r_waiting_{false}
       , w_waiting_{false}
       , is_shifted_{true}
@@ -241,6 +242,10 @@ public:
   auto
   is_ready() const -> std::pair<bool, bool> override {
     auto r = is_shifted_ && !pending_flush_;
+    if (write_back_) {
+      r = r && !r_waiting_ && !w_waiting_ && !pending_fill_req_
+        && !is_replay_ && sched_hit_time_ == InfTime;
+    }
     // Write-back: writes go through pipe (same readiness as reads)
     // Write-through: writes block when SDRAM write channel busy
     auto w = write_back_ ? r : (!pending_flush_ && !w_waiting_);
@@ -249,13 +254,11 @@ public:
 
   bool handle_prefetch(addr_t addr, bool is_hit) override;
   void read_req(addr_t addr) override;
-  void read_req_speculative(addr_t addr) override;
   void write_req(addr_t addr, word_t data, uint8_t mask) override;
   void recv_mem_resp(MemTransPtr trans) override;
   void pollute(addr_t addr) override;
 
   void flush_all() override;
-  size_t flush_speculative() override;
 
   // SimObject interface
   json config_json() const override;
@@ -276,7 +279,6 @@ protected:
     MemRWOpt mop;
     uint8_t wrstrb;
     word_t wrdata;
-    bool speculative{false};
   };
   using PipePtr = std::unique_ptr<CachePipeEntry>;
 
@@ -290,6 +292,7 @@ protected:
   bool sram_dff_;
   bool write_back_;
   bool cwf_;
+  tick_t wb_hit_resp_delay_;
   bool r_waiting_;
   bool w_waiting_;
   bool is_shifted_;
@@ -315,7 +318,7 @@ class NoCache : public CacheBase {
 public:
   explicit NoCache(const std::string& name, uint16_t cache_id = 1)
       : CacheBase(name, 0, 8, 4, 1, nullptr,
-                  cache_id, make_repl_policy("lru", 1))
+                  cache_id, make_repl_policy("plru", 1, 2))
       , r_busy_{false}
       , w_busy_{false} {} // Dummy values for base
 

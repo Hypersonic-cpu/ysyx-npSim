@@ -1,3 +1,4 @@
+#include <bit>
 #include <cassert>
 #include <chrono>
 #include <cmath>
@@ -11,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <print>
+#include <stdexcept>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -66,7 +68,8 @@ static tint_t sram_lat = 1;                  // SoC: on-chip SRAM latency (cycle
 static tint_t sdram_lat_cyc = 0;
 static tint_t sdram_burst_cyc = 0;
 static std::string trace_file;
-static size_t l1i_pipe_depth = 1; // iCache pipeline depth (RTL: 2-cycle hit pipeline)
+static constexpr size_t l1i_pipe_depth = 2; // RTL iCache hit pipeline
+static constexpr size_t l1d_pipe_depth = 1;
 static size_t l1i_size = 1024;
 static size_t l1i_blksize = 16;
 static size_t l1i_assoc = 1;
@@ -89,19 +92,18 @@ static std::string tage_hists = "2,4,8,16,32,64"; // TAGE: comma-separated histo
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
-static size_t ifq_size = 3; // RTL FetchStage PipeDepth=3
+// Match RTL rvCore IFU fetch queue size.
+static constexpr size_t ifq_size = 8;
 // FIXME: Remove this. NoCache means no buffer
 static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 0;
-static tick_t br_mis_pen = 2; // Branch misprediction penalty (cycles)
 static tick_t mmio_lat = 3;  // MMIO access latency (cycles, SoC only)
 static int freq_mhz = 1000;  // CPU frequency in MHz (default 1 GHz)
 static std::string l1i_pref_type = "none"; // iCache prefetcher type
 static std::string l1d_pref_type = "none"; // dCache prefetcher type
-static std::string l1i_repl = "lru";       // iCache replacement policy
-static std::string l1d_repl = "lru";       // dCache replacement policy
+static std::string l1i_repl = "plru";      // iCache replacement policy
+static std::string l1d_repl = "plru";      // dCache replacement policy
 static bool sram_dff = true;          // Area model: DFF or SRAM macro
-static bool bpu_no_predecode = true; // predict for all instructions (matches RTL)
 static bool l1i_cwf = false;          // Critical Word First for iCache
 
 // Dummy physical memory stubs (active mode: caches don't read data)
@@ -126,6 +128,18 @@ parse_size(const std::string& s) {
   return std::stoul(num) * mult;
 }
 
+size_t
+parse_entries_pow2(const char* optarg, const char* name) {
+  size_t n = std::stoul(optarg);
+  if (n == 0)
+    return 0;
+  if ((n & (n - 1)) != 0) {
+    throw std::invalid_argument(
+      std::string(name) + " must be a power-of-two or 0");
+  }
+  return static_cast<size_t>(std::countr_zero(n));
+}
+
 inline int
 parse_args(int argc, char* argv[]) {
   static struct option long_options[] = {
@@ -146,9 +160,7 @@ parse_args(int argc, char* argv[]) {
     {"bpu-size", required_argument, 0, 'e'},
     {"btb-size", required_argument, 0, 't'},
     {"ras-size", required_argument, 0, 'R'},
-    {"ifq-size", required_argument, 0, 'q'},
     {"stbuf-entries", required_argument, 0, 'Z'},
-    {"br-pen", required_argument, 0, 'X'},
     {"l1i-pref", required_argument, 0, 'P'},
     {"l1i-repl", required_argument, 0, 215U},
     {"l1d-pref", required_argument, 0, 'p'},
@@ -161,8 +173,6 @@ parse_args(int argc, char* argv[]) {
     {"mmio-lat", required_argument, 0, 206U},
     {"freq-mhz", required_argument, 0, 207U},
     {"axi-ovhd-cyc", required_argument, 0, 208U},
-    {"l1i-lat", required_argument, 0, 209U},
-    {"bpu-no-predecode", no_argument, 0, 210U},
     {"l1i-cwf", no_argument, 0, 211U},
     {"ghr-bits", required_argument, 0, 212U},
     {"tage-hists", required_argument, 0, 213U},
@@ -217,33 +227,36 @@ parse_args(int argc, char* argv[]) {
       bpu_type = optarg;
       break;
     case 'e':
-      bpu_entries_pow2 =
-        std::log2(static_cast<double>(std::stoul(optarg)) + 0.5);
+      try {
+        bpu_entries_pow2 = parse_entries_pow2(optarg, "--bpu-size");
+      } catch (const std::invalid_argument& e) {
+        std::cerr << e.what() << "\n";
+        return 1;
+      }
       break;
     case 't':
-      btb_entries_pow2 =
-        std::log2(static_cast<double>(std::stoul(optarg)) + 0.5);
+      try {
+        btb_entries_pow2 = parse_entries_pow2(optarg, "--btb-size");
+      } catch (const std::invalid_argument& e) {
+        std::cerr << e.what() << "\n";
+        return 1;
+      }
       break;
     case 'R':
       ras_depth = std::stoul(optarg);
       break;
-    case 'q':
-      ifq_size = std::stoul(optarg);
-      break;
     case 'Z':
       stbuf_entries = std::stoul(optarg);
-      break;
-    case 'X':
-      br_mis_pen = std::stoul(optarg);
       break;
     case 'P':
       l1i_pref_type = optarg;
       break;
     case 215U:
       l1i_repl = optarg;
-      if (l1i_repl != "lru" && l1i_repl != "srrip" && l1i_repl != "rr") {
+      if (l1i_repl != "plru" && l1i_repl != "lru" && l1i_repl != "srrip"
+          && l1i_repl != "rr") {
         std::cerr << "Invalid --l1i-repl value: " << l1i_repl
-                  << " (expected lru|srrip|rr)\n";
+                  << " (expected plru|lru|srrip|rr)\n";
         return 1;
       }
       break;
@@ -252,9 +265,10 @@ parse_args(int argc, char* argv[]) {
       break;
     case 216U:
       l1d_repl = optarg;
-      if (l1d_repl != "lru" && l1d_repl != "srrip" && l1d_repl != "rr") {
+      if (l1d_repl != "plru" && l1d_repl != "lru" && l1d_repl != "srrip"
+          && l1d_repl != "rr") {
         std::cerr << "Invalid --l1d-repl value: " << l1d_repl
-                  << " (expected lru|srrip|rr)\n";
+                  << " (expected plru|lru|srrip|rr)\n";
         return 1;
       }
       break;
@@ -281,12 +295,6 @@ parse_args(int argc, char* argv[]) {
       break;
     case 208:
       axi_ovhd_cyc = std::stoul(optarg);
-      break;
-    case 209:
-      l1i_pipe_depth = std::stoul(optarg);
-      break;
-    case 210U:
-      bpu_no_predecode = true;
       break;
     case 211U:
       l1i_cwf = true;
@@ -382,6 +390,11 @@ create_btb() {
 
 std::unique_ptr<BranchUnit>
 create_branch_unit() {
+  if (bpu_type == "none" || bpu_type.empty()) {
+    // NoBP in RTL means no BTB/RAS side-effects.
+    btb_entries_pow2 = 0;
+    ras_depth = 0;
+  }
   auto bpu = create_bpu_core();
   auto btb = create_btb();
   return std::make_unique<BranchUnit>(std::move(bpu), std::move(btb), ras_depth);
@@ -462,15 +475,10 @@ main(int argc, char** argv) {
 
   /** Component Configuration */
   auto branch_unit = create_branch_unit();
-  branch_unit->set_no_predecode(bpu_no_predecode);
 
-  // When dCache exists, no need for store queue (write-through)
-  // Only use store queue when NoCache (need buffering for SDRAM)
-  // FIXME:
   size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
-    "Core", ifq_size, actual_stq_size, branch_unit.get(),
-    br_mis_pen, mmio_lat);
+    "Core", ifq_size, actual_stq_size, branch_unit.get(), mmio_lat);
 
   std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
   if (l1i_pref_type == "nextline") {
@@ -486,7 +494,9 @@ main(int argc, char** argv) {
     /* host */ core.get(),
     /* pipe depth */ l1i_pipe_depth, l1i_size, l1i_blksize, l1i_assoc, ipf,
     /* cache ID */ 0, sram_dff, /* write_back */ false, l1i_cwf,
-    cacheSim::make_repl_policy(l1i_repl, l1i_assoc));
+    /* wb hit resp delay */ 1,
+    cacheSim::make_repl_policy(
+      l1i_repl, l1i_assoc, l1i_size / (l1i_blksize * l1i_assoc)));
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
     std::shared_ptr<cacheSim::Prefetcher> dpf = nullptr;
@@ -500,10 +510,12 @@ main(int argc, char** argv) {
     dcache = std::make_unique<cacheSim::PipeCache>(
       "dCache",
       /* host */ core.get(),
-      /* pipe depth */ 1, l1d_size, l1d_blksize, l1d_assoc, dpf,
+      /* pipe depth */ l1d_pipe_depth, l1d_size, l1d_blksize, l1d_assoc, dpf,
       /* cache ID */ 1, sram_dff,
       /* write_back */ true, /* cwf */ false,
-      cacheSim::make_repl_policy(l1d_repl, l1d_assoc));
+      /* wb hit resp delay */ 0,
+      cacheSim::make_repl_policy(
+        l1d_repl, l1d_assoc, l1d_size / (l1d_blksize * l1d_assoc)));
   } else {
     if (stbuf_entries == 0) {
       dcache = std::make_unique<cacheSim::NoCache>("dNoCache",
@@ -514,25 +526,53 @@ main(int argc, char** argv) {
         "stBuf", stbuf_entries, static_cast<uint16_t>(1));
     }
   }
-  core->set_cache_ports(icache.get(), dcache.get());
+  auto dmem_bypass = std::make_unique<cacheSim::NoCache>(
+    "dBypass", static_cast<uint16_t>(2));
+  core->set_cache_ports(icache.get(), dcache.get(), dmem_bypass.get());
   pipeSim::Processor* proc = &(*core);
 
   // SoC mode: bank-aware SDRAM timing model.
   auto sdram_model =
       std::make_unique<memSim::SdramModel>(freq_mhz);
 
-  auto sdram = std::make_unique<memSim::RAMArbiter>(
-    "SDRAM", sdram_lat_cyc, sdram_burst_cyc,
-    std::vector<CacheBase*>({icache.get(), dcache.get()}), sram_lat,
-    axi_ovhd_cyc, sdram_model.get());
-  icache->set_mem_port(sdram.get());
-  dcache->set_mem_port(sdram.get());
+  auto dev_sdram = std::make_unique<memSim::SdramRamDevice>(
+    "SDRAM", sdram_lat_cyc, sdram_burst_cyc, axi_ovhd_cyc,
+    sdram_model.get());
+  auto dev_sram = std::make_unique<memSim::ConstLatencyRamDevice>(
+    "SRAM", sram_lat);
+  auto dev_clint = std::make_unique<memSim::ConstLatencyRamDevice>(
+    "CLINT", sram_lat);
+  auto dev_other = std::make_unique<memSim::ConstLatencyRamDevice>(
+    "OTHER", mmio_lat);
+
+  std::vector<memSim::RamDevice*> mem_devices{
+    dev_sdram.get(), dev_sram.get(), dev_clint.get(), dev_other.get()};
+  std::vector<memSim::AddrMapEntry> mem_map{
+    // CLINT
+    {0x0200'0000u, 0x0200'ffffu, 2, "clint"},
+    // On-chip SRAM
+    {0x0f00'0000u, 0x0fff'ffffu, 1, "sram"},
+    // Flash / PSRAM / SDRAM (cacheable in SoC mode)
+    {0x3000'0000u, 0x3fff'ffffu, 0, "flash"},
+    {0x8000'0000u, 0x9fff'ffffu, 0, "psram"},
+    {0xa000'0000u, 0xbfff'ffffu, 0, "sdram"},
+  };
+
+  auto memory = std::make_unique<memSim::RAMArbiter>(
+    "memory", std::vector<CacheBase*>(
+                {icache.get(), dcache.get(), dmem_bypass.get()}),
+    mem_devices, mem_map, /* default_device */ 3);
+  icache->set_mem_port(memory.get());
+  dcache->set_mem_port(memory.get());
+  dmem_bypass->set_mem_port(memory.get());
   CpuSideAckReceiver cpu_ack = [proc](auto t) { proc->ack_mem_avail(t); };
   CpuSideMRespReceiver cpu_rsp = [proc](auto p) { proc->recv_mem_resp(p); };
   icache->set_cpu_side_handlers(cpu_rsp, cpu_ack);
   dcache->set_cpu_side_handlers(cpu_rsp, cpu_ack);
+  dmem_bypass->set_cpu_side_handlers(cpu_rsp, cpu_ack);
 
-  std::vector<SimObject*> simlist{sdram.get(), dcache.get(), icache.get(),
+  std::vector<SimObject*> simlist{memory.get(), dmem_bypass.get(),
+                                  dcache.get(), icache.get(),
                                   branch_unit.get(), core.get()};
   if (ipf)
     simlist.push_back(ipf.get());
@@ -558,8 +598,9 @@ main(int argc, char** argv) {
   TraceSanitizer sanitizer_all; // cumulative (never resets)
 
   // NOTE: Bottom-up order. Mem -> Cache -> CPU
-  const std::vector<ClockedObject*> devlist{sdram.get(), dcache.get(),
-                                            icache.get(), core.get()};
+  const std::vector<ClockedObject*> devlist{memory.get(), dmem_bypass.get(),
+                                            dcache.get(), icache.get(),
+                                            core.get()};
 
   TraceInst inst;
   bool has_next = true;
@@ -607,6 +648,14 @@ main(int argc, char** argv) {
         obj->reset_stats();
       }
       sanitizer.reset();
+    } else if (inst.sys_op == SysOp::SysFenceI) [[unlikely]] {
+      inst.sys_op = SysOp::SysNone;
+      icache->flush_all();
+      dcache->flush_all();
+      dmem_bypass->flush_all();
+      icache->do_update();
+      dcache->do_update();
+      dmem_bypass->do_update();
     } else if (inst.sys_op == SysOp::SysDumpStats) [[unlikely]] {
       inst.sys_op = SysOp::SysNone;
       std::println(ANSI_FG_YELLOW

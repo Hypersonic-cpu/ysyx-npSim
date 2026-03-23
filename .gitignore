@@ -5,6 +5,7 @@
 *.nptr
 *.xz
 *.zst
+ccout/
 simout/
 areaout/
 .zed/
@@ -22,3 +23,4 @@ CHANGELOG.md
 area/__pycache__/
 scripts/generated_sh/
 **/__pycache__/
+*.bak

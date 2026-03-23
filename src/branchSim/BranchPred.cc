@@ -109,22 +109,19 @@ BranchUnit::BranchUnit(std::unique_ptr<BranchPred> bpu,
 
 BranchResult
 BranchUnit::predict_at_fetch(addr_t pc, bool is_branch) {
-  if (!no_predecode_ && !is_branch)
-    return {false, 0, false, 0, 0};
-  if (is_branch)
-    stats.br_accesses++;
+  if (!is_branch)
+    return {};
+  stats.br_accesses++;
   return predict(pc);
 }
 
 BranchResult
 BranchUnit::predict(addr_t pc) {
   stats.accesses++;
-  // Model 1RW SRAM port conflict (RTL RegNext bypass).
-  // bypass_valid_ is set from the PREVIOUS tick's write.
-  // Same-index reads use bypass data (correct); different-index reads
-  // are forced to BTB miss.
+  // Model 1RW SRAM port conflict (RTL RegNext bypass) only when BTB
+  // is configured as SRAM macro. DFF BTB has no read/write conflict.
   addr_t btb_target = btb_->lookup(pc);
-  if (bypass_valid_) {
+  if (btb_->has_rw_conflict() && bypass_valid_) {
     size_t read_idx = (pc >> 2) & (btb_->num_entries() - 1);
     if (read_idx != bypass_idx_) {
       // Different index from last write: SRAM output is stale

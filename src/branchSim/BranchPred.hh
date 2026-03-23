@@ -40,6 +40,7 @@ public:
   json config_json() const override; // implemented in .cc
   void reset_stats() override {}
   void dump_stats(std::ostream& = std::cout) const override {}
+  bool has_rw_conflict() const { return !sram_dff_; }
 
   size_t num_entries() const { return table_.size(); }
   uint8_t entry_type(size_t idx) const {
@@ -101,7 +102,7 @@ struct BPStatsBase : public StatsBase {
   size_t no_target = 0;  // taken but BTB miss
   size_t bad_target = 0; // taken but wrong BTB target
   size_t bad_pred = 0;   // wrong direction prediction
-  size_t nonbr_mispred = 0; // BTB aliasing on non-branch insts (--bpu-no-predecode)
+  size_t nonbr_mispred = 0; // BTB aliasing on non-branch instructions
   size_t br_accesses = 0;   // branch instruction accesses
 
   double miss_rate() const {
@@ -275,10 +276,7 @@ public:
   explicit BranchUnit(std::unique_ptr<BranchPred> bpu,
                       std::unique_ptr<BTBBase> btb, size_t ras_depth = 0);
 
-  // Disable predecode filter: predict for all instructions (not just branches)
-  void set_no_predecode(bool v) { no_predecode_ = v; }
-
-  // Called at IF. Skips BPU for non-branch instructions unless no_predecode_.
+  // Called at IF. Only branch instructions query BPU/BTB.
   BranchResult predict_at_fetch(addr_t pc, bool is_branch);
 
   // Unconditional BPU + BTB lookup.
@@ -325,12 +323,12 @@ public:
   void dump_stats(std::ostream& os = std::cout) const override;
 
   std::string bpu_name() const { return bpu_->name(); }
+  bool is_no_bpu() const { return bpu_->name() == "NoBPU"; }
 
 private:
   std::unique_ptr<BranchPred> bpu_;
   std::unique_ptr<BTBBase> btb_;
   std::unique_ptr<ReturnAddrStack> ras_;
-  bool no_predecode_ = false;
   // 1RW SRAM port conflict model matching RTL CacheArray behavior.
   //
   // RTL uses RegNext(btbUpdWen) for bypass: write at cycle T causes

@@ -49,9 +49,8 @@ public:
   static constexpr uint32_t U_RESET_PERIOD = (1u << 18);
   // Snapshot ring buffer size.
   // Must exceed max in-flight predictions including RAW-stalled branches.
-  // SDRAM cache miss stall: 51 + 3*24 = 123 cycles. With no_predecode_=true,
-  // every instruction consumes a snap slot, so a branch stalled at Decode for
-  // 123 cycles sees ~123 new snap allocations before its update() runs.
+  // SDRAM cache miss stall: 51 + 3*24 = 123 cycles. A branch stalled at
+  // Decode can see many younger branch predictions before update() runs.
   // 512 gives safe margin beyond the worst-case SDRAM stall.
   static constexpr size_t SNAP_RING = 512;
 

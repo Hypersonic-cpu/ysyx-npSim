@@ -20,8 +20,16 @@ using trace::MemLoad;
 using trace::MemNone;
 using trace::MemStore;
 
+namespace {
+inline bool
+is_cacheable_addr(addr_t addr) {
+  auto top = static_cast<uint8_t>((addr >> 28) & 0xf);
+  return top == 0x3 || top == 0x8 || top == 0x9 || top == 0xa || top == 0xb;
+}
+} // namespace
+
 Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
-                   BranchUnit* bpu, tick_t br_mis_pen, tick_t mmio_lat)
+                   BranchUnit* bpu, tick_t mmio_lat)
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}
@@ -33,7 +41,6 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
                      &Pipeline::do_writeback}
     , fetch_queue_(ifq_size)
     , ongoing_insts_{0}
-    , BranchMissPenalty{br_mis_pen}
     , mmio_lat_{mmio_lat} {
   assert(bpu && "BranchUnit must not be null");
 }
@@ -83,12 +90,19 @@ Pipeline::update_impl() {
 //  T+2: Branch reaches EX.  do_execute() triggers flush:
 //       - Flush all IFQ entries
 //       - Clear wrong-path state
-//       - Set fetch_.resume_tick = T+2 + BranchMissPenalty
+      //       - Set fetch_.resume_tick = T+2 + kBranchMissPenalty
 //
 //  T+2+penalty: First correct-path fetch issues to iCache.
 //
 void
 Pipeline::do_fetch_0() {
+  if (curr_tick() < fetch_.resume_tick) {
+    // During explicit branch recovery holdoff, classify front-end idle
+    // as BranchMispred rather than generic NoInst.
+    set_stall(BrMispred);
+    return;
+  }
+
   if (!imem->is_ready().first)
     return;
 
@@ -96,8 +110,7 @@ Pipeline::do_fetch_0() {
   // IFU continues fetching sequential PCs for 2 cycles before the
   // BPU redirect takes effect.  Matches RTL FetchStage where
   // earlyRedirect fires 2 cycles after receipt (iCache 1cyc +
-  // BPU SyncReadMem 1cyc).  These fetches pollute iCache but
-  // their responses are discarded.
+  // BPU SyncReadMem 1cyc).
   if (fetch_.early_redir_remaining > 0) {
     imem->read_req(fetch_.early_redir_seq_pc);
     fetch_.resp_is_orphan.push_back(true);
@@ -109,59 +122,59 @@ Pipeline::do_fetch_0() {
     return;
   }
 
-  // Wrong-path: issue iCache request for cache pollution but do NOT
-  // push to IFQ.  In RTL, wrong-path instructions flow through the
-  // full pipeline (FetchBuf -> Decode -> Dispatch -> Execute),
-  // occupying pipeline slots and extending the misprediction window.
-  // Modeling them as IFQ entries that drain at 1/cycle is too fast
-  // (IFQ fills up, capping wrong-path count).  Instead, treat each
-  // wrong-path fetch as fire-and-forget: iCache processes the
-  // request (pollution), and the response is consumed as orphan.
+  // Wrong-path: issue normal iCache requests and rely on EX flush
+  // to discard responses/younger instructions. Wrong-path cache
+  // pollution is expected and matches RTL behavior.
   if (fetch_.wrong_path) {
-    // Post-flush: stop WP when penalty window ends
-    if (fetch_.wp_flushed && curr_tick() >= fetch_.resume_tick) {
+    // EX flush redirected IFU; stop issuing wrong-path requests.
+    if (fetch_.wp_flushed) {
       fetch_.wrong_path = false;
       fetch_.wp_flushed = false;
       // Fall through to normal fetch below
     } else {
-    // BPU predicts on wrong-path PC (matches RTL SyncReadMem query)
-    auto wp_pred = bpu->predict(fetch_.wrong_path_pc);
-    stats.wp_bpu_queries++;
+      if (fetch_queue_.full())
+        return;
+      // BPU predicts on wrong-path PC (matches RTL SyncReadMem query)
+      auto wp_pred = bpu->predict(fetch_.wrong_path_pc);
+      stats.wp_bpu_queries++;
 
-    // Issue iCache request for cache pollution
-    imem->read_req(fetch_.wrong_path_pc);
-    fetch_.resp_is_orphan.push_back(true);
+      auto wpInst = Inst{};
+      wpInst.pc = fetch_.wrong_path_pc;
+      fetch_queue_.push_back(
+        std::make_unique<Transaction>(wpInst, true, true));
+      imem->read_req(fetch_.wrong_path_pc);
+      fetch_.resp_is_orphan.push_back(false);
 
-    DPRINTF(Pipeline, " IF WrongPath PC=0x%08x", fetch_.wrong_path_pc);
+      DPRINTF(Pipeline, " IF WrongPath PC=0x%08x", fetch_.wrong_path_pc);
 
-    // Default next: sequential
-    fetch_.wrong_path_pc += 4;
+      // Default next: sequential
+      fetch_.wrong_path_pc += 4;
 
-    // 2-cycle redirect pipeline (matches RTL earlyRedirect):
-    //  T:   fetch X, BPU query X -> stage1
-    //  T+1: fetch X+4, stage1->stage2
-    //  T+2: fetch X+8, stage2 fires -> redirect to Y
-    bool redirected_this_cycle = false;
-    if (fetch_.wp_redirect_s2) {
-      fetch_.wrong_path_pc = fetch_.wp_redirect_target_s2;
-      fetch_.wp_redirect_s2 = false;
-      fetch_.wp_redirect_s1 = false;
-      redirected_this_cycle = true;
-      stats.wp_redirects++;
-    }
+      // 2-cycle redirect pipeline (matches RTL earlyRedirect):
+      //  T:   fetch X, BPU query X -> stage1
+      //  T+1: fetch X+4, stage1->stage2
+      //  T+2: fetch X+8, stage2 fires -> redirect to Y
+      bool redirected_this_cycle = false;
+      if (fetch_.wp_redirect_s2) {
+        fetch_.wrong_path_pc = fetch_.wp_redirect_target_s2;
+        fetch_.wp_redirect_s2 = false;
+        fetch_.wp_redirect_s1 = false;
+        redirected_this_cycle = true;
+        stats.wp_redirects++;
+      }
 
-    if (fetch_.wp_redirect_s1) {
-      fetch_.wp_redirect_s2 = true;
-      fetch_.wp_redirect_target_s2 = fetch_.wp_redirect_target_s1;
-      fetch_.wp_redirect_s1 = false;
-    }
+      if (fetch_.wp_redirect_s1) {
+        fetch_.wp_redirect_s2 = true;
+        fetch_.wp_redirect_target_s2 = fetch_.wp_redirect_target_s1;
+        fetch_.wp_redirect_s1 = false;
+      }
 
-    if (wp_pred.will_redirect && !redirected_this_cycle) {
-      fetch_.wp_redirect_s1 = true;
-      fetch_.wp_redirect_target_s1 = wp_pred.pred_target;
-      stats.wp_btb_hits++;
-    }
-    return;
+      if (wp_pred.will_redirect && !redirected_this_cycle) {
+        fetch_.wp_redirect_s1 = true;
+        fetch_.wp_redirect_target_s1 = wp_pred.pred_target;
+        stats.wp_btb_hits++;
+      }
+      return;
     }
   }
 
@@ -174,15 +187,15 @@ Pipeline::do_fetch_0() {
   if (is_draining_ && input_buffer_ == nullptr) [[unlikely]]
     return;
 
-  if (curr_tick() < fetch_.resume_tick)
-    return;
-
   if (input_buffer_ == nullptr)
     return;
 
   // Normal fetch of real instruction
   auto candidate = std::move(input_buffer_);
   candidate->wait_mem = true;
+  if (candidate->trace_inst.is_branch && bpu->is_no_bpu()) {
+    candidate->bp_meta_hold = candidate->trace_inst.br_taken ? 2 : 0;
+  }
 
   const auto& inst = candidate->trace_inst;
   auto pred = bpu->predict_at_fetch(inst.pc, inst.is_branch);
@@ -191,13 +204,10 @@ Pipeline::do_fetch_0() {
   auto accurate = bpu->judge(real_taken, real_target, pred);
   candidate->br_pred = pred;
   candidate->br_mispred = !accurate;
-  if (!accurate && !inst.is_branch)
-    bpu->stats.nonbr_mispred++;
 
   if (!accurate) {
     fetch_.wrong_path = true;
     flush_stall_cycles(curr_tick());
-    stall_.in_br_recovery = true;
 
     if (real_taken && !pred.will_redirect) {
       fetch_.wrong_path_pc = inst.pc + 4;
@@ -249,10 +259,12 @@ Pipeline::do_fetch_1() {
     schedule(Fetch, InfTime);
     return;
   }
-  // Wrong-path entries are no longer pushed to IFQ (they bypass it
-  // as fire-and-forget iCache requests), so this assert verifies
-  // no wrong-path entry leaked into the queue.
-  assert(!ptr->is_wrong_path);
+  if (ptr->bp_meta_hold > 0) {
+    ptr->bp_meta_hold--;
+    schedule(Fetch, curr_tick() + 1);
+    return;
+  }
+  // Wrong-path placeholders also enter Fetch stage to model bandwidth use.
   assert(sim_pipe_.at(Fetch) == nullptr);
   sim_pipe_.at(Fetch) = std::move(ptr);
   fetch_queue_.pop_front();
@@ -284,6 +296,15 @@ Pipeline::do_decode() {
   const auto& trans = sim_pipe_.at(Fetch);
   const auto& inst = trans->trace_inst;
 
+  if (trans->is_wrong_path) {
+    // Wrong-path placeholder consumes one decode slot, then is dropped.
+    if (stall_.in_br_recovery)
+      set_stall(BrMispred);
+    sim_pipe_.at(Fetch) = nullptr;
+    schedule(Decode, curr_tick() + 1);
+    return;
+  }
+
   bool lsu_active = sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem;
 
   // M-extension scoreboard: only block next MUL/DIV instruction
@@ -299,6 +320,8 @@ Pipeline::do_decode() {
         ready = std::min(ready, mul_ready_tick_);
       if (sim_pipe_.at(IntDivExt))
         ready = std::min(ready, div_ready_tick_);
+      if (ready <= curr_tick())
+        ready = curr_tick() + 1;
       schedule(Decode, ready);
       DPRINTF(Pipeline, " ID M-ext scoreboard stall PC=0x%08x until T@%lu",
               inst.pc, ready);
@@ -385,20 +408,25 @@ Pipeline::do_execute() {
       DPRINTF(Pipeline, " EX Flush PC=0x%08x taken=%d target=0x%08x",
               inst.pc, real_taken, real_target);
 
-      // Flush fetch queue: only correct-path entries remain in IFQ
-      // (wrong-path fetches bypass the IFQ entirely).
-      // Mark any pending (wait_mem) IFQ entries as orphans in the
-      // response FIFO so their iCache responses are discarded.
+      // Flush fetch queue and younger IF-stage instruction.
+      // Mark any pending IFQ iCache responses as orphans.
       for (auto& is_orph : fetch_.resp_is_orphan) {
         if (!is_orph)
           is_orph = true;
       }
       for (size_t i = 0; i < fetch_queue_.size(); i++) {
         auto& fq_entry = fetch_queue_.at(i);
-        if (fq_entry)
+        if (fq_entry && fq_entry->counted_inflight)
           ongoing_insts_--;
       }
       fetch_queue_.clear();
+      // Flush younger IF-stage instruction (matches RTL IFU+IDU flush).
+      if (sim_pipe_.at(Fetch) && sim_pipe_.at(Fetch)->counted_inflight) {
+        ongoing_insts_--;
+        sim_pipe_.at(Fetch) = nullptr;
+      } else if (sim_pipe_.at(Fetch)) {
+        sim_pipe_.at(Fetch) = nullptr;
+      }
       fetch_.wp_flushed = true;
       fetch_.wp_redirect_s1 = false;
       fetch_.wp_redirect_s2 = false;
@@ -406,9 +434,9 @@ Pipeline::do_execute() {
       // RTL iCache pipe is NOT flushed on branch misprediction:
       // wrong-path fills complete and pollute the cache.
 
-      fetch_.resume_tick = curr_tick() + BranchMissPenalty;
+      fetch_.resume_tick = curr_tick() + kBranchMissPenalty;
       flush_stall_cycles(curr_tick());
-      stall_.in_br_recovery = false;
+      stall_.in_br_recovery = true;
     }
   }
 
@@ -481,12 +509,10 @@ Pipeline::do_memory() {
   assert(trans && "Memory stage: no Execute instruction");
   const auto& inst = trans->trace_inst;
 
-  // MMIO: second pass after latency elapsed
-  if (trans->wait_mem && inst.mem_op != MemNone) {
-    uint8_t top = (inst.mem_addr >> 28) & 0xf;
-    bool cacheable =
-      (top == 0x3 || top == 0x8 || top == 0x9 || top == 0xa || top == 0xb);
-    if (!cacheable) {
+  if (trans->wait_mem) {
+    // Legacy fallback when no direct non-cacheable memory port is provided.
+    if (inst.mem_op != MemNone && !is_cacheable_addr(inst.mem_addr)
+        && dmem_nc == nullptr) {
       trans->wait_mem = false;
       if (inst.mem_op == MemLoad)
         update_reg_time(inst.dst_reg, curr_tick() + 2);
@@ -494,19 +520,14 @@ Pipeline::do_memory() {
       sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
       return;
     }
-  }
-
-  if (trans->wait_mem) {
     schedule(Memory, InfTime);
     return;
   }
 
-  // MMIO: first pass -- block pipeline for mmio_lat_ cycles
+  // Legacy fallback: model non-cacheable latency directly in pipeline.
   if (inst.mem_op != MemNone) {
-    uint8_t top = (inst.mem_addr >> 28) & 0xf;
-    bool cacheable =
-      (top == 0x3 || top == 0x8 || top == 0x9 || top == 0xa || top == 0xb);
-    if (!cacheable) {
+    bool cacheable = is_cacheable_addr(inst.mem_addr);
+    if (!cacheable && dmem_nc == nullptr) {
       set_stall(LsuStall);
       trans->wait_mem = true;
       schedule(Memory, curr_tick() + mmio_lat_);
@@ -514,17 +535,22 @@ Pipeline::do_memory() {
     }
   }
 
+  auto* lsu_port =
+    (inst.mem_op != MemNone && !is_cacheable_addr(inst.mem_addr) && dmem_nc)
+      ? dmem_nc
+      : dmem;
+
   if (inst.mem_op == MemLoad) {
     DPRINTF(Pipeline, " LS Load PC=0x%08x addr=0x%08x", inst.pc,
             inst.mem_addr);
     set_stall(LsuStall);
-    send_lsu_req(inst.mem_addr, 0xbadU, 0xf, false);
+    send_lsu_req(lsu_port, inst.mem_addr, 0xbadU, 0xf, false);
     return;
   } else if (inst.mem_op == MemStore) {
     DPRINTF(Pipeline, " LS Store PC=0x%08x addr=0x%08x", inst.pc,
             inst.mem_addr);
     set_stall(LsuStall);
-    send_lsu_req(inst.mem_addr, 0xbadU, 0xf, true);
+    send_lsu_req(lsu_port, inst.mem_addr, 0xbadU, 0xf, true);
     schedule(Memory, InfTime);
     return;
   }
@@ -534,17 +560,18 @@ Pipeline::do_memory() {
 }
 
 void
-Pipeline::send_lsu_req(addr_t addr, word_t data, uint8_t strb,
+Pipeline::send_lsu_req(Cache* port, addr_t addr, word_t data, uint8_t strb,
                        bool is_write) {
-  auto const [rready, wready] = dmem->is_ready();
+  assert(port != nullptr);
+  auto const [rready, wready] = port->is_ready();
   schedule(Memory, InfTime);
   if (is_write ? wready : rready) {
     sim_pipe_.at(Execute)->wait_mem = true;
     auto const aligned = addr & ~0x3U;
     if (is_write)
-      dmem->write_req(aligned, data, strb);
+      port->write_req(aligned, data, strb);
     else
-      dmem->read_req(aligned);
+      port->read_req(aligned);
   }
 }
 
@@ -560,9 +587,14 @@ Pipeline::handle_lsu_resp() {
           inst.mem_op == MemLoad ? "Load" : "Store", inst.pc, inst.mem_addr);
 
   if (inst.mem_op == MemLoad)
-    update_reg_time(inst.dst_reg, curr_tick() + 1);
+    // Align with RTL LSU->WBU timing: load result is not usable in the
+    // immediate next cycle after memory response.
+    update_reg_time(inst.dst_reg, curr_tick() + 2);
 
-  set_stall(NoInst);
+  // Keep LSU attribution until the memory instruction reaches WB.
+  // This matches RTL PMU where post-response LS drain cycles are still
+  // counted under LsuStall rather than NoInst.
+  set_stall(LsuStall);
 
   // Check if decode is blocked by RAW from this load
   if (auto* ids = sim_pipe_.at(Fetch).get()) {
@@ -613,11 +645,12 @@ Pipeline::do_writeback() {
   flush_stall_cycles(curr_tick());
   stats.nostall++;
   stall_.last_tick = curr_tick() + 1;
+  if (stall_.in_br_recovery)
+    stall_.in_br_recovery = false;
 
   auto* trans = sim_pipe_.at(src).get();
   if (trans->br_mispred) {
     stall_.cause = BrMispred;
-    stall_.brmiss_attr_end = curr_tick() + 3;
   } else if (sim_pipe_.at(Execute) && sim_pipe_.at(Execute)->wait_mem) {
     stall_.cause = LsuStall;
   } else {
@@ -641,7 +674,7 @@ Pipeline::recv_mem_resp(CpuTrans trans) {
   if (id == 0) {
     assert(!is_write);
     handle_ifu_resp();
-  } else if (id == 1) {
+  } else if (id == 1 || id == 2) {
     handle_lsu_resp();
   } else {
     assert(false && "No such ID");
@@ -653,7 +686,7 @@ Pipeline::ack_mem_avail(AckTrans ack) {
   auto id = ack.id;
   if (id == 0)
     async_schedule(Fetch, curr_tick());
-  else if (id == 1) {
+  else if (id == 1 || id == 2) {
     auto& ex = sim_pipe_.at(Execute);
     if (ex && !ex->wait_mem && ex->trace_inst.mem_op != MemNone)
       async_schedule(Memory, curr_tick());
@@ -697,6 +730,13 @@ Pipeline::flush_false_btb_hit(const Transaction& trans) {
   // direction.  In npsim the BTB hit was captured at predict time
   // as pred_target != 0.
   bool had_btb_hit = (trans.br_pred.pred_target != 0);
+  if (had_btb_hit) {
+    // Match RTL bhtWen behavior on non-branch false BTB hits:
+    // updValid = predBtbHit, updTaken = false, updBtbHit = true.
+    // This decrements BHT and prevents overly optimistic taken bias.
+    bpu->update(inst.pc, false, 0, false, false, true,
+                trans.br_pred, trans.br_mispred);
+  }
   if (had_btb_hit && !trans.br_mispred) {
     // BTB false hit but BHT said not-taken -> no redirect, no flush.
     // Still clear the BTB entry (matches RTL).
@@ -718,18 +758,24 @@ Pipeline::flush_false_btb_hit(const Transaction& trans) {
   }
   for (size_t i = 0; i < fetch_queue_.size(); i++) {
     auto& fq_entry = fetch_queue_.at(i);
-    if (fq_entry)
+    if (fq_entry && fq_entry->counted_inflight)
       ongoing_insts_--;
   }
   fetch_queue_.clear();
+  if (sim_pipe_.at(Fetch) && sim_pipe_.at(Fetch)->counted_inflight) {
+    ongoing_insts_--;
+    sim_pipe_.at(Fetch) = nullptr;
+  } else if (sim_pipe_.at(Fetch)) {
+    sim_pipe_.at(Fetch) = nullptr;
+  }
   fetch_.wp_flushed = true;
   fetch_.wp_redirect_s1 = false;
   fetch_.wp_redirect_s2 = false;
   fetch_.early_redir_remaining = 0;
 
-  fetch_.resume_tick = curr_tick() + BranchMissPenalty;
+  fetch_.resume_tick = curr_tick() + kBranchMissPenalty;
   flush_stall_cycles(curr_tick());
-  stall_.in_br_recovery = false;
+  stall_.in_br_recovery = true;
 }
 
 } // namespace pipeSim

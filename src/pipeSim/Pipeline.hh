@@ -31,6 +31,7 @@ public:
       : ClockedObject(name, pstats)
       , imem{nullptr}
       , dmem{nullptr}
+      , dmem_nc{nullptr}
       , bpu{bpu}
       , is_draining_{false} {}
   virtual ~Processor() {}
@@ -46,14 +47,16 @@ public:
   }
 
   void
-  set_cache_ports(Cache* l1i, Cache* l1d) {
+  set_cache_ports(Cache* l1i, Cache* l1d, Cache* lsu_nocache = nullptr) {
     imem = l1i;
     dmem = l1d;
+    dmem_nc = lsu_nocache;
   }
 
 protected:
   Cache* imem;
   Cache* dmem;
+  Cache* dmem_nc;
   BranchUnit* bpu;
   bool is_draining_;
 };
@@ -74,6 +77,8 @@ protected:
 //
 class Pipeline final : public Processor {
 public:
+  static constexpr tick_t kBranchMissPenalty = 1;
+
   // Matches RTL CycBreakdown categories (exclusive, sum = cycles)
   enum StallCause {
     NoStall = 0,
@@ -171,13 +176,12 @@ public:
 public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
-                    size_t stq_size, BranchUnit* bpu, tick_t br_mis_pen = 1,
-                    tick_t mmio_lat = 1);
+                    size_t stq_size, BranchUnit* bpu, tick_t mmio_lat = 1);
 
   json
   config_json() const override {
     json j;
-    j["BranchPenaltyCycles"] = BranchMissPenalty;
+    j["BranchPenaltyCycles"] = kBranchMissPenalty;
     j["MmioLatency"] = mmio_lat_;
     j["IFQSize"] = fetch_queue_.capacity();
     j["area"] = area::area_json(19570.0);
@@ -246,6 +250,8 @@ protected:
     bool br_mispred = false;
     bool is_wrong_path;
     bool wait_mem;
+    bool counted_inflight;
+    uint8_t bp_meta_hold;
 
     explicit Transaction() = delete;
     explicit Transaction(const Inst& inst, bool wrong_path = false,
@@ -254,7 +260,9 @@ protected:
         , br_pred{false, 0, false, 1, 0}
         , br_mispred{false}
         , is_wrong_path{wrong_path}
-        , wait_mem{is_wait_mem} {}
+        , wait_mem{is_wait_mem}
+        , counted_inflight{!wrong_path}
+        , bp_meta_hold{0} {}
   };
   using TransPtr = std::unique_ptr<Transaction>;
 
@@ -313,10 +321,6 @@ protected:
     }
   };
 
-  // Cycles from EX flush until IFU can issue first correct-path
-  // fetch.  In RTL this is 1 cycle (flushWire to next cycle fetch).
-  tick_t BranchMissPenalty;
-
   using SimPipe = std::array<TransPtr, Num_PipeStage>;
   TransPtr input_buffer_;
   SimPipe sim_pipe_;
@@ -334,7 +338,8 @@ protected:
 
   void handle_lsu_resp();
   void handle_ifu_resp();
-  void send_lsu_req(addr_t addr, word_t data, uint8_t strb, bool is_write);
+  void send_lsu_req(Cache* port, addr_t addr, word_t data, uint8_t strb,
+                    bool is_write);
   void update_reg_time(uint8_t rd, tick_t when);
   void flush_false_btb_hit(const Transaction& trans);
 
@@ -365,9 +370,10 @@ protected:
       mins = std::min(mins, curr_tick() + 1);
     if (fetch_.early_redir_remaining > 0)
       mins = std::min(mins, curr_tick() + 1);
-    // Wake at resume_tick so fetch resumes after branch penalty.
-    if (fetch_.resume_tick > curr_tick() && input_buffer_)
-      mins = std::min(mins, fetch_.resume_tick);
+    // During branch recovery holdoff, wake every cycle so stall
+    // attribution can charge these cycles to BranchMispred.
+    if (fetch_.resume_tick > curr_tick())
+      mins = std::min(mins, curr_tick() + 1);
     calc_nxtupd_ = mins;
   }
 
@@ -385,7 +391,6 @@ private:
     tick_t reset_tick{0};
     StallCause cause{NoInst};
     bool in_br_recovery{false};
-    tick_t brmiss_attr_end{0};
   } stall_;
 
   bool
@@ -420,17 +425,14 @@ private:
   flush_stall_cycles(tick_t until) {
     if (until <= stall_.last_tick)
       return;
-    if (stall_.cause == BrMispred && until > stall_.brmiss_attr_end
-        && stall_.brmiss_attr_end > stall_.last_tick) {
-      auto gap1 = stall_.brmiss_attr_end - stall_.last_tick;
-      stats.brmiss_stall += gap1;
-      auto gap2 = until - stall_.brmiss_attr_end;
-      stats.noinst += gap2;
-      stall_.cause = NoInst;
+    auto gap = until - stall_.last_tick;
+    // Match RTL PMU: after EX flush, all non-commit cycles are attributed
+    // to BranchMispred until the next commit.
+    if (stall_.in_br_recovery && stall_.cause != NoStall) {
+      stats.brmiss_stall += gap;
       stall_.last_tick = until;
       return;
     }
-    auto gap = until - stall_.last_tick;
     switch (stall_.cause) {
     case LsuStall:
       stats.lsu_stall += gap;
@@ -450,6 +452,8 @@ private:
 
   void
   set_stall(StallCause new_cause) {
+    if (stall_.in_br_recovery && new_cause != NoStall)
+      new_cause = BrMispred;
     if (new_cause == stall_.cause)
       return;
     flush_stall_cycles(curr_tick());
@@ -459,9 +463,8 @@ private:
   // Fetch queue (models RTL FetchStage PipeDepth buffer)
   IFQRingBuf fetch_queue_;
 
-  // Wrong-path fetch state. When a mispredicted branch enters IF,
-  // wrong-path PCs are fetched as fire-and-forget iCache requests
-  // (not pushed to IFQ).  Responses are tracked via resp_is_orphan_.
+  // Wrong-path fetch state. Wrong-path PCs are fetched and tracked via
+  // placeholder IFQ entries; responses are ordered by resp_is_orphan_.
   struct FetchState {
     bool wrong_path{false};
     bool wp_flushed{false};   // true after EX flush; WP continues
