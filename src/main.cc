@@ -94,8 +94,6 @@ static uint8_t print_mode = 2;
 // Pipeline Queue sizes
 // Match RTL rvCore IFU fetch queue size.
 static constexpr size_t ifq_size = 8;
-// FIXME: Remove this. NoCache means no buffer
-static size_t stq_size = 8; // Only used when dCache is NoCache
 static size_t stbuf_entries = 0;
 static tick_t mmio_lat = 3;  // MMIO access latency (cycles, SoC only)
 static int freq_mhz = 1000;  // CPU frequency in MHz (default 1 GHz)
@@ -476,9 +474,8 @@ main(int argc, char** argv) {
   /** Component Configuration */
   auto branch_unit = create_branch_unit();
 
-  size_t actual_stq_size = (l1d_size > 0) ? 0 : stq_size;
   auto core = std::make_unique<pipeSim::Pipeline>(
-    "Core", ifq_size, actual_stq_size, branch_unit.get(), mmio_lat);
+    "Core", ifq_size, branch_unit.get(), mmio_lat);
 
   std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
   if (l1i_pref_type == "nextline") {

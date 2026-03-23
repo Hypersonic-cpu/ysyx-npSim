@@ -176,7 +176,7 @@ public:
 public:
   Pipeline() = delete;
   explicit Pipeline(const std::string& name, size_t ifq_size,
-                    size_t stq_size, BranchUnit* bpu, tick_t mmio_lat = 1);
+                    BranchUnit* bpu, tick_t mmio_lat = 1);
 
   json
   config_json() const override {

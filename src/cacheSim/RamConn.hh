@@ -154,7 +154,8 @@ protected:
   latency_impl(const MemTrans& req, tick_t now) override {
     assert(req.bst_len >= 1);
     if (sdram_model_) {
-      return sdram_model_->access(req.addr, req.bst_len, req.mop == Write, now);
+      return sdram_model_->access(
+        req.addr, req.bst_len, req.mop == Write, now, req.id);
     }
     return axi_ovhd_ + sdram_lat_ + (req.bst_len - 1) * sdram_burst_;
   }

@@ -28,8 +28,8 @@ is_cacheable_addr(addr_t addr) {
 }
 } // namespace
 
-Pipeline::Pipeline(const std::string& name, size_t ifq_size, size_t stq_size,
-                   BranchUnit* bpu, tick_t mmio_lat)
+Pipeline::Pipeline(const std::string& name, size_t ifq_size, BranchUnit* bpu,
+                   tick_t mmio_lat)
     : Processor(name, &this->stats, bpu)
     , stats(name)
     , reg_ready_{}

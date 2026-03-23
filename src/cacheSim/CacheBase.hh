@@ -161,6 +161,7 @@ protected:
    */
   CacheLine* access(addr_t addr);
   CacheLine* select_victim(Set& set);
+  size_t miss_victim_way(size_t si, Set& set);
 
   /// Tag lookup without stats side effects. Returns true if addr is
   /// present in the cache.

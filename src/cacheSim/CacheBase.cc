@@ -59,32 +59,33 @@ CacheBase::select_victim(Set& set) {
   return repl_policy_->getVictim(set_idx, set);
 }
 
+size_t
+CacheBase::miss_victim_way(size_t si, Set& set) {
+  if (!victim_way_lag_) {
+    for (size_t i = 0; i < set.size(); ++i) {
+      if (!set.at(i).isValid())
+        return i;
+    }
+    auto* victim = repl_policy_->getVictim(si, set);
+    return static_cast<size_t>(victim - &set.front());
+  }
+
+  size_t lag_si = lag_set_valid_ ? lag_set_idx_ : si;
+  auto& lag_set = setsArr_.at(lag_si);
+  for (size_t i = 0; i < lag_set.size(); ++i) {
+    if (!lag_set.at(i).isValid())
+      return i;
+  }
+  auto* victim = repl_policy_->getVictim(lag_si, lag_set);
+  return static_cast<size_t>(victim - &lag_set.front());
+}
+
 CacheLine*
 CacheBase::access(addr_t addr) {
   ++stats.accesses;
   addr_t tag = tagOf(addr);
   size_t si = setIndexOf(addr);
   auto& set = setsArr_.at(si);
-  // RTL dCache (FSM-based) latches victimWay in idle using the previous
-  // request's reqIdx but the CURRENT cache state, because the next request
-  // is only accepted after the previous one fully completes.
-  size_t lag_way = 0;
-  if (victim_way_lag_) {
-    size_t lag_si = lag_set_valid_ ? lag_set_idx_ : si;
-    auto& lag_set = setsArr_.at(lag_si);
-    bool has_invalid = false;
-    for (size_t i = 0; i < lag_set.size(); ++i) {
-      if (!lag_set.at(i).isValid()) {
-        lag_way = i;
-        has_invalid = true;
-        break;
-      }
-    }
-    if (!has_invalid) {
-      auto* victim = repl_policy_->getVictim(lag_si, lag_set);
-      lag_way = static_cast<size_t>(victim - &lag_set.front());
-    }
-  }
 
   // find hit in this set
   for (size_t i = 0; i < set.size(); ++i) {
@@ -107,17 +108,11 @@ CacheBase::access(addr_t addr) {
   // miss: Invoking replacement policy
   ++stats.misses;
   CacheLine* victim = nullptr;
+  auto way = miss_victim_way(si, set) % assoc_;
+  victim = &set.at(way);
   if (victim_way_lag_) {
-    auto way = lag_way % assoc_;
-    victim = &set.at(way);
     lag_set_idx_ = si;
     lag_set_valid_ = true;
-  } else {
-    victim = select_victim(set);
-    if (victim_way_lag_) {
-      lag_set_idx_ = si;
-      lag_set_valid_ = true;
-    }
   }
   // Write back by caller. Dirty bit is not cleared so far.
   victim->invalidate();
@@ -254,10 +249,9 @@ PipeCache::recv_mem_resp(MemTransPtr trans) {
     assert(r_waiting_);
     r_waiting_ = false;
     handle_fill(pipe_.back()->line, trans->addr, trans->data);
-    // RTL fillFinish = RegNext(...): 1 extra blocking cycle after the
-    // last beat before willShift can go high.  Total = +2 from last beat.
-    // CWF: respond 1 cycle after critical word arrives (not after last beat).
-    blocked_until_ = curr_tick() + (cwf_ ? 1 : 2);
+    // iCache responds one cycle after the last beat (fillFinish=RegNext).
+    // dCache keeps one more internal turn for replay/response sequencing.
+    blocked_until_ = curr_tick() + (cwf_ ? 1 : (write_back_ ? 2 : 1));
   } else {
     assert(w_waiting_);
     w_waiting_ = false;
@@ -489,8 +483,7 @@ PipeCache::save_evict_info(addr_t req_addr) {
   if (!write_back_) return;
   size_t si = setIndexOf(req_addr);
   auto& set = setsArr_.at(si);
-  // Same LRU victim selection as access()
-  auto* it = select_victim(set);
+  auto* it = &set.at(miss_victim_way(si, set) % assoc_);
   if (it->isValid() && it->isDirty()) {
     pending_evict_ = true;
     evict_addr_ = it->getTag();  // blockAddrOf — already aligned
