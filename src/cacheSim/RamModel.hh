@@ -41,10 +41,10 @@ public:
   // ACTIVATE: 1 cycle + DELAY(T_RCD) = 1 + 2 = 3
   static constexpr int ACT_COST = 1 + T_RCD; // 3
   // PRECHARGE: 1 cycle + DELAY(T_RP) = 1 + 2 = 3
-  static constexpr int PRE_COST = 3;
+  static constexpr int PRE_COST = 1 + T_RP;  // 3
 
   // Fixed CPU-visible wrapper turns after the burst train.
-  static constexpr int RD_BASE = 1;
+  static constexpr int RD_BASE = 2;
   static constexpr int WR_BASE = 1;
 
   explicit SdramModel(int cpu_freq_mhz)
