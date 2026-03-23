@@ -40,10 +40,6 @@ default_conf = {
     "l1d-size":        "0",
     "bpu-type":        "none",
     "stbuf-entries":   "0",
-    "br-pen":          "1",
-    "sdram-lat-us":    "0.055",
-    "sdram-burst-us":  "0.023",
-    "ifq-size":        "3",
     "socmode":         None,
     "sram-lat":        "1",
 }

@@ -38,10 +38,6 @@ default_conf = {
     "bpu-type":       "bimodal",
     "ras-size":       "8",
     "stbuf-entries":  "2",
-    "br-pen":         "1",
-    "sdram-lat-us":   "0.043",
-    "sdram-burst-us": "0.016",
-    "ifq-size":       "4",
     "freq-mhz":       "500",
     "npc-mode":       True,
 }

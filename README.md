@@ -11,11 +11,11 @@ L1 caches, branch predictor, and SoC memory system. The intended workflow is:
 For the `23-Mar-2026` SoC calibration matrix on `ARCH=riscv32im-ysyxsoc`:
 
 - `CoreMark (cm2)`: `52/52` cases are within `5%` IPC error
-- `Dhrystone (dry2500)`: `48/52` cases are within `5%`, worst case `9.57%`
+- `Dhrystone (dry2500)`: `49/52` cases are within `5%`, worst case `5.45%`
 
 The current model is intentionally SoC-oriented. It follows the address routing
 in `$SOC_HOME/ysyxSoC/perip`, models SDRAM in controller-device cycles, and
-converts between `us`, `MHz`, and CPU cycles explicitly.
+then scales that timing back to CPU cycles by frequency ratio.
 
 ## Highlights
 
@@ -47,8 +47,7 @@ cd $NPSIM_HOME
   --l1d-size 2048 --l1d-blksize 16 --l1d-assoc 4 \
   --bpu-type bimodal --bpu-size 256 --btb-size 128 --ras-size 8 \
   --l1i-pref none --l1d-pref none \
-  --sdram-lat-us 0.051 --sdram-burst-us 0.024 \
-  --sram-lat 1 --mmio-lat 3 --axi-ovhd-cyc 4 \
+  --sram-lat 1 --mmio-lat 3 \
   --outdir quick-cm2
 ```
 
@@ -106,26 +105,38 @@ model.
 
 ## Memory Model And Units
 
-There are two layers of time in the SoC model:
+Current SoC SDRAM timing comes from `src/cacheSim/RamModel.hh`:
 
-- user-visible CLI knobs: `--sdram-lat-us`, `--sdram-burst-us`, `--freq-mhz`
-- internal SDRAM controller model: fixed `100 MHz` device-domain timing
+- fixed SDRAM device clock: `100 MHz`
+- open-row tracking per `host x bank`
+- row-hit / row-miss / row-conflict timing in device cycles
+- CPU-visible latency = `device_cycles * (freq_mhz / 100)`
 
-Conversion at the CLI boundary:
+The current request model is:
 
 ```text
-cpu_cycles = ceil(lat_us * freq_mhz)
+dev_cycles =
+  PER_WORD * burst_len
+  + (is_write ? WR_BASE : RD_BASE)
+  + row_extra
+
+row_extra =
+  0                    on row hit
+  ACT_COST             on row miss
+  PRE_COST + ACT_COST  on row conflict
 ```
 
-Example:
+with:
 
-- `0.051 us` at `1000 MHz` becomes `51` CPU cycles
-- `0.024 us` at `500 MHz` becomes `12` CPU cycles
+- `ACT_COST = 1 + T_RCD`
+- `PRE_COST = 1`
+- `PER_WORD = 2`
+- `RD_BASE = 2`
+- `WR_BASE = 0`
 
-Inside `SdramModel`, row-hit / row-miss / row-conflict timing is modeled in
-device cycles, then scaled back to CPU cycles. This keeps the SoC latency model
-grounded in controller timing instead of tuning arbitrary per-benchmark cycle
-constants.
+This is closer to `ysyxSoC/perip/sdram_axi_core.v` than a flat `us -> cycles`
+fit. The only frequency conversion in the active SoC path is the final
+`100 MHz` device-domain to CPU-domain scaling.
 
 ## Key CLI Knobs
 
@@ -136,11 +147,9 @@ Commonly used options:
 | `--l1i-size --l1i-blksize --l1i-assoc` | iCache geometry |
 | `--l1d-size --l1d-blksize --l1d-assoc` | dCache geometry |
 | `--bpu-type --bpu-size --btb-size --ras-size` | branch predictor geometry |
-| `--freq-mhz` | CPU frequency for `us -> cycles` conversion |
-| `--sdram-lat-us --sdram-burst-us` | SDRAM latency knobs in microseconds |
+| `--freq-mhz` | CPU frequency; also sets `freq_ratio = freq_mhz / 100` for SDRAM |
 | `--sram-lat` | on-chip SRAM latency in CPU cycles |
 | `--mmio-lat` | fallback MMIO / OTHER device latency |
-| `--axi-ovhd-cyc` | fixed CPU-side AXI overhead |
 | `--l1i-pref --l1d-pref` | prefetcher type (`none`, `nextline`, `stride`, `tagged`) |
 | `--l1i-repl --l1d-repl` | replacement policy (`plru`, `lru`, `srrip`, `rr`) |
 | `--l1i-cwf` | critical-word-first iCache response |

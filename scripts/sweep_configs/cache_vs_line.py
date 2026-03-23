@@ -33,5 +33,4 @@ default_conf = {
     "bpu-type":   "bimodal",
     "bpu-size":   "16",
     "btb-size":   "16",
-    "br-pen":     "9",
 }

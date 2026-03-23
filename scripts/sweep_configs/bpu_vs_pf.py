@@ -33,5 +33,4 @@ default_conf = {
     "l1i-size":   "512B",
     "l1i-blksize": "16",
     "l1i-assoc":  "1",
-    "br-pen":     "9",
 }

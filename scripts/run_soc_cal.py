@@ -95,9 +95,6 @@ def main() -> int:
     ap.add_argument("--timeout", type=int, default=900)
     ap.add_argument("--limit-configs", type=int, default=0)
     ap.add_argument("--stbuf-entries", type=int, default=0)
-    ap.add_argument("--axi-ovhd-cyc", type=int, default=4)
-    ap.add_argument("--sdram-lat-us", type=float, default=0.051)
-    ap.add_argument("--sdram-burst-us", type=float, default=0.024)
     ap.add_argument("--sram-lat", type=int, default=1)
     args = ap.parse_args()
 
@@ -125,9 +122,6 @@ def main() -> int:
 
     base_params: Dict[str, str | None] = {
         "stbuf-entries": str(args.stbuf_entries),
-        "axi-ovhd-cyc": str(args.axi_ovhd_cyc),
-        "sdram-lat-us": f"{args.sdram_lat_us}",
-        "sdram-burst-us": f"{args.sdram_burst_us}",
         "sram-lat": str(args.sram_lat),
         "l1i-pref": "none",
         "l1d-pref": "none",

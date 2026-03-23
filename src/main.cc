@@ -1,11 +1,11 @@
 #include <bit>
 #include <cassert>
 #include <chrono>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <getopt.h>
 #include <iostream>
@@ -17,13 +17,13 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include "branchSim/BranchPred.hh"
 #include "branchSim/Bimodal.hh"
+#include "branchSim/BranchPred.hh"
 #include "branchSim/Tage.hh"
 #include "cacheSim/CacheBase.hh"
 #include "cacheSim/Prefetcher.hh"
-#include "cacheSim/ReplPolicy.hh"
 #include "cacheSim/RamConn.hh"
+#include "cacheSim/ReplPolicy.hh"
 #include "defines/base.hh"
 
 #include "defines/debug.hh"
@@ -40,7 +40,9 @@ using namespace debug;
 using branchSim::BranchUnit;
 using branchSim::BTBBase;
 using cacheSim::CacheBase;
+using cacheSim::Prefetcher;
 using memSim::RAMArbiter;
+namespace fs = std::filesystem;
 
 // Global simulation tick counter
 static tick_t g_tick = 0;
@@ -57,16 +59,7 @@ set_global_tick(tick_t t) noexcept {
   g_tick = t;
 }
 
-// Memory latency parameters (microsecond-based, converted to cycles
-// via freq_mhz: cycles = ceil(lat_us * freq_mhz))
-//   SoC mode: SdramModel (bank-aware row-hit/miss/conflict)
-static double sdram_lat_us = 0.051;           // SoC default: 51ns = 0.051us
-static double sdram_burst_us = 0.024;         // SoC default: 24ns = 0.024us
-static tint_t axi_ovhd_cyc = 0;              // Fixed AXI protocol overhead (cycles)
-static tint_t sram_lat = 1;                  // SoC: on-chip SRAM latency (cycles)
-// Derived (set by parse_args from sdram_*_us x freq_mhz)
-static tint_t sdram_lat_cyc = 0;
-static tint_t sdram_burst_cyc = 0;
+static tint_t sram_lat = 1; // SoC: on-chip SRAM latency (cycles)
 static std::string trace_file;
 static constexpr size_t l1i_pipe_depth = 2; // RTL iCache hit pipeline
 static constexpr size_t l1d_pipe_depth = 1;
@@ -86,23 +79,24 @@ static std::string bpu_type = "";
 static size_t bpu_entries_pow2 = 4; // 16
 static size_t btb_entries_pow2 = 4;
 static size_t ras_depth = 0;
-static size_t ghr_bits = 0;        // GHR bits for bimodal+GHR indexing
-static int tage_comp_pow2 = 7;     // TAGE: log2 of entries per component (128)
-static std::string tage_hists = "2,4,8,16,32,64"; // TAGE: comma-separated history lengths
+static size_t ghr_bits = 0;    // GHR bits for bimodal+GHR indexing
+static int tage_comp_pow2 = 7; // TAGE: log2 of entries per component (128)
+static std::string tage_hists =
+  "2,4,8,16,32,64"; // TAGE: comma-separated history lengths
 static uint8_t print_mode = 2;
 
 // Pipeline Queue sizes
 // Match RTL rvCore IFU fetch queue size.
 static constexpr size_t ifq_size = 8;
 static size_t stbuf_entries = 0;
-static tick_t mmio_lat = 3;  // MMIO access latency (cycles, SoC only)
-static int freq_mhz = 1000;  // CPU frequency in MHz (default 1 GHz)
+static tick_t mmio_lat = 3; // MMIO access latency (cycles, SoC only)
+static int freq_mhz = 1000; // CPU frequency in MHz (default 1 GHz)
 static std::string l1i_pref_type = "none"; // iCache prefetcher type
 static std::string l1d_pref_type = "none"; // dCache prefetcher type
 static std::string l1i_repl = "plru";      // iCache replacement policy
 static std::string l1d_repl = "plru";      // dCache replacement policy
-static bool sram_dff = true;          // Area model: DFF or SRAM macro
-static bool l1i_cwf = false;          // Critical Word First for iCache
+static bool sram_dff = true;               // Area model: DFF or SRAM macro
+static bool l1i_cwf = false;               // Critical Word First for iCache
 
 // Dummy physical memory stubs (active mode: caches don't read data)
 void
@@ -132,8 +126,8 @@ parse_entries_pow2(const char* optarg, const char* name) {
   if (n == 0)
     return 0;
   if ((n & (n - 1)) != 0) {
-    throw std::invalid_argument(
-      std::string(name) + " must be a power-of-two or 0");
+    throw std::invalid_argument(std::string(name)
+                                + " must be a power-of-two or 0");
   }
   return static_cast<size_t>(std::countr_zero(n));
 }
@@ -150,8 +144,6 @@ parse_args(int argc, char* argv[]) {
     {"max-insts", required_argument, 0, 'n'},
     {"max-ticks", required_argument, 0, 'N'},
     {"debug-flags", required_argument, 0, 'd'},
-    {"sdram-lat-us", required_argument, 0, 'M'},
-    {"sdram-burst-us", required_argument, 0, 'm'},
     {"outdir", required_argument, 0, 'O'},
     {"dry-run", no_argument, 0, 'D'},
     {"bpu-type", required_argument, 0, 'T'},
@@ -170,7 +162,6 @@ parse_args(int argc, char* argv[]) {
     {"sram-lib", no_argument, 0, 205U},
     {"mmio-lat", required_argument, 0, 206U},
     {"freq-mhz", required_argument, 0, 207U},
-    {"axi-ovhd-cyc", required_argument, 0, 208U},
     {"l1i-cwf", no_argument, 0, 211U},
     {"ghr-bits", required_argument, 0, 212U},
     {"tage-hists", required_argument, 0, 213U},
@@ -208,12 +199,6 @@ parse_args(int argc, char* argv[]) {
       break;
     case 'd':
       debug::set_flags(optarg);
-      break;
-    case 'M':
-      sdram_lat_us = std::stod(optarg);
-      break;
-    case 'm':
-      sdram_burst_us = std::stod(optarg);
       break;
     case 'O':
       out_dir = optarg;
@@ -291,9 +276,6 @@ parse_args(int argc, char* argv[]) {
     case 207:
       freq_mhz = std::stoi(optarg);
       break;
-    case 208:
-      axi_ovhd_cyc = std::stoul(optarg);
-      break;
     case 211U:
       l1i_cwf = true;
       break;
@@ -321,24 +303,25 @@ parse_args(int argc, char* argv[]) {
     return 1;
   }
 
-  // Convert microsecond latencies to cycle counts.
-  //   cycles = ceil(lat_us * freq_mhz)
-  // At 1 GHz: 0.043 us x 1000 = 43 cycles.
-  auto us_to_cyc = [](double us, int mhz) -> tint_t {
-    return std::max<tint_t>(
-      1, static_cast<tint_t>(std::ceil(us * mhz)));
-  };
-  sdram_lat_cyc = us_to_cyc(sdram_lat_us, freq_mhz);
-  sdram_burst_cyc = us_to_cyc(sdram_burst_us, freq_mhz);
-
   return 0;
+}
+
+std::shared_ptr<Prefetcher>
+make_prefetcher(const std::string& type, const std::string& name) {
+  if (type == "nextline")
+    return std::make_shared<cacheSim::NextLinePrefetcher>(name);
+  if (type == "stride")
+    return std::make_shared<cacheSim::StridePrefetcher>(name);
+  if (type == "tagged")
+    return std::make_shared<cacheSim::TaggedPrefetcher>(name);
+  return nullptr;
 }
 
 std::unique_ptr<branchSim::BranchPred>
 create_bpu_core() {
   if (bpu_type == "bimodal") {
-    return std::make_unique<branchSim::BimodalPredictor>("BimodalBP",
-                                                         bpu_entries_pow2, 1);
+    return std::make_unique<branchSim::BimodalPredictor>(
+      "BimodalBP", bpu_entries_pow2, 1);
   } else if (bpu_type == "gshare") {
     size_t hist = ghr_bits > 0 ? ghr_bits : 12; // default 12-bit history
     return std::make_unique<branchSim::GSharePredictor>(
@@ -355,7 +338,8 @@ create_bpu_core() {
       size_t pos = 0;
       while (pos < s.size()) {
         size_t comma = s.find(',', pos);
-        if (comma == std::string::npos) comma = s.size();
+        if (comma == std::string::npos)
+          comma = s.size();
         hlens.push_back(std::stoi(s.substr(pos, comma - pos)));
         pos = comma + 1;
       }
@@ -382,8 +366,8 @@ create_btb() {
   // Match RTL: btbTagBits = min(AddrBits - btbIdxBits - 2, 16)
   constexpr size_t AddrBits = 32;
   size_t tag_bits = std::min(AddrBits - btb_entries_pow2 - 2, size_t{16});
-  return std::make_unique<branchSim::CompressedBTB>(
-    "BTB", btb_entries_pow2, tag_bits, 20, sram_dff);
+  return std::make_unique<branchSim::CompressedBTB>("BTB", btb_entries_pow2,
+                                                    tag_bits, 20, sram_dff);
 }
 
 std::unique_ptr<BranchUnit>
@@ -395,7 +379,8 @@ create_branch_unit() {
   }
   auto bpu = create_bpu_core();
   auto btb = create_btb();
-  return std::make_unique<BranchUnit>(std::move(bpu), std::move(btb), ras_depth);
+  return std::make_unique<BranchUnit>(std::move(bpu), std::move(btb),
+                                      ras_depth);
 }
 
 using json = nlohmann::ordered_json;
@@ -444,11 +429,9 @@ append_stats_json(json& root, size_t curr_cnt,
 
 inline void
 outdir_ensure(const std::string& dir) {
-  if (!dir.empty()) {
-    std::string cmd = "mkdir -p simout/" + dir;
-    [[maybe_unused]] int ret = system(cmd.c_str());
-    assert(!ret && "Cannot create output directory");
-  }
+  if (dir.empty())
+    return;
+  fs::create_directories(fs::path("simout") / dir);
 }
 
 inline void
@@ -477,14 +460,7 @@ main(int argc, char** argv) {
   auto core = std::make_unique<pipeSim::Pipeline>(
     "Core", ifq_size, branch_unit.get(), mmio_lat);
 
-  std::shared_ptr<cacheSim::Prefetcher> ipf = nullptr;
-  if (l1i_pref_type == "nextline") {
-    ipf = std::make_shared<cacheSim::NextLinePrefetcher>("iCache");
-  } else if (l1i_pref_type == "stride") {
-    ipf = std::make_shared<cacheSim::StridePrefetcher>("iCache");
-  } else if (l1i_pref_type == "tagged") {
-    ipf = std::make_shared<cacheSim::TaggedPrefetcher>("iCache");
-  }
+  auto ipf = make_prefetcher(l1i_pref_type, "iCache");
 
   auto icache = std::make_unique<cacheSim::PipeCache>(
     "iCache",
@@ -492,18 +468,11 @@ main(int argc, char** argv) {
     /* pipe depth */ l1i_pipe_depth, l1i_size, l1i_blksize, l1i_assoc, ipf,
     /* cache ID */ 0, sram_dff, /* write_back */ false, l1i_cwf,
     /* wb hit resp delay */ 1,
-    cacheSim::make_repl_policy(
-      l1i_repl, l1i_assoc, l1i_size / (l1i_blksize * l1i_assoc)));
+    cacheSim::make_repl_policy(l1i_repl, l1i_assoc,
+                               l1i_size / (l1i_blksize * l1i_assoc)));
   std::unique_ptr<cacheSim::CacheBase> dcache = nullptr;
   if (l1d_size > 0) {
-    std::shared_ptr<cacheSim::Prefetcher> dpf = nullptr;
-    if (l1d_pref_type == "stride") {
-      dpf = std::make_shared<cacheSim::StridePrefetcher>("dCache");
-    } else if (l1d_pref_type == "nextline") {
-      dpf = std::make_shared<cacheSim::NextLinePrefetcher>("dCache");
-    } else if (l1d_pref_type == "tagged") {
-      dpf = std::make_shared<cacheSim::TaggedPrefetcher>("dCache");
-    }
+    auto dpf = make_prefetcher(l1d_pref_type, "dCache");
     dcache = std::make_unique<cacheSim::PipeCache>(
       "dCache",
       /* host */ core.get(),
@@ -511,8 +480,8 @@ main(int argc, char** argv) {
       /* cache ID */ 1, sram_dff,
       /* write_back */ true, /* cwf */ false,
       /* wb hit resp delay */ 0,
-      cacheSim::make_repl_policy(
-        l1d_repl, l1d_assoc, l1d_size / (l1d_blksize * l1d_assoc)));
+      cacheSim::make_repl_policy(l1d_repl, l1d_assoc,
+                                 l1d_size / (l1d_blksize * l1d_assoc)));
   } else {
     if (stbuf_entries == 0) {
       dcache = std::make_unique<cacheSim::NoCache>("dNoCache",
@@ -523,24 +492,22 @@ main(int argc, char** argv) {
         "stBuf", stbuf_entries, static_cast<uint16_t>(1));
     }
   }
-  auto dmem_bypass = std::make_unique<cacheSim::NoCache>(
-    "dBypass", static_cast<uint16_t>(2));
+  auto dmem_bypass =
+    std::make_unique<cacheSim::NoCache>("dBypass", static_cast<uint16_t>(2));
   core->set_cache_ports(icache.get(), dcache.get(), dmem_bypass.get());
   pipeSim::Processor* proc = &(*core);
 
   // SoC mode: bank-aware SDRAM timing model.
-  auto sdram_model =
-      std::make_unique<memSim::SdramModel>(freq_mhz);
+  auto sdram_model = std::make_unique<memSim::SdramModel>(freq_mhz);
 
-  auto dev_sdram = std::make_unique<memSim::SdramRamDevice>(
-    "SDRAM", sdram_lat_cyc, sdram_burst_cyc, axi_ovhd_cyc,
-    sdram_model.get());
-  auto dev_sram = std::make_unique<memSim::ConstLatencyRamDevice>(
-    "SRAM", sram_lat);
-  auto dev_clint = std::make_unique<memSim::ConstLatencyRamDevice>(
-    "CLINT", sram_lat);
-  auto dev_other = std::make_unique<memSim::ConstLatencyRamDevice>(
-    "OTHER", mmio_lat);
+  auto dev_sdram =
+    std::make_unique<memSim::SdramRamDevice>("SDRAM", sdram_model.get());
+  auto dev_sram =
+    std::make_unique<memSim::ConstLatencyRamDevice>("SRAM", sram_lat);
+  auto dev_clint =
+    std::make_unique<memSim::ConstLatencyRamDevice>("CLINT", sram_lat);
+  auto dev_other =
+    std::make_unique<memSim::ConstLatencyRamDevice>("OTHER", mmio_lat);
 
   std::vector<memSim::RamDevice*> mem_devices{
     dev_sdram.get(), dev_sram.get(), dev_clint.get(), dev_other.get()};
@@ -556,8 +523,8 @@ main(int argc, char** argv) {
   };
 
   auto memory = std::make_unique<memSim::RAMArbiter>(
-    "memory", std::vector<CacheBase*>(
-                {icache.get(), dcache.get(), dmem_bypass.get()}),
+    "memory",
+    std::vector<CacheBase*>({icache.get(), dcache.get(), dmem_bypass.get()}),
     mem_devices, mem_map, /* default_device */ 3);
   icache->set_mem_port(memory.get());
   dcache->set_mem_port(memory.get());
@@ -568,8 +535,8 @@ main(int argc, char** argv) {
   dcache->set_cpu_side_handlers(cpu_rsp, cpu_ack);
   dmem_bypass->set_cpu_side_handlers(cpu_rsp, cpu_ack);
 
-  std::vector<SimObject*> simlist{memory.get(), dmem_bypass.get(),
-                                  dcache.get(), icache.get(),
+  std::vector<SimObject*> simlist{memory.get(),      dmem_bypass.get(),
+                                  dcache.get(),      icache.get(),
                                   branch_unit.get(), core.get()};
   if (ipf)
     simlist.push_back(ipf.get());
@@ -595,9 +562,8 @@ main(int argc, char** argv) {
   TraceSanitizer sanitizer_all; // cumulative (never resets)
 
   // NOTE: Bottom-up order. Mem -> Cache -> CPU
-  const std::vector<ClockedObject*> devlist{memory.get(), dmem_bypass.get(),
-                                            dcache.get(), icache.get(),
-                                            core.get()};
+  const std::vector<ClockedObject*> devlist{
+    memory.get(), dmem_bypass.get(), dcache.get(), icache.get(), core.get()};
 
   TraceInst inst;
   bool has_next = true;
@@ -671,8 +637,8 @@ main(int argc, char** argv) {
           dcache ? dcache->stats.miss_rate() : -1);
       }
       append_stats_json(root, dump_cnt++, simlist, sanitizer);
-      // Trace ROI convention: stop feeding new instructions after dump marker
-      // and only drain in-flight pipeline/cache traffic.
+      // Trace ROI convention: stop feeding new instructions after dump
+      // marker and only drain in-flight pipeline/cache traffic.
       stop_after_dump = true;
     }
   } while (!core->is_finished() && curr_tick() < max_ticks);

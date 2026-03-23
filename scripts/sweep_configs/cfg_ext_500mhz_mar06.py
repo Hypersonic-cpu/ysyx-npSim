@@ -73,11 +73,6 @@ bpu_axis = {
 # Same calibration as 1 GHz config; freq-mhz converts µs→cycles.
 default_conf = {
     "stbuf-entries":   "0",
-    "br-pen":          "7",
-    "axi-ovhd-cyc":    "4",
-    "sdram-lat-us":    "0.051",
-    "sdram-burst-us":  "0.024",
     "sram-lat":        "1",
-    "ifq-size":        "3",
     "freq-mhz":        "500",
 }

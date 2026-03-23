@@ -4,7 +4,6 @@
 #include "cacheSim/RamModel.hh"
 #include "defines/base.hh"
 #include "defines/interface.hh"
-#include "defines/mode_ctrl.hh"
 #include "defines/types.hh"
 #include <algorithm>
 #include <cassert>
@@ -110,59 +109,42 @@ private:
 
 class SdramRamDevice final : public RamDevice {
 public:
-  SdramRamDevice(const std::string& name, tint_t sdram_lat,
-                 tint_t sdram_burst, tint_t axi_ovhd = 0,
-                 SdramModel* sdram_model = nullptr)
+  explicit SdramRamDevice(const std::string& name, SdramModel* sdram_model)
       : RamDevice(name)
-      , sdram_lat_(sdram_lat)
-      , sdram_burst_(sdram_burst)
-      , axi_ovhd_(axi_ovhd)
-      , sdram_model_(sdram_model) {}
+      , sdram_model_(sdram_model) {
+    assert(sdram_model_ != nullptr);
+  }
 
   json
   config_json() const override {
     json j = RamDevice::config_json();
     j["type"] = "SdramRamDevice";
-    if (sdram_model_) {
-      j["sdram_model"] = sdram_model_->config_json();
-    } else {
-      j["sdram_lat_cyc"] = sdram_lat_;
-      j["sdram_burst_cyc"] = sdram_burst_;
-      j["axi_ovhd_cyc"] = axi_ovhd_;
-    }
+    j["sdram_model"] = sdram_model_->config_json();
     return j;
   }
 
   json
   stats_json() const override {
     json j = RamDevice::stats_json();
-    if (sdram_model_)
-      j["sdram_stats"] = sdram_model_->stats_json();
+    j["sdram_stats"] = sdram_model_->stats_json();
     return j;
   }
 
   void
   reset_stats() override {
     RamDevice::reset_stats();
-    if (sdram_model_)
-      sdram_model_->reset_stats();
+    sdram_model_->reset_stats();
   }
 
 protected:
   tint_t
   latency_impl(const MemTrans& req, tick_t now) override {
     assert(req.bst_len >= 1);
-    if (sdram_model_) {
-      return sdram_model_->access(req.addr, req.bst_len, req.mop == Write,
-                                  now, req.id);
-    }
-    return axi_ovhd_ + sdram_lat_ + (req.bst_len - 1) * sdram_burst_;
+    return sdram_model_->access(req.addr, req.bst_len, req.mop == Write, now,
+                                req.id);
   }
 
 private:
-  tint_t const sdram_lat_;
-  tint_t const sdram_burst_;
-  tint_t const axi_ovhd_;
   SdramModel* const sdram_model_;
 };
 

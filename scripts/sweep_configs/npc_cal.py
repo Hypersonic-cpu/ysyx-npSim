@@ -40,8 +40,4 @@ default_conf = {
     "l1d-size":       "0",
     "bpu-type":       "none",
     "stbuf-entries":  "0",
-    "br-pen":         "1",
-    "sdram-lat-us":   "0.045",
-    "sdram-burst-us": "0.010",
-    "ifq-size":       "3",
 }

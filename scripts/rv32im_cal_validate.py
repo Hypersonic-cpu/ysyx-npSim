@@ -30,15 +30,7 @@ SOC_TRACE = "tests/coremark-rv32im-soc.nptr.zst"
 IC_DEFAULT = {"size": 1024, "blk": 16, "assoc": 1}
 DC_DEFAULT = {"size": 1024, "blk": 16, "assoc": 1}
 
-# NPC mode timing (calibrated at 1 GHz; PMemBox is cycle-based,
-# so us values must be scaled by 1000/freq to keep cycle count)
-NPC_TIMING_CYCLES = {
-    "sdram-lat":      43,   # ceil(0.043 * 1000)
-    "sdram-burst":    16,   # ceil(0.016 * 1000)
-}
 NPC_TIMING_FIXED = {
-    "ifq-size":       "4",
-    "br-pen":         "1",
     "stbuf-entries":  "2",
 }
 
@@ -120,23 +112,12 @@ def build_npsim_cmd(mode, sweep, params, mhz):
     else:
         cmd += ["--bpu-type", "none"]
 
-    # Timing params
-    if mode == "npc":
-        # PMemBox latency is cycle-based; convert to us at freq
-        lat_us = NPC_TIMING_CYCLES["sdram-lat"] / mhz
-        burst_us = NPC_TIMING_CYCLES["sdram-burst"] / mhz
-        cmd += ["--sdram-lat-us", f"{lat_us:.6f}"]
-        cmd += ["--sdram-burst-us", f"{burst_us:.6f}"]
-        for k, v in NPC_TIMING_FIXED.items():
-            cmd += [f"--{k}", v]
-    else:
-        for k, v in SOC_TIMING.items():
-            cmd += [f"--{k}", v]
+    timing = NPC_TIMING_FIXED if mode == "npc" else SOC_TIMING
+    for k, v in timing.items():
+        cmd += [f"--{k}", v]
 
     # Mode and frequency
     cmd += ["--freq-mhz", str(mhz)]
-    if mode == "npc":
-        cmd.append("--npc-mode")
 
     tag = npsim_tag(mode, sweep, params, mhz)
     cmd += ["--outdir", tag, "--print-none"]

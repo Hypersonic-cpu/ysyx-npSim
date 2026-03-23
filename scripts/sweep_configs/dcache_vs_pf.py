@@ -34,5 +34,4 @@ default_conf = {
     "bpu-size":   "64",
     "btb-size":   "64",
     "ipf":        "nextline",
-    "br-pen":     "9",
 }

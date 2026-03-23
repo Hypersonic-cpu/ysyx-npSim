@@ -31,5 +31,4 @@ default_conf = {
     "l1i-assoc":      "1",
     "bpu-type":       "none",
     "stbuf-entries":  "2",
-    "br-pen":         "9",
 }

@@ -2,7 +2,6 @@
 #
 # 4×2 × 2 × 3 = 48 configs total.
 # Uses coremark-soc-ext trace and SoC-calibrated timing params.
-# Recalibrated Mar 2026: br-pen=7, axi-ovhd-cyc=4, ras-size=8.
 #   48-config mean |err| = 1.39%, max |err| = 3.46%.
 #
 # Run sweep (1 GHz):
@@ -78,16 +77,8 @@ bpu_axis = {
 
 # ── Global timing params (SoC-mode, recalibrated Mar 2026) ─────────────
 # stbuf-entries=0: StoreBuffer commented out in RTL (rvCore.scala)
-# br-pen=7: misprediction penalty incl. pipeline drain + iCache
-#           refill; calibrated across 48 configs (max err 3.5%)
-# axi-ovhd-cyc=4: AXI protocol overhead per memory transaction
 # sdram/sram: SoC-mode calibrated timing
 default_conf = {
     "stbuf-entries":   "0",
-    "br-pen":          "7",
-    "axi-ovhd-cyc":    "4",
-    "sdram-lat-us":    "0.051",
-    "sdram-burst-us":  "0.024",
     "sram-lat":        "1",
-    "ifq-size":        "3",
 }
