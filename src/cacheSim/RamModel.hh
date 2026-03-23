@@ -1,7 +1,10 @@
-// cacheSim/RamModel.hh
-// SoC SDRAM timing model derived from ysyxSoC/perip/sdram_axi_core.v.
-// It tracks open rows per bank and computes row-hit / miss / conflict
-// latency in SDRAM-device cycles before scaling back to CPU cycles.
+/**
+ * SoC SDRAM timing model derived from ysyxSoC/perip/sdram_axi_core.v.
+ *
+ * The model tracks open rows per bank and computes row-hit / miss /
+ * conflict latency in SDRAM-device cycles before scaling back to CPU
+ * cycles.
+ */
 #pragma once
 
 #include "defines/types.hh"
@@ -38,14 +41,12 @@ public:
   // Per-word cost: 2 dev cycles (READ+READ_WAIT or IDLE+WRITE0)
   static constexpr int PER_WORD = 2;
 
-  // ACTIVATE: 1 cycle + DELAY(T_RCD) = 1 + 2 = 3
   static constexpr int ACT_COST = 1 + T_RCD; // 3
-  // PRECHARGE: 1 cycle + DELAY(T_RP) = 1 + 2 = 3
-  static constexpr int PRE_COST = 1 + T_RP;  // 3
+  static constexpr int PRE_COST = 1; // request-visible row-conflict cost
 
   // Fixed CPU-visible wrapper turns after the burst train.
   static constexpr int RD_BASE = 2;
-  static constexpr int WR_BASE = 1;
+  static constexpr int WR_BASE = 0;
 
   explicit SdramModel(int cpu_freq_mhz)
       : freq_ratio_(cpu_freq_mhz / DEV_MHZ) {}

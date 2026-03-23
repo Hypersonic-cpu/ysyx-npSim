@@ -1,12 +1,11 @@
-// cacheSim/RamConn.hh
 #pragma once
 
 #include "areaSim/AreaEst.hh"
 #include "cacheSim/RamModel.hh"
 #include "defines/base.hh"
 #include "defines/interface.hh"
-#include "defines/types.hh"
 #include "defines/mode_ctrl.hh"
+#include "defines/types.hh"
 #include <algorithm>
 #include <cassert>
 #include <string>
@@ -154,8 +153,8 @@ protected:
   latency_impl(const MemTrans& req, tick_t now) override {
     assert(req.bst_len >= 1);
     if (sdram_model_) {
-      return sdram_model_->access(
-        req.addr, req.bst_len, req.mop == Write, now, req.id);
+      return sdram_model_->access(req.addr, req.bst_len, req.mop == Write,
+                                  now, req.id);
     }
     return axi_ovhd_ + sdram_lat_ + (req.bst_len - 1) * sdram_burst_;
   }
@@ -179,17 +178,13 @@ struct AddrMapEntry {
   }
 };
 
-// Memory arbiter: separate R/W channels, larger-id higher-priority.
-// Matches RTL AXIArbiter with independent read and write arbiters.
-// Request latency comes from address-mapped devices (SDRAM/SRAM/other).
-
+/** Address-mapped memory fabric with independent read/write channels. */
 class RAMArbiter : public ClockedObject {
   using MemTransPtr = std::unique_ptr<MemTrans>;
 
 public:
   // The order in hosts_ matters. The later one has higher priority.
-  RAMArbiter(const std::string& name,
-             const std::vector<Cache*>& hosts,
+  RAMArbiter(const std::string& name, const std::vector<Cache*>& hosts,
              const std::vector<RamDevice*>& devices,
              const std::vector<AddrMapEntry>& addr_map,
              size_t default_device = 0)

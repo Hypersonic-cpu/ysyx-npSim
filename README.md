@@ -167,7 +167,7 @@ The `23-Mar-2026` sweep uses a shared config source:
 ```bash
 cd $NPSIM_HOME
 python3 scripts/run_soc_cal.py \
-  --out-root 24-Mar-2026-Cal-r5-full \
+  --out-root 24-Mar-2026-Cal-r7-full \
   --jobs 8 \
   --benches cm2,dry2500 \
   --freqs 500,1000
@@ -178,7 +178,7 @@ This script is npSim-only. It never triggers RTL compile or RTL run.
 Outputs go to:
 
 ```text
-npsim/simout/24-Mar-2026-Cal-r5-full/
+npsim/simout/24-Mar-2026-Cal-r7-full/
   cm2-500MHz/<canonical-suffix>/
   cm2-1000MHz/<canonical-suffix>/
   dry2500-500MHz/<canonical-suffix>/
@@ -190,25 +190,25 @@ npsim/simout/24-Mar-2026-Cal-r5-full/
 ```bash
 cd $NPSIM_HOME
 python3 scripts/report_soc_cal.py \
-  --sim-root $NPSIM_HOME/simout/24-Mar-2026-Cal-r5-full \
+  --sim-root $NPSIM_HOME/simout/24-Mar-2026-Cal-r7-full \
   --rtl-root $NPC_HOME/ccout/23-Mar-2026-Cal
 ```
 
 Current summary:
 
-- `cm2-500MHz`: max `4.76%`
-- `cm2-1000MHz`: max `4.08%`
-- `dry2500-500MHz`: max `5.39%`
-- `dry2500-1000MHz`: max `9.57%`
+- `cm2-500MHz`: max `4.80%`
+- `cm2-1000MHz`: max `4.13%`
+- `dry2500-500MHz`: max `5.45%`
+- `dry2500-1000MHz`: max `5.44%`
 
 ### 3. Draw Figures
 
 ```bash
 cd $NPSIM_HOME
 python3 visual/plot_soc_cal_23mar.py \
-  --sim-root $NPSIM_HOME/simout/24-Mar-2026-Cal-r5-full \
+  --sim-root $NPSIM_HOME/simout/24-Mar-2026-Cal-r7-full \
   --rtl-root $NPC_HOME/ccout/23-Mar-2026-Cal \
-  --outdir $NPSIM_HOME/visual/plots/23-Mar-2026-Cal
+  --outdir $NPSIM_HOME/visual/plots/24-Mar-2026-Cal-r7
 ```
 
 Generated figures include:
@@ -219,14 +219,14 @@ Generated figures include:
 
 Generated today at:
 
-- `visual/plots/23-Mar-2026-Cal/`
+- `visual/plots/24-Mar-2026-Cal-r7/`
 
 ## Plotting Output
 
 The current plotting script writes:
 
 ```text
-visual/plots/23-Mar-2026-Cal/
+visual/plots/24-Mar-2026-Cal-r7/
   cm2-500MHz-group00-cache-breakdown.png
   cm2-500MHz-group01-cache-breakdown.png
   cm2-500MHz-group03-cache-breakdown.png

@@ -45,7 +45,6 @@ Pipeline::Pipeline(const std::string& name, size_t ifq_size, BranchUnit* bpu,
   assert(bpu && "BranchUnit must not be null");
 }
 
-// Main update: process stages back-to-front, then try fetch.
 void
 Pipeline::update_impl() {
 #ifndef NDEBUG
@@ -77,23 +76,7 @@ Pipeline::update_impl() {
   calc_sched();
 }
 
-// Fetch issue: send one request to iCache per cycle.
-//
-// Branch misprediction model (matches RTL FetchStage):
-//
-//  T+0: Branch enters IF.  We know it is mispredicted (from trace).
-//       The branch itself is issued to iCache normally.
-//       Set fetch_.wrong_path = true, fetch_.wrong_path_pc = pc+4.
-//
-//  T+1: IFU issues wrong-path fetch (pollutes iCache, matches RTL).
-//
-//  T+2: Branch reaches EX.  do_execute() triggers flush:
-//       - Flush all IFQ entries
-//       - Clear wrong-path state
-      //       - Set fetch_.resume_tick = T+2 + kBranchMissPenalty
-//
-//  T+2+penalty: First correct-path fetch issues to iCache.
-//
+/** Issue at most one iCache request per cycle. */
 void
 Pipeline::do_fetch_0() {
   if (curr_tick() < fetch_.resume_tick) {
@@ -106,17 +89,13 @@ Pipeline::do_fetch_0() {
   if (!imem->is_ready().first)
     return;
 
-  // earlyRedirect: after a correctly predicted taken branch, the
-  // IFU continues fetching sequential PCs for 2 cycles before the
-  // BPU redirect takes effect.  Matches RTL FetchStage where
-  // earlyRedirect fires 2 cycles after receipt (iCache 1cyc +
-  // BPU SyncReadMem 1cyc).
+  // Correctly predicted taken branches still fetch two sequential PCs
+  // before the redirect takes effect.
   if (fetch_.early_redir_remaining > 0) {
     imem->read_req(fetch_.early_redir_seq_pc);
     fetch_.resp_is_orphan.push_back(true);
     DPRINTF(Pipeline, " IF EarlyRedir PC=0x%08x (%d left)",
-            fetch_.early_redir_seq_pc,
-            fetch_.early_redir_remaining - 1);
+            fetch_.early_redir_seq_pc, fetch_.early_redir_remaining - 1);
     fetch_.early_redir_seq_pc += 4;
     fetch_.early_redir_remaining--;
     return;
@@ -134,7 +113,7 @@ Pipeline::do_fetch_0() {
     } else {
       if (fetch_queue_.full())
         return;
-      // BPU predicts on wrong-path PC (matches RTL SyncReadMem query)
+      // Wrong-path fetches still query the predictor and pollute iCache.
       auto wp_pred = bpu->predict(fetch_.wrong_path_pc);
       stats.wp_bpu_queries++;
 
@@ -150,10 +129,7 @@ Pipeline::do_fetch_0() {
       // Default next: sequential
       fetch_.wrong_path_pc += 4;
 
-      // 2-cycle redirect pipeline (matches RTL earlyRedirect):
-      //  T:   fetch X, BPU query X -> stage1
-      //  T+1: fetch X+4, stage1->stage2
-      //  T+2: fetch X+8, stage2 fires -> redirect to Y
+      // Redirect uses the same two-stage delay as the RTL early redirect.
       bool redirected_this_cycle = false;
       if (fetch_.wp_redirect_s2) {
         fetch_.wrong_path_pc = fetch_.wp_redirect_target_s2;
@@ -224,20 +200,13 @@ Pipeline::do_fetch_0() {
   imem->read_req(candidate->trace_inst.pc);
   fetch_.resp_is_orphan.push_back(false);
 
-  // TAGE timing model: TAGE result is 1 cycle later than bimodal.
-  // If TAGE overrode the bimodal direction (and BTB hit), the fetch
-  // based on bimodal is wrong; stall IFU for 1 cycle for the redirect.
-  // This is applied even when the overall prediction is accurate
-  // (TAGE cost still exists when it corrects bimodal).
+  // TAGE can redirect one cycle after the base predictor.
   if (pred.tage_overrode_bimodal) {
     fetch_.resume_tick = std::max(fetch_.resume_tick, curr_tick() + 2);
     DPRINTF(Pipeline, " IF TAGE-override stall PC=0x%08x", inst.pc);
   }
 
-  // earlyRedirect trigger: correctly predicted taken branch.
-  // RTL's IFU fetches 2 sequential PCs (PC+4, PC+8) before
-  // the BPU redirect takes effect.  These go through iCache
-  // (cache pollution) but results are discarded as orphans.
+  // Correctly predicted taken branches still issue two orphan fetches.
   if (accurate && pred.will_redirect) {
     fetch_.early_redir_remaining = 2;
     fetch_.early_redir_seq_pc = inst.pc + 4;
@@ -247,7 +216,6 @@ Pipeline::do_fetch_0() {
   fetch_queue_.push_back(std::move(candidate));
 }
 
-// Fetch stage 1: IFQ head to pipeline[Fetch]
 void
 Pipeline::do_fetch_1() {
   if (fetch_queue_.empty()) {
@@ -270,7 +238,6 @@ Pipeline::do_fetch_1() {
   fetch_queue_.pop_front();
 }
 
-// iCache response handler
 void
 Pipeline::handle_ifu_resp() {
   // Response ordering FIFO: pop front to determine if this response
@@ -290,7 +257,6 @@ Pipeline::handle_ifu_resp() {
   async_schedule(Fetch, curr_tick() + 1);
 }
 
-// Decode
 void
 Pipeline::do_decode() {
   const auto& trans = sim_pipe_.at(Fetch);
@@ -310,7 +276,8 @@ Pipeline::do_decode() {
   // M-extension scoreboard: only block next MUL/DIV instruction
   // when any MUL/DIV is in-flight.  ALU instructions proceed
   // freely (RAW deps handled by reg_ready below).
-  // Matches RTL Dispatcher: tgtReady = unitReady && Mux(isMD, !sbAnyBusy, true)
+  // Matches RTL Dispatcher: tgtReady = unitReady && Mux(isMD, !sbAnyBusy,
+  // true)
   if (inst.ext_op != trace::ExtNone) {
     if (sim_pipe_.at(IntMulExt) || sim_pipe_.at(IntDivExt)) {
       if (!lsu_active)
@@ -384,7 +351,6 @@ Pipeline::do_decode() {
   sim_pipe_.at(Decode) = std::move(sim_pipe_.at(Fetch));
 }
 
-// Execute
 void
 Pipeline::do_execute() {
   assert(stage_update_.at(Decode) <= curr_tick());
@@ -502,7 +468,6 @@ Pipeline::do_div_ext() {
   sim_pipe_.at(IntDivExt) = std::move(sim_pipe_.at(Decode));
 }
 
-// Memory: EXU path only.  MUL/DIV go directly to WriteBack.
 void
 Pipeline::do_memory() {
   auto& trans = sim_pipe_.at(Execute);
@@ -608,9 +573,6 @@ Pipeline::handle_lsu_resp() {
   sim_pipe_.at(Memory) = std::move(sim_pipe_.at(Execute));
 }
 
-// WriteBack: selects from Memory (EXU path), DivExt, or MulExt.
-// Priority: Memory > DIV > MUL, matching RTL Collector
-// (Collector.canMD = !aluSide.valid && !pendingALU).
 void
 Pipeline::do_writeback() {
   PipeStage src;
@@ -663,7 +625,6 @@ Pipeline::do_writeback() {
   schedule(WriteBack, curr_tick() + 1);
 }
 
-// Mem response dispatch
 void
 Pipeline::recv_mem_resp(CpuTrans trans) {
   auto id = trans.id;
@@ -694,7 +655,6 @@ Pipeline::ack_mem_avail(AckTrans ack) {
     assert(false && "No such ID");
 }
 
-// Register ready time update
 void
 Pipeline::update_reg_time(uint8_t rd, tick_t when) {
   if (rd)
@@ -717,8 +677,6 @@ Pipeline::update_reg_time(uint8_t rd, tick_t when) {
   assert(reg_ready_.at(0) == 0);
 }
 
-// False BTB hit: BPU predicted a non-branch as taken.
-// RTL EXU flushes and clears the BTB entry in this case.
 void
 Pipeline::flush_false_btb_hit(const Transaction& trans) {
   const auto& inst = trans.trace_inst;
@@ -734,14 +692,16 @@ Pipeline::flush_false_btb_hit(const Transaction& trans) {
     // Match RTL bhtWen behavior on non-branch false BTB hits:
     // updValid = predBtbHit, updTaken = false, updBtbHit = true.
     // This decrements BHT and prevents overly optimistic taken bias.
-    bpu->update(inst.pc, false, 0, false, false, true,
-                trans.br_pred, trans.br_mispred);
+    bpu->update(inst.pc, false, 0, false, false, true, trans.br_pred,
+                trans.br_mispred);
   }
   if (had_btb_hit && !trans.br_mispred) {
     // BTB false hit but BHT said not-taken -> no redirect, no flush.
     // Still clear the BTB entry (matches RTL).
-    DPRINTF(Pipeline, " EX NonBr SilentClear PC=0x%08x (false BTB hit,"
-            " no redirect)", inst.pc);
+    DPRINTF(Pipeline,
+            " EX NonBr SilentClear PC=0x%08x (false BTB hit,"
+            " no redirect)",
+            inst.pc);
     bpu->clear_btb_entry(inst.pc);
     return;
   }

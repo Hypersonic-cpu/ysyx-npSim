@@ -60,7 +60,6 @@ RAMArbiter::update_impl() {
       if (it->first != nullptr) {
         r_serving_id_ = it->first->id;
         it->first->lat = lat_of(it->first.get());
-        // +1: turnaround cycle between consecutive accesses
         auto start = curr_tick() + 1;
         r_busy_until_ = start + it->first->lat;
         DPRINTF(Mem, "R-ch picking [Read] @ %08x until T@ %lu",
@@ -94,7 +93,6 @@ RAMArbiter::update_impl() {
       if (it->second != nullptr) {
         w_serving_id_ = it->second->id;
         it->second->lat = lat_of(it->second.get());
-        // +1: turnaround cycle
         w_busy_until_ = curr_tick() + 1 + it->second->lat;
         DPRINTF(Mem, "W-ch picking [Write] @ %08x until T@ %lu",
                 it->second->addr, w_busy_until_);

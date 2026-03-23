@@ -61,20 +61,8 @@ protected:
   bool is_draining_;
 };
 
-// 5-stage in-order pipeline.
-//
-// Branch misprediction model (matches RTL FetchStage):
-//
-// At IF we already know the branch outcome from the trace.
-// If mispredicted, the IFU continues fetching wrong-path PCs
-// (polluting iCache) until the branch reaches EX stage where
-// the hardware flush occurs.  At that point the IFQ is flushed
-// and the IFU redirects to the correct target.
-//
-// FetchStage keeps issuing ar requests at sequential PCs until
-// ExecuteStage signals flushWire via fromEx.valid && brex.take,
-// which invalidates all validBuf entries and redirects pc.
-//
+/** 5-stage in-order core model. Wrong-path fetch continues until EX flush.
+ */
 class Pipeline final : public Processor {
 public:
   static constexpr tick_t kBranchMissPenalty = 1;
@@ -276,24 +264,39 @@ protected:
         : buf(cap)
         , cap_(cap) {}
 
-    bool empty() const noexcept { return cnt_ == 0; }
-    bool full() const noexcept { return cnt_ >= cap_; }
-    size_t size() const noexcept { return cnt_; }
-    size_t capacity() const noexcept { return cap_; }
+    bool
+    empty() const noexcept {
+      return cnt_ == 0;
+    }
+    bool
+    full() const noexcept {
+      return cnt_ >= cap_;
+    }
+    size_t
+    size() const noexcept {
+      return cnt_;
+    }
+    size_t
+    capacity() const noexcept {
+      return cap_;
+    }
 
-    void push_back(TransPtr p) {
+    void
+    push_back(TransPtr p) {
       assert(!full());
       buf[tail_] = std::move(p);
       tail_ = (tail_ + 1) % cap_;
       cnt_++;
     }
 
-    TransPtr& front() noexcept {
+    TransPtr&
+    front() noexcept {
       assert(!empty());
       return buf[head_];
     }
 
-    void pop_front() noexcept {
+    void
+    pop_front() noexcept {
       assert(!empty());
       buf[head_].reset();
       head_ = (head_ + 1) % cap_;
@@ -301,17 +304,22 @@ protected:
     }
 
     // Index access: at(0) = front, at(size-1) = back.
-    TransPtr& at(size_t i) noexcept { return buf[(head_ + i) % cap_]; }
+    TransPtr&
+    at(size_t i) noexcept {
+      return buf[(head_ + i) % cap_];
+    }
 
-    void clear() noexcept {
+    void
+    clear() noexcept {
       for (size_t i = 0; i < cnt_; i++)
         buf[(head_ + i) % cap_].reset();
       head_ = tail_ = cnt_ = 0;
     }
 
     // Find first entry satisfying predicate; returns nullptr if not found.
-    template<class Pred>
-    TransPtr* find_if_ptr(Pred&& pred) noexcept {
+    template <class Pred>
+    TransPtr*
+    find_if_ptr(Pred&& pred) noexcept {
       for (size_t i = 0; i < cnt_; i++) {
         auto& e = buf[(head_ + i) % cap_];
         if (pred(e))
@@ -467,9 +475,9 @@ private:
   // placeholder IFQ entries; responses are ordered by resp_is_orphan_.
   struct FetchState {
     bool wrong_path{false};
-    bool wp_flushed{false};   // true after EX flush; WP continues
-    addr_t wrong_path_pc{0};  // next wrong-path PC to fetch
-    tick_t resume_tick{0};    // first cycle IFU may fetch after flush
+    bool wp_flushed{false};  // true after EX flush; WP continues
+    addr_t wrong_path_pc{0}; // next wrong-path PC to fetch
+    tick_t resume_tick{0};   // first cycle IFU may fetch after flush
     // iCache response ordering FIFO: tracks whether each in-flight
     // iCache request is for a real IFQ entry (false) or a
     // wrong-path/orphan request (true).  Responses arrive in order.
