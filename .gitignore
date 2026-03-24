@@ -24,3 +24,5 @@ area/__pycache__/
 scripts/generated_sh/
 **/__pycache__/
 *.bak
+.DS_Store
+**/.DS_Store
