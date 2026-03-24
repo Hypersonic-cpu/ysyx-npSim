@@ -3,4 +3,4 @@
 	url = https://github.com/nlohmann/json.git
 [submodule "libs/cacti"]
 	path = libs/cacti
-	url = https://github.com/HewlettPackard/cacti.git
+	url = git@github.com:Hypersonic-cpu/ysyx-cacti-rv32.git
