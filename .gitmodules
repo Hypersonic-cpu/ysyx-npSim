@@ -1,6 +1,6 @@
 [submodule "libs/json"]
 	path = libs/json
-	url = /home/kong/ysyx-workbench/npc/libs/json
+	url = https://github.com/nlohmann/json.git
 [submodule "libs/cacti"]
 	path = libs/cacti
 	url = https://github.com/HewlettPackard/cacti.git
