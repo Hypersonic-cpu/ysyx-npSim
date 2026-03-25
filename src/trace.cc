@@ -10,6 +10,7 @@ namespace trace {
 TraceReader::TraceReader(const std::string& filename)
     : file_(popen(std::string("zstdcat -f " + filename).c_str(), "r")) {
   assert(file_ && "Failed to open trace\n");
+  setvbuf(file_, nullptr, _IOFBF, 1 << 20);
 }
 
 TraceReader::~TraceReader() {

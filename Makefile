@@ -16,7 +16,7 @@ SRCS_PMEM   := $(shell find "$(SRC_PATH)" -maxdepth 1 -name 'pmem.cc' -type f)
 
 
 CXX := clang++-22
-CXXFLAGS ?= -std=c++23 -stdlib=libc++ -O3 -flto -g -fPIC -I./src -Wall -Wno-reorder-ctor
+CXXFLAGS ?= -std=c++23 -stdlib=libc++ -O3 -flto -march=native -mtune=native -g0 -fPIC -I./src -Wall -Wno-reorder-ctor
 CXXFLAGS += -I ./libs/json/include
 CXXFLAGS += -I ./libs/stats_template
 CXXFLAGS += -D ACTIVE_MODE=1 $(DBG_FLAGS)
@@ -71,5 +71,4 @@ build/%.o: ./src/%.cc
 clean:
 	@echo $(OBJS)
 	rm -rf build/*
-
 

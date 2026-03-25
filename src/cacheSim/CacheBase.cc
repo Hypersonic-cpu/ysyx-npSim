@@ -126,19 +126,15 @@ CacheBase::handle_fill(CacheLine* blk, addr_t addr,
   blk->setTag(tagOf(addr));
   size_t si = setIndexOf(addr);
   auto& set = setsArr_.at(si);
-  size_t way = 0;
-  bool found = false;
   for (size_t i = 0; i < set.size(); ++i) {
     if (&set.at(i) == blk) {
-      way = i;
-      found = true;
-      break;
+      repl_policy_->onFill(si, i, *blk);
+      DPRINTF(Cache, "ReFill @ addr %08x", blk->getTag());
+      blk->setVecData(ret);
+      return;
     }
   }
-  assert(found);
-  repl_policy_->onFill(si, way, *blk);
-  DPRINTF(Cache, "ReFill @ addr %08x", blk->getTag());
-  blk->setVecData(ret);
+  assert(false && "Filled line not found in cache set");
 }
 
 bool
@@ -199,40 +195,39 @@ PipeCache::config_json() const {
 }
 
 void
-PipeCache::handle_hit(const PipePtr& bk, bool immediate) {
-  auto is_read = bk->mop == Read;
-  word_t& dt =
-    is_read ? bk->line->atAligned(offsetOf(bk->addr)) : bk->wrdata;
+PipeCache::handle_hit(CachePipeEntry& bk, bool immediate) {
+  auto is_read = bk.mop == Read;
+  word_t& dt = is_read ? bk.line->atAligned(offsetOf(bk.addr)) : bk.wrdata;
   blocked_until_ = curr_tick() + 1;
   if (is_read) {
     if (write_back_) {
       if (wb_hit_resp_delay_ == 0) {
-        cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
+        cpu_resp_recv_({bk.addr, dt, cache_id_, Read});
       } else {
-        sched_hit_resp_ = {bk->addr, dt, cache_id_, Read};
+        sched_hit_resp_ = {bk.addr, dt, cache_id_, Read};
         sched_hit_time_ = curr_tick() + wb_hit_resp_delay_;
       }
     } else {
       // iCache read hits return without an extra response register.
-      cpu_resp_recv_({bk->addr, dt, cache_id_, Read});
+      cpu_resp_recv_({bk.addr, dt, cache_id_, Read});
     }
   } else {
-    auto mask = CacheBase::strbExtend(bk->wrstrb);
-    dt = (~mask & dt) | (mask & bk->wrdata);
-    bk->line->setDirty();
+    auto mask = CacheBase::strbExtend(bk.wrstrb);
+    dt = (~mask & dt) | (mask & bk.wrdata);
+    bk.line->setDirty();
     if (write_back_) {
       if (wb_hit_resp_delay_ == 0) {
-        cpu_resp_recv_({bk->addr, dt, cache_id_, Write});
+        cpu_resp_recv_({bk.addr, dt, cache_id_, Write});
       } else {
-        sched_hit_resp_ = {bk->addr, dt, cache_id_, Write};
+        sched_hit_resp_ = {bk.addr, dt, cache_id_, Write};
         sched_hit_time_ = curr_tick() + wb_hit_resp_delay_;
       }
     } else {
-      cpu_resp_recv_({bk->addr, dt, cache_id_, Write});
+      cpu_resp_recv_({bk.addr, dt, cache_id_, Write});
     }
   }
   DPRINTF(Cache, "Cache Resp (%s) @ addr %08x data %08x",
-          bk->mop == Read ? "Read " : "Write", bk->addr, dt);
+          bk.mop == Read ? "Read " : "Write", bk.addr, dt);
 }
 
 void
@@ -268,7 +263,7 @@ PipeCache::update_impl() {
   // NOTE: Memory response must come before cache update
   // is_waiting_ is cleared on mem resp
   // Serve target
-  if (const auto& bk = pipe_.back()) {
+  if (auto& bk = pipe_.back()) {
     if (bk->line == nullptr) {
       save_evict_info(bk->addr);
       bk->line = access(bk->addr);
@@ -277,7 +272,7 @@ PipeCache::update_impl() {
     bool was_miss = is_replay_;
     is_replay_ = false;
     if (bk->line->isValid()) {
-      handle_hit(bk, was_miss);
+      handle_hit(*bk, was_miss);
       if (bk->mop == Read && !r_waiting_) {
         handle_prefetch(bk->addr, !was_miss);
       }
@@ -320,7 +315,7 @@ PipeCache::update_impl() {
   // Flush cache, next cycle available
   if (pending_flush_
       && std::all_of(pipe_.begin(), pipe_.end(), [](const PipePtr& p) {
-           return p == nullptr;
+           return !p.has_value();
          })) [[unlikely]] {
     handle_flush();
     return;
@@ -328,7 +323,7 @@ PipeCache::update_impl() {
 
   // Shift the pipeline
   for (size_t i = pipe_.size() - 1; i > 0; --i) {
-    pipe_[i] = std::move(pipe_[i - 1]);
+    pipe_[i] = take_pipe_entry(pipe_[i - 1]);
   }
 
   // Probe the new tail entry immediately so miss back-pressure matches RTL.
@@ -383,9 +378,8 @@ void
 PipeCache::read_req(addr_t addr) {
   DPRINTF(Cache, "Recv READ Req @ %u", addr);
   assert(is_shifted_);
-  assert(pipe_.front() == nullptr);
-  auto req = std::make_unique<CachePipeEntry>(addr, nullptr, Read);
-  pipe_.front() = std::move(req);
+  assert(!pipe_.front().has_value());
+  pipe_.front().emplace(addr, nullptr, Read);
   blocked_until_ = curr_tick() + 1;
   is_shifted_ = false;
 }
@@ -406,11 +400,8 @@ PipeCache::write_req(addr_t addr, word_t data, uint8_t mask) {
   if (write_back_) {
     // Write-back: route through pipe like a read
     assert(is_shifted_);
-    assert(pipe_.front() == nullptr);
-    auto req = std::make_unique<CachePipeEntry>(addr, nullptr, Write);
-    req->wrdata = data;
-    req->wrstrb = mask;
-    pipe_.front() = std::move(req);
+    assert(!pipe_.front().has_value());
+    pipe_.front().emplace(addr, nullptr, Write, mask, data);
     blocked_until_ = curr_tick() + 1;
     is_shifted_ = false;
   } else {
@@ -638,8 +629,7 @@ StoreBuffer::recv_mem_resp(MemTransPtr trans) {
                        .mop = Write};
       w_busy_ = false;
     } else {
-      auto& front = fifo_.front();
-      assert(front.addr == trans->addr);
+      assert(fifo_.front().addr == trans->addr);
       if (fifo_.size() == entries) {
         cpu_ack_recv_(AckTrans{.id = cache_id_, .mop = Write});
         DPRINTF(Cache, "StBuf slot available");

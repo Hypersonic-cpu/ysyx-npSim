@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <list>
 #include <memory>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -280,10 +281,25 @@ protected:
     MemRWOpt mop;
     uint8_t wrstrb;
     word_t wrdata;
-  };
-  using PipePtr = std::unique_ptr<CachePipeEntry>;
 
-  void handle_hit(const PipePtr& req, bool immediate = false);
+    CachePipeEntry(addr_t addr, CacheLine* line, MemRWOpt mop,
+                   uint8_t wrstrb = 0, word_t wrdata = 0) noexcept
+        : addr(addr)
+        , line(line)
+        , mop(mop)
+        , wrstrb(wrstrb)
+        , wrdata(wrdata) {}
+  };
+  using PipePtr = std::optional<CachePipeEntry>;
+
+  static PipePtr
+  take_pipe_entry(PipePtr& slot) noexcept {
+    auto tmp = std::move(slot);
+    slot.reset();
+    return tmp;
+  }
+
+  void handle_hit(CachePipeEntry& req, bool immediate = false);
   void handle_flush();
   // Write-back: save victim line's dirty data before access() invalidates
   void save_evict_info(addr_t req_addr);
